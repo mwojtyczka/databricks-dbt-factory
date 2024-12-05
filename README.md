@@ -56,10 +56,10 @@ make test
 hatch build
 
 # use hatch directly
-hatch run databricks_dbt_factory --manifest-path dbt_manifest/manifest.json
+hatch run databricks_dbt_factory --manifest-path tests/test_data/dbt_manifest.json --output-path job_definition.yaml --job-name dbt_job
 # or install locally and run
 pip install .
-databricks_dbt_factory --manifest-path dbt_manifest/manifest.json
+databricks_dbt_factory --manifest-path tests/test_data/dbt_manifest.json --output-path job_definition.yaml --job-name dbt_job
 ```
 
 ## License

@@ -30,7 +30,7 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
   "Topic :: Utilities",
 ]
-dependencies = []
+dependencies = ["PyYAML~=6.0.1"]
 
 [project.scripts]
 databricks_dbt_factory = "databricks_dbt_factory.main:main"

@@ -10,6 +10,7 @@ class Task:
 
     def to_dict(self) -> dict:
         """Converts the Task to a dictionary suitable for the job definition."""
+        # TODO parametrize catalog, schema, warehouse_id
         return {
             'task_key': self.task_key,
             'dbt_task': {
@@ -40,6 +41,7 @@ class DatabricksDbtFactory:
         """Generates a job definition dictionary from a DBT manifest."""
         tasks = self._generate_tasks(manifest)
 
+        # TODO parametrize git_source, queue, environments
         return {
             'name': job_name,
             'tasks': [task.to_dict() for task in tasks],

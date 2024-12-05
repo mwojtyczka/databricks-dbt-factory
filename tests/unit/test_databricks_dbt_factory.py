@@ -1,33 +1,48 @@
 import yaml
 import os
-from databricks_dbt_factory.DatabricksDbtFactory import DatabricksDbtFactory
-from databricks_dbt_factory.FileHandler import FileHandler
+from tempfile import NamedTemporaryFile
 
 
-def test_generate_job_definition():
-    file_handler = FileHandler()
-    manifest = file_handler.read_manifest("../test_data/manifest.json")
-    job_definition = DatabricksDbtFactory(file_handler).generate_job_definition(manifest, "dbt_job")
+def cleanup_file(file_path: str):
+    """Utility to remove files if they exist."""
+    if os.path.exists(file_path):
+        os.remove(file_path)
 
-    with open("../test_data/job_definition.yaml", "r") as file:
+
+# Tests
+def test_generate_job_definition(file_handler, databricks_dbt_factory):
+    """Test job definition generation without saving to file."""
+    dbt_manifest_path = "../test_data/manifest.json"
+    expected_job_definition_path = "../test_data/job_definition.yaml"
+
+    dbt_manifest = file_handler.read_dbt_manifest(dbt_manifest_path)
+    job_definition = databricks_dbt_factory.generate_job_definition(dbt_manifest, "dbt_job")
+
+    with open(expected_job_definition_path, "r", encoding="utf-8") as file:
         expected_job_definition = yaml.safe_load(file)
 
     assert job_definition == expected_job_definition
 
 
-def test_generate_job_definition_and_save():
-    factory = DatabricksDbtFactory(FileHandler())
-    actual_job_definition_path = "job_definition.yaml"
-    factory.generate_job_definition_and_save(
-        "../test_data/manifest.json", actual_job_definition_path, "dbt_job"
-    )
+def test_generate_job_definition_and_save(file_handler, databricks_dbt_factory):
+    """Test job definition generation and saving to file."""
+    dbt_manifest_path = "../test_data/manifest.json"
+    expected_job_definition_path = "../test_data/job_definition.yaml"
 
-    with open("../test_data/job_definition.yaml", "r") as file:
-        expected_job_definition = yaml.safe_load(file)
+    with NamedTemporaryFile(suffix=".yaml", delete=False) as temp_file:
+        actual_job_definition_path = temp_file.name
 
-    with open(actual_job_definition_path, "r") as file:
-        job_definition = yaml.safe_load(file)
+    try:
+        databricks_dbt_factory.generate_job_definition_and_save(
+            dbt_manifest_path, actual_job_definition_path, "dbt_job"
+        )
 
-    os.remove(actual_job_definition_path)
+        with open(expected_job_definition_path, "r", encoding="utf-8") as file:
+            expected_job_definition = yaml.safe_load(file)
 
-    assert job_definition == expected_job_definition
+        with open(actual_job_definition_path, "r", encoding="utf-8") as file:
+            job_definition = yaml.safe_load(file)
+
+        assert job_definition == expected_job_definition
+    finally:
+        cleanup_file(actual_job_definition_path)

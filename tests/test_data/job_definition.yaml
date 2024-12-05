@@ -3,7 +3,8 @@ tasks:
 - task_key: model_dbt_demo_diamonds_list_colors
   dbt_task:
     commands:
-    - dbt run --select model.dbt_demo.diamonds_list_colors --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select diamonds_list_colors --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -14,7 +15,8 @@ tasks:
 - task_key: test_dbt_demo_diamonds_list_colors_test
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.diamonds_list_colors_test --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select diamonds_list_colors_test --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -25,7 +27,8 @@ tasks:
 - task_key: model_dbt_demo_diamonds_prices
   dbt_task:
     commands:
-    - dbt run --select model.dbt_demo.diamonds_prices --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select diamonds_prices --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -35,7 +38,8 @@ tasks:
 - task_key: model_dbt_demo_diamonds_four_cs
   dbt_task:
     commands:
-    - dbt run --select model.dbt_demo.diamonds_four_cs --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select diamonds_four_cs --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -45,7 +49,8 @@ tasks:
 - task_key: model_dbt_demo_zzz_game_details
   dbt_task:
     commands:
-    - dbt run --select model.dbt_demo.zzz_game_details --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select zzz_game_details --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -55,7 +60,8 @@ tasks:
 - task_key: test_dbt_demo_zzz_game_details_check_scores
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.zzz_game_details_check_scores --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select zzz_game_details_check_scores --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -66,7 +72,8 @@ tasks:
 - task_key: test_dbt_demo_zzz_game_details_check_dates
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.zzz_game_details_check_dates --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select zzz_game_details_check_dates --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -77,7 +84,8 @@ tasks:
 - task_key: test_dbt_demo_unique_zzz_game_details_game_id_80431e7218
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.unique_zzz_game_details_game_id.80431e7218 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select unique_zzz_game_details_game_id --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -88,7 +96,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_game_details_game_id_3b5747f905
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_game_details_game_id.3b5747f905 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_game_details_game_id --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -99,7 +108,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_game_details_home_a99d25edd5
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_game_details_home.a99d25edd5 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_game_details_home --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -110,7 +120,8 @@ tasks:
 - task_key: test_dbt_demo_accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle_3771faef40
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle.3771faef40 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -121,7 +132,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_game_details_visitor_990a91372e
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_game_details_visitor.990a91372e --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_game_details_visitor --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -132,7 +144,8 @@ tasks:
 - task_key: test_dbt_demo_accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle_f0c81c502d
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle.f0c81c502d --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -143,7 +156,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_game_details_home_score_8c55a8fe39
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_game_details_home_score.8c55a8fe39 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_game_details_home_score --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -154,7 +168,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_game_details_visitor_score_f31e89be7f
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_game_details_visitor_score.f31e89be7f --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_game_details_visitor_score --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -165,7 +180,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_game_details_winner_7f08e737be
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_game_details_winner.7f08e737be --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_game_details_winner --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -176,7 +192,8 @@ tasks:
 - task_key: test_dbt_demo_accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle_344bd88c4c
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle.344bd88c4c --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -187,7 +204,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_game_details_date_a9f3a56f68
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_game_details_date.a9f3a56f68 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_game_details_date --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -198,7 +216,8 @@ tasks:
 - task_key: model_dbt_demo_second_dbt_model
   dbt_task:
     commands:
-    - dbt run --select model.dbt_demo.second_dbt_model --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select second_dbt_model --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -209,7 +228,8 @@ tasks:
 - task_key: test_dbt_demo_unique_second_dbt_model_id_3d7f6966a4
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.unique_second_dbt_model_id.3d7f6966a4 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select unique_second_dbt_model_id --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -220,7 +240,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_second_dbt_model_id_c791c712a2
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_second_dbt_model_id.c791c712a2 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_second_dbt_model_id --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -231,7 +252,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_second_dbt_model_amount_usd_28ae55e16f
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_second_dbt_model_amount_usd.28ae55e16f --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_second_dbt_model_amount_usd --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -242,7 +264,8 @@ tasks:
 - task_key: model_dbt_demo_first_dbt_model
   dbt_task:
     commands:
-    - dbt run --select model.dbt_demo.first_dbt_model --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select first_dbt_model --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -252,7 +275,8 @@ tasks:
 - task_key: test_dbt_demo_unique_first_dbt_model_id_9dda05743e
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.unique_first_dbt_model_id.9dda05743e --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select unique_first_dbt_model_id --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -263,7 +287,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_first_dbt_model_id_bd8d25d061
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_first_dbt_model_id.bd8d25d061 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_first_dbt_model_id --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -274,7 +299,8 @@ tasks:
 - task_key: model_dbt_demo_zzz_win_loss_records
   dbt_task:
     commands:
-    - dbt run --select model.dbt_demo.zzz_win_loss_records --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select zzz_win_loss_records --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -285,7 +311,8 @@ tasks:
 - task_key: test_dbt_demo_zzz_win_loss_records_check_records
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.zzz_win_loss_records_check_records --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select zzz_win_loss_records_check_records --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -296,7 +323,8 @@ tasks:
 - task_key: test_dbt_demo_unique_zzz_win_loss_records_team_b989062105
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.unique_zzz_win_loss_records_team.b989062105 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select unique_zzz_win_loss_records_team --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -307,7 +335,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_win_loss_records_team_9a18f33f86
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_win_loss_records_team.9a18f33f86 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_win_loss_records_team --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -318,7 +347,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_win_loss_records_wins_f6815357fe
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_win_loss_records_wins.f6815357fe --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_win_loss_records_wins --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default
@@ -329,7 +359,8 @@ tasks:
 - task_key: test_dbt_demo_not_null_zzz_win_loss_records_losses_82bf4ea601
   dbt_task:
     commands:
-    - dbt test --select test.dbt_demo.not_null_zzz_win_loss_records_losses.82bf4ea601 --target dev --profiles-dir .
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_win_loss_records_losses --target dev --profiles-dir .
     project_directory: ''
     catalog: main
     schema: default

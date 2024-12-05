@@ -3,10 +3,10 @@ import yaml
 
 
 class FileHandler:
-    """Handles reading and writing files for manifests and job definitions."""
+    """Handles reading and writing files for dbt manifests and databricks job definitions."""
 
     @staticmethod
-    def read_manifest(path: str) -> dict:
+    def read_dbt_manifest(path: str) -> dict:
         """
         Reads a JSON manifest file and returns its content as a dictionary.
 

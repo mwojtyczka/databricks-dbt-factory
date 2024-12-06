@@ -3,10 +3,11 @@ from databricks_dbt_factory.FileHandler import FileHandler
 
 class Task:
     """Represents a task in the Databricks job definition."""
-    def __init__(self, task_key: str, dbt_command: list[str], depends_on: list[str]):
+    def __init__(self, task_key: str, dbt_commands: list[str], depends_on: list[str] = []):
         self.task_key = task_key
-        self.dbt_command = dbt_command
+        self.dbt_commands = dbt_commands
         self.depends_on = depends_on
+        # TODO option to disable data tests
 
     def to_dict(self) -> dict:
         """Converts the Task to a dictionary suitable for the job definition."""
@@ -14,7 +15,7 @@ class Task:
         return {
             'task_key': self.task_key,
             'dbt_task': {
-                'commands': self.dbt_command,
+                'commands': self.dbt_commands,
                 'project_directory': "",
                 'catalog': 'main',
                 'schema': 'default',
@@ -52,46 +53,56 @@ class DatabricksDbtFactory:
 
     def _generate_tasks(self, manifest: dict) -> list[Task]:
         """Generates a list of tasks based on the DBT manifest."""
-        models = manifest.get('nodes', {})
-        tests = manifest.get('nodes', {})
-
+        nodes = manifest.get('nodes', {})
         tasks = []
 
-        for model_name, model_info in models.items():
-            if model_info['resource_type'] != 'model':
+        for name, info in nodes.items():
+
+            if info['resource_type'] == 'seed':
+                test_task = self._generate_seed_task(name)
+                tasks.append(test_task)
+
+            if info['resource_type'] != 'model':
                 continue
 
-            task_key = self._clean_name(model_name)
-            depends_on = self._get_model_dependencies(model_info)
-            dbt_command = [
+            task_key = self._clean_name(name)
+            depends_on = self._get_model_dependencies(info)
+            dbt_commands = [
                 "dbt deps --target dev --profiles-dir .",
-                f"dbt run --select {model_info['name']} --target dev --profiles-dir ."
+                f"dbt run --select {info['name']} --target dev --profiles-dir ."
             ]
 
-            model_task = Task(task_key, dbt_command, depends_on)
+            model_task = Task(task_key, dbt_commands, depends_on)
             tasks.append(model_task)
 
             # Add corresponding test tasks
-            test_tasks = self._generate_test_tasks(model_name, tests, task_key)
+            test_tasks = self._generate_test_tasks(name, nodes, task_key)
             tasks.extend(test_tasks)
 
         return tasks
 
-    def _generate_test_tasks(self, model_name: str, tests: dict, model_task_key: str) -> list[Task]:
+    def _generate_test_tasks(self, model_name: str, nodes: dict, model_task_key: str) -> list[Task]:
         """Generates test tasks for a specific model."""
-        test_tasks = []
-
-        for test_name, test_info in tests.items():
-            if test_info['resource_type'] == 'test' and model_name in test_info.get('depends_on', {}).get('nodes', []):
-                test_key = self._clean_name(test_name)
+        tasks = []
+        for name, info in nodes.items():
+            if info['resource_type'] == 'test' and model_name in info.get('depends_on', {}).get('nodes', []):
                 dbt_command = [
                     "dbt deps --target dev --profiles-dir .",
-                    f"dbt test --select {test_info['name']} --target dev --profiles-dir ."
+                    f"dbt test --select {info['name']} --target dev --profiles-dir ."
                 ]
+                test_key = self._clean_name(name)
                 test_task = Task(test_key, dbt_command, [model_task_key])
-                test_tasks.append(test_task)
+                tasks.append(test_task)
+        return tasks
 
-        return test_tasks
+    def _generate_seed_task(self, name: str) -> Task:
+        """Generates test tasks for a specific model."""
+        dbt_command = [
+            "dbt deps --target dev --profiles-dir .",
+            f"dbt seed --select {name} --target dev --profiles-dir ."
+        ]
+        seed_key = self._clean_name(name)
+        return Task(seed_key, dbt_command)
 
     @staticmethod
     def _clean_name(name: str) -> str:
@@ -102,8 +113,9 @@ class DatabricksDbtFactory:
     def _get_model_dependencies(model_info: dict) -> list[str]:
         """Gets the dependencies of a model."""
         dependencies = model_info.get('depends_on', {}).get('nodes', [])
-        # TODO handle seeds, snapshots, sources, analyses dependencies
-        return [dep.replace('.', '_') for dep in dependencies if dep.startswith('model.')]
+        # TODO handle snapshots, analyses dependencies
+        # TODO run dependent models only after data tests pass
+        return [dep.replace('.', '_') for dep in dependencies if dep.startswith('model.') or dep.startswith('seed.')]
 
     @staticmethod
     def _get_git_source() -> dict:

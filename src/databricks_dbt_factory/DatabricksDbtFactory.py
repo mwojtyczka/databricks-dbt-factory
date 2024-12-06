@@ -10,12 +10,13 @@ class DatabricksDbtFactory:
         self.file_handler = file_handler
         self.task_factories = task_factories
 
-    def create_job_tasks_and_update(self, manifest_path: str, job_definition_path: str,
-                                    destgination_job_definition_path: str | None = None):
+    def create_job_tasks_and_update(
+        self, manifest_path: str, job_definition_path: str, destination_job_definition_path: str | None = None
+    ):
         """Generates tasks for Databricks Job from a DBT manifest and update it in the existing job definition file."""
         manifest = self.file_handler.read_dbt_manifest(manifest_path)
         tasks = self.create_job_tasks(manifest)
-        self.file_handler.replace_tasks_in_yaml(job_definition_path, tasks, destgination_job_definition_path)
+        self.file_handler.replace_tasks_in_yaml(job_definition_path, tasks, destination_job_definition_path)
 
     def create_job_tasks(self, manifest: dict) -> list[dict]:
         """Generates tasks for Databricks Job from a DBT manifest."""

@@ -14,15 +14,18 @@ from databricks_dbt_factory.TaskFactory import (
 def main():
     parser = argparse.ArgumentParser(description="Generate Databricks job definition from dbt manifest.")
     parser.add_argument("--manifest-path", type=str, help="Path to the manifest file", required=True)
-    parser.add_argument("--job-definition-path", type=str, help="Path to the destination job definition file",
-                        required=True)
+    parser.add_argument(
+        "--job-definition-path", type=str, help="Path to the destination job definition file", required=True
+    )
     parser.add_argument("--target", type=str, help="dbt target to use", required=False, default="dev")
-    parser.add_argument("--warehouse_id", type=str, help="SQL Warehouse to run dbt models on", required=False,
-                        default=None)
+    parser.add_argument(
+        "--warehouse_id", type=str, help="SQL Warehouse to run dbt models on", required=False, default=None
+    )
     parser.add_argument("--profiles-dir", type=str, help="dbt profile location", required=False, default=".")
     parser.add_argument("--extra-dbt-options", type=str, help="additional dbt options", required=False, default="")
-    parser.add_argument("--run-tests", type=bool, help="Whether to run data tests after the model", required=False,
-                        default=True)
+    parser.add_argument(
+        "--run-tests", type=bool, help="Whether to run data tests after the model", required=False, default=True
+    )
     args = parser.parse_args()
 
     file_handler = FileHandler()

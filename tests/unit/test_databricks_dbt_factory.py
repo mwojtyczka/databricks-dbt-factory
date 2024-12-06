@@ -42,7 +42,8 @@ def test_generate(file_handler, databricks_dbt_factory):
     """Test job definition generation and saving to file."""
     dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"
     job_definition_path = BASE_PATH + "/test_data/job_definition_template.yaml"
-    destgination_job_definition_path = "job_definition.yaml"
+    destination_job_definition_path = "job_definition.yaml"
 
-    databricks_dbt_factory.create_job_tasks_and_update(dbt_manifest_path, job_definition_path,
-                                                       destgination_job_definition_path)
+    databricks_dbt_factory.create_job_tasks_and_update(
+        dbt_manifest_path, job_definition_path, destination_job_definition_path
+    )

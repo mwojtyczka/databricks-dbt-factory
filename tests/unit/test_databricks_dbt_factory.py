@@ -46,3 +46,12 @@ def test_generate_job_definition_and_save(file_handler, databricks_dbt_factory):
         assert job_definition == expected_job_definition
     finally:
         cleanup_file(actual_job_definition_path)
+
+def test_generate(file_handler, databricks_dbt_factory):
+    """Test job definition generation and saving to file."""
+    dbt_manifest_path = "../test_data/manifest.json"
+    actual_job_definition_path = "job_definition.yaml"
+
+    databricks_dbt_factory.generate_job_definition_and_save(
+        dbt_manifest_path, actual_job_definition_path, "dbt_job"
+    )

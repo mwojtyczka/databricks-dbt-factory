@@ -35,18 +35,6 @@ tasks:
     warehouse_id: 475b94ddc7cd5211
   environment_key: Default
   depends_on: []
-- task_key: model_dbt_demo_country
-  dbt_task:
-    commands:
-    - dbt deps --target dev --profiles-dir .
-    - dbt run --select country --target dev --profiles-dir .
-    project_directory: ''
-    catalog: main
-    schema: default
-    warehouse_id: 475b94ddc7cd5211
-  environment_key: Default
-  depends_on:
-  - task_key: seed_dbt_demo_country_codes
 - task_key: model_dbt_demo_diamonds_four_cs
   dbt_task:
     commands:
@@ -225,78 +213,6 @@ tasks:
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
-- task_key: model_dbt_demo_zzz_win_loss_records
-  dbt_task:
-    commands:
-    - dbt deps --target dev --profiles-dir .
-    - dbt run --select zzz_win_loss_records --target dev --profiles-dir .
-    project_directory: ''
-    catalog: main
-    schema: default
-    warehouse_id: 475b94ddc7cd5211
-  environment_key: Default
-  depends_on:
-  - task_key: model_dbt_demo_zzz_game_details
-- task_key: test_dbt_demo_zzz_win_loss_records_check_records
-  dbt_task:
-    commands:
-    - dbt deps --target dev --profiles-dir .
-    - dbt test --select zzz_win_loss_records_check_records --target dev --profiles-dir .
-    project_directory: ''
-    catalog: main
-    schema: default
-    warehouse_id: 475b94ddc7cd5211
-  environment_key: Default
-  depends_on:
-  - task_key: model_dbt_demo_zzz_win_loss_records
-- task_key: test_dbt_demo_unique_zzz_win_loss_records_team_b989062105
-  dbt_task:
-    commands:
-    - dbt deps --target dev --profiles-dir .
-    - dbt test --select unique_zzz_win_loss_records_team --target dev --profiles-dir .
-    project_directory: ''
-    catalog: main
-    schema: default
-    warehouse_id: 475b94ddc7cd5211
-  environment_key: Default
-  depends_on:
-  - task_key: model_dbt_demo_zzz_win_loss_records
-- task_key: test_dbt_demo_not_null_zzz_win_loss_records_team_9a18f33f86
-  dbt_task:
-    commands:
-    - dbt deps --target dev --profiles-dir .
-    - dbt test --select not_null_zzz_win_loss_records_team --target dev --profiles-dir .
-    project_directory: ''
-    catalog: main
-    schema: default
-    warehouse_id: 475b94ddc7cd5211
-  environment_key: Default
-  depends_on:
-  - task_key: model_dbt_demo_zzz_win_loss_records
-- task_key: test_dbt_demo_not_null_zzz_win_loss_records_wins_f6815357fe
-  dbt_task:
-    commands:
-    - dbt deps --target dev --profiles-dir .
-    - dbt test --select not_null_zzz_win_loss_records_wins --target dev --profiles-dir .
-    project_directory: ''
-    catalog: main
-    schema: default
-    warehouse_id: 475b94ddc7cd5211
-  environment_key: Default
-  depends_on:
-  - task_key: model_dbt_demo_zzz_win_loss_records
-- task_key: test_dbt_demo_not_null_zzz_win_loss_records_losses_82bf4ea601
-  dbt_task:
-    commands:
-    - dbt deps --target dev --profiles-dir .
-    - dbt test --select not_null_zzz_win_loss_records_losses --target dev --profiles-dir .
-    project_directory: ''
-    catalog: main
-    schema: default
-    warehouse_id: 475b94ddc7cd5211
-  environment_key: Default
-  depends_on:
-  - task_key: model_dbt_demo_zzz_win_loss_records
 - task_key: model_dbt_demo_second_dbt_model
   dbt_task:
     commands:
@@ -391,6 +307,114 @@ tasks:
     warehouse_id: 475b94ddc7cd5211
   environment_key: Default
   depends_on: []
+- task_key: model_dbt_demo_changed_country
+  dbt_task:
+    commands:
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select changed_country --target dev --profiles-dir .
+    project_directory: ''
+    catalog: main
+    schema: default
+    warehouse_id: 475b94ddc7cd5211
+  environment_key: Default
+  depends_on:
+  - task_key: snapshot_dbt_demo_country_snapshot
+- task_key: model_dbt_demo_country
+  dbt_task:
+    commands:
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select country --target dev --profiles-dir .
+    project_directory: ''
+    catalog: main
+    schema: default
+    warehouse_id: 475b94ddc7cd5211
+  environment_key: Default
+  depends_on:
+  - task_key: seed_dbt_demo_country_codes
+- task_key: snapshot_dbt_demo_country_snapshot
+  dbt_task:
+    commands:
+    - dbt deps --target dev --profiles-dir .
+    - dbt snapshot --select snapshot.dbt_demo.country_snapshot --target dev --profiles-dir .
+    project_directory: ''
+    catalog: main
+    schema: default
+    warehouse_id: 475b94ddc7cd5211
+  environment_key: Default
+  depends_on:
+  - task_key: model_dbt_demo_country
+- task_key: model_dbt_demo_zzz_win_loss_records
+  dbt_task:
+    commands:
+    - dbt deps --target dev --profiles-dir .
+    - dbt run --select zzz_win_loss_records --target dev --profiles-dir .
+    project_directory: ''
+    catalog: main
+    schema: default
+    warehouse_id: 475b94ddc7cd5211
+  environment_key: Default
+  depends_on:
+  - task_key: model_dbt_demo_zzz_game_details
+- task_key: test_dbt_demo_zzz_win_loss_records_check_records
+  dbt_task:
+    commands:
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select zzz_win_loss_records_check_records --target dev --profiles-dir .
+    project_directory: ''
+    catalog: main
+    schema: default
+    warehouse_id: 475b94ddc7cd5211
+  environment_key: Default
+  depends_on:
+  - task_key: model_dbt_demo_zzz_win_loss_records
+- task_key: test_dbt_demo_unique_zzz_win_loss_records_team_b989062105
+  dbt_task:
+    commands:
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select unique_zzz_win_loss_records_team --target dev --profiles-dir .
+    project_directory: ''
+    catalog: main
+    schema: default
+    warehouse_id: 475b94ddc7cd5211
+  environment_key: Default
+  depends_on:
+  - task_key: model_dbt_demo_zzz_win_loss_records
+- task_key: test_dbt_demo_not_null_zzz_win_loss_records_team_9a18f33f86
+  dbt_task:
+    commands:
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_win_loss_records_team --target dev --profiles-dir .
+    project_directory: ''
+    catalog: main
+    schema: default
+    warehouse_id: 475b94ddc7cd5211
+  environment_key: Default
+  depends_on:
+  - task_key: model_dbt_demo_zzz_win_loss_records
+- task_key: test_dbt_demo_not_null_zzz_win_loss_records_wins_f6815357fe
+  dbt_task:
+    commands:
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_win_loss_records_wins --target dev --profiles-dir .
+    project_directory: ''
+    catalog: main
+    schema: default
+    warehouse_id: 475b94ddc7cd5211
+  environment_key: Default
+  depends_on:
+  - task_key: model_dbt_demo_zzz_win_loss_records
+- task_key: test_dbt_demo_not_null_zzz_win_loss_records_losses_82bf4ea601
+  dbt_task:
+    commands:
+    - dbt deps --target dev --profiles-dir .
+    - dbt test --select not_null_zzz_win_loss_records_losses --target dev --profiles-dir .
+    project_directory: ''
+    catalog: main
+    schema: default
+    warehouse_id: 475b94ddc7cd5211
+  environment_key: Default
+  depends_on:
+  - task_key: model_dbt_demo_zzz_win_loss_records
 git_source:
   git_url: https://github.com/mwojtyczka/dbt-demo.git
   git_provider: gitHub

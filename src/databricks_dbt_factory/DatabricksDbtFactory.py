@@ -59,27 +59,35 @@ class DatabricksDbtFactory:
         for name, info in nodes.items():
 
             if info['resource_type'] == 'seed':
+                # seeds don't have any dependencies
                 test_task = self._generate_seed_task(name)
                 tasks.append(test_task)
 
-            if info['resource_type'] != 'model':
-                continue
+            if info['resource_type'] == 'snapshot':
+                # snapshots can have models and sources as dependencies
+                depends_on = self._get_snapshot_dependencies(info)
+                test_task = self._generate_snapshot_task(name, depends_on)
+                tasks.append(test_task)
 
-            task_key = self._clean_name(name)
-            depends_on = self._get_model_dependencies(info)
-            dbt_commands = [
-                "dbt deps --target dev --profiles-dir .",
-                f"dbt run --select {info['name']} --target dev --profiles-dir ."
-            ]
+            if info['resource_type'] == 'model':
+                # models can have dependencies to other models, tests and snapshots
+                depends_on = self._get_model_dependencies(info)
+                task_key = self._clean_name(name)
+                model_task = self._generate_model_task(info['name'], task_key, depends_on)
+                tasks.append(model_task)
 
-            model_task = Task(task_key, dbt_commands, depends_on)
-            tasks.append(model_task)
-
-            # Add corresponding test tasks
-            test_tasks = self._generate_test_tasks(name, nodes, task_key)
-            tasks.extend(test_tasks)
+                # add corresponding test tasks
+                test_tasks = self._generate_test_tasks(name, nodes, task_key)
+                tasks.extend(test_tasks)
 
         return tasks
+
+    def _generate_model_task(self, name, task_key, depends_on):
+        dbt_commands = [
+            "dbt deps --target dev --profiles-dir .",
+            f"dbt run --select {name} --target dev --profiles-dir ."
+        ]
+        return Task(task_key, dbt_commands, depends_on)
 
     def _generate_test_tasks(self, model_name: str, nodes: dict, model_task_key: str) -> list[Task]:
         """Generates test tasks for a specific model."""
@@ -95,8 +103,32 @@ class DatabricksDbtFactory:
                 tasks.append(test_task)
         return tasks
 
-    def _generate_seed_task(self, name: str) -> Task:
+    def _generate_snapshot_tasks(self, model_name: str, nodes: dict, model_task_key: str) -> list[Task]:
         """Generates test tasks for a specific model."""
+        tasks = []
+        for name, info in nodes.items():
+            if info['resource_type'] == 'snapshot' and model_name in info.get('depends_on', {}).get('nodes', []):
+                dbt_command = [
+                    "dbt deps --target dev --profiles-dir .",
+                    f"dbt snapshot --select {info['name']} --target dev --profiles-dir ."
+                ]
+                snapshot_key = self._clean_name(name)
+                snapshot_task = Task(snapshot_key, dbt_command, [model_task_key])
+                tasks.append(snapshot_task)
+        return tasks
+
+    def _generate_snapshot_task(self, name: str, depends_on: list[str]) -> Task:
+        """Generates snapshot tasks for a specific model."""
+        dbt_command = [
+            "dbt deps --target dev --profiles-dir .",
+            f"dbt snapshot --select {name} --target dev --profiles-dir ."
+        ]
+        seed_key = self._clean_name(name)
+        return Task(seed_key, dbt_command, depends_on)
+
+
+    def _generate_seed_task(self, name: str) -> Task:
+        """Generates seed tasks for a specific model."""
         dbt_command = [
             "dbt deps --target dev --profiles-dir .",
             f"dbt seed --select {name} --target dev --profiles-dir ."
@@ -110,12 +142,18 @@ class DatabricksDbtFactory:
         return name.replace('.', '_')
 
     @staticmethod
-    def _get_model_dependencies(model_info: dict) -> list[str]:
+    def _get_model_dependencies(info: dict) -> list[str]:
         """Gets the dependencies of a model."""
-        dependencies = model_info.get('depends_on', {}).get('nodes', [])
-        # TODO handle snapshots, analyses dependencies
+        dependencies = info.get('depends_on', {}).get('nodes', [])
         # TODO run dependent models only after data tests pass
-        return [dep.replace('.', '_') for dep in dependencies if dep.startswith('model.') or dep.startswith('seed.')]
+        return [dep.replace('.', '_') for dep in dependencies
+                if dep.startswith('model.') or dep.startswith('seed.') or dep.startswith('snapshot.')]
+
+    @staticmethod
+    def _get_snapshot_dependencies(info: dict) -> list[str]:
+        """Gets the dependencies of a model."""
+        dependencies = info.get('depends_on', {}).get('nodes', [])
+        return [dep.replace('.', '_') for dep in dependencies if dep.startswith('model.')]
 
     @staticmethod
     def _get_git_source() -> dict:

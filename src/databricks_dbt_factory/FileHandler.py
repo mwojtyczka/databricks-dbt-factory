@@ -29,20 +29,28 @@ class FileHandler:
             raise ValueError(f"Error parsing JSON from manifest file: {path}. Details: {e}") from e
 
     @staticmethod
-    def write_job_definition(definition: dict, path: str):
-        """
-        Writes a job definition to a YAML file.
+    def replace_tasks_in_yaml(job_definition_path: str, new_tasks: list[dict],
+                              destgination_job_definition_path: str | None = None) -> None:
+        """Replace the tasks field in a Databricks job definition YAML file.
 
         Args:
-            definition (dict): The job definition to write.
-            path (str): Path to the output YAML file.
+            job_definition_path (str): Path to the job definition YAML file.
+            new_tasks (dict): New tasks to replace the existing tasks in the job definition file.
+            destgination_job_definition_path (str, optional): Path to save the updated job definition file.
 
         Raises:
-            IOError: If there is an error writing the job definition to the file.
-            OSError: If there is an issue with the file system.
+            KeyError: If no jobs are found in the provided YAML file.
         """
-        try:
-            with open(path, "w", encoding="utf-8") as file:
-                yaml.dump(definition, file, sort_keys=False, width=1000, allow_unicode=True)
-        except IOError as e:
-            raise IOError(f"Error writing job definition to file: {path}. Details: {e}") from e
+        with open(job_definition_path, 'r') as file:
+            job_definition = yaml.safe_load(file)
+
+        jobs = job_definition.get('resources', {}).get('jobs', {})
+
+        if jobs is None:
+            raise KeyError("No jobs found in the provided YAML file.")
+
+        jobs[next(iter(jobs))]['tasks'] = new_tasks  # Replace tasks field
+
+        destination_path = destgination_job_definition_path or job_definition_path
+        with open(destination_path, 'w') as file:
+            yaml.dump(job_definition, file, sort_keys=False, width=1000)

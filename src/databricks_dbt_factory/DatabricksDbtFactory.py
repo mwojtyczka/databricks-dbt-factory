@@ -10,21 +10,17 @@ class DatabricksDbtFactory:
         self.file_handler = file_handler
         self.task_factories = task_factories
 
-    def create_job_definition_and_save(
-        self, manifest_path: str, job_definition_path: str, job_name: str, job_options: dict | None = None
-    ):
-        """Generates a job definition from a DBT manifest and saves it to a file."""
+    def create_job_tasks_and_update(self, manifest_path: str, job_definition_path: str,
+                                    destgination_job_definition_path: str | None = None):
+        """Generates tasks for Databricks Job from a DBT manifest and update it in the existing job definition file."""
         manifest = self.file_handler.read_dbt_manifest(manifest_path)
-        job_definition = self.create_job_definition(manifest, job_name, job_options)
-        self.file_handler.write_job_definition(job_definition, job_definition_path)
+        tasks = self.create_job_tasks(manifest)
+        self.file_handler.replace_tasks_in_yaml(job_definition_path, tasks, destgination_job_definition_path)
 
-    def create_job_definition(self, manifest: dict, job_name: str, job_options: dict | None = None) -> dict:
-        """Generates a job definition dictionary from a DBT manifest."""
+    def create_job_tasks(self, manifest: dict) -> list[dict]:
+        """Generates tasks for Databricks Job from a DBT manifest."""
         tasks = self._create_tasks(manifest)
-        return {
-            'name': job_name,
-            'tasks': [task.to_dict() for task in tasks],
-        } | (job_options or {})
+        return [task.to_dict() for task in tasks]
 
     def _create_tasks(self, manifest: dict) -> list[Task]:
         """Generates a list of tasks based on the DBT manifest."""

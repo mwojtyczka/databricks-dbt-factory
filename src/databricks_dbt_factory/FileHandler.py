@@ -18,15 +18,15 @@ class FileHandler:
 
         Raises:
             FileNotFoundError: If the file does not exist.
-            json.JSONDecodeError: If the file is not valid JSON.
+            ValueError: If the file is not a valid manifest file.
         """
         try:
             with open(path, 'r', encoding="utf-8") as file:
                 return json.load(file)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Manifest file not found: {path}")
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"Manifest file not found: {path}. Details: {e}") from e
         except json.JSONDecodeError as e:
-            raise ValueError(f"Error parsing JSON from manifest file: {path}. Details: {e}")
+            raise ValueError(f"Error parsing JSON from manifest file: {path}. Details: {e}") from e
 
     @staticmethod
     def write_job_definition(definition: dict, path: str):
@@ -38,10 +38,11 @@ class FileHandler:
             path (str): Path to the output YAML file.
 
         Raises:
-            IOError: If there is an issue writing to the file.
+            IOError: If there is an error writing the job definition to the file.
+            OSError: If there is an issue with the file system.
         """
         try:
             with open(path, "w", encoding="utf-8") as file:
                 yaml.dump(definition, file, sort_keys=False, width=1000, allow_unicode=True)
         except IOError as e:
-            raise IOError(f"Error writing job definition to file: {path}. Details: {e}")
+            raise IOError(f"Error writing job definition to file: {path}. Details: {e}") from e

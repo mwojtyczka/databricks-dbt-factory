@@ -9,6 +9,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_diamonds_four_cs
@@ -21,6 +22,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on: []
 - task_key: model_dbt_demo_diamonds_four_cs
@@ -32,6 +34,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on: []
 - task_key: model_dbt_demo_zzz_game_details
@@ -43,6 +46,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on: []
 - task_key: model_dbt_demo_second_dbt_model
@@ -54,6 +58,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_first_dbt_model
@@ -66,6 +71,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on: []
 - task_key: test_dbt_demo_zzz_game_details_check_scores
@@ -77,6 +83,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -89,6 +96,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -101,6 +109,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_win_loss_records
@@ -113,6 +122,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_diamonds_list_colors
@@ -125,6 +135,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on: []
 - task_key: test_dbt_demo_unique_zzz_game_details_game_id_80431e7218
@@ -136,6 +147,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -148,6 +160,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -160,6 +173,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -172,6 +186,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -184,6 +199,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -196,6 +212,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -208,6 +225,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -220,6 +238,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -232,6 +251,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -244,6 +264,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -256,6 +277,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -268,6 +290,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_first_dbt_model
@@ -280,6 +303,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_first_dbt_model
@@ -292,6 +316,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_second_dbt_model
@@ -304,6 +329,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_second_dbt_model
@@ -316,6 +342,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_second_dbt_model
@@ -328,6 +355,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: snapshot_dbt_demo_country_snapshot
@@ -340,6 +368,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: seed_dbt_demo_country_codes
@@ -352,6 +381,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_country
@@ -364,6 +394,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_game_details
@@ -376,6 +407,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_win_loss_records
@@ -388,6 +420,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_win_loss_records
@@ -400,6 +433,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_win_loss_records
@@ -412,6 +446,7 @@ tasks:
     catalog: main
     schema: default
     warehouse_id: 475b94ddc7cd5211
+    source: GIT
   environment_key: Default
   depends_on:
   - task_key: model_dbt_demo_zzz_win_loss_records

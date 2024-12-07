@@ -1,8 +1,8 @@
 Databricks dbt factory
 ===
 
-Databricks dbt factory is a simple library to generate Databricks Job tasks based on dbt manifest 
-with an option to overwrite it in the existing job definition.
+Databricks dbt factory is a simple library to generate Databricks Job tasks based on dbt manifest.
+The tool can overwrite tasks in the existing Databricks job definition (in-place update, or creating new definition).
 
 # databricks_dbt_factory
 
@@ -14,57 +14,34 @@ with an option to overwrite it in the existing job definition.
 **Table of Contents**
 
 - [Installation](#installation)
-- [Local Setup](#local-setup)
+- [Usage](#usage)
+- [Contribution](#contribution)
 - [License](#license)
 
-## Installation
-
-This is not available yet.
+# Installation
 
 ```shell
 pip install databricks-dbt-factory
 ```
 
-## Local Setup
+# Usage
 
-This section provides a step-by-step guide to set up and start working on the project. These steps will help you set up your project environment and dependencies for efficient development.
-
-To begin, install [Hatch](https://github.com/pypa/hatch), which is our build tool.
-
-On MacOSX, this is achieved using the following:
+Generate new Databricks job spec in `job_definition_new.yaml` in the current directory:
 ```shell
-brew install hatch
+databricks_dbt_factory  \
+  --dbt-manifest-path tests/test_data/manifest.json \
+  --input-job-spec-path tests/test_data/job_definition_template.yaml \
+  --target-job-spec-path job_definition_new.yaml \
+  --source GIT \
+  --target dev
 ```
 
-Run the following command to create the default environment and install development dependencies:
-```shell
-make dev
-```
+To check all input arguments see `databricks_dbt_factory --help`.
 
-Before every commit, apply the consistent formatting of the code, as we want our codebase look consistent:
-```shell
-make fmt
-```
+# Contribution
 
-Before every commit, run automated bug detector (`make lint`) and unit tests (`make test`) to ensure that automated
-pull request checks do pass, before your code is reviewed: 
-```shell
-make lint
-make test
-```
+See contribution guidance [here](CONTRIBUTING.md).
 
-## Local installation and execution
-
-```shell
-hatch build
-
-# use hatch directly
-hatch run databricks_dbt_factory --dbt-manifest-path tests/test_data/manifest.json --input-job-spec-path tests/test_data/job_definition_template.yaml --target-job-spec-path job_definition_new.yaml --source GIT --target dev
-# or install locally and run
-pip install .
-databricks_dbt_factory --dbt-manifest-path tests/test_data/manifest.json --input-job-spec-path tests/test_data/job_definition_template.yaml --target-job-spec-path job_definition_new.yaml --source GIT --target dev
-```
-
-## License
+# License
 
 `databricks-dbt-factory` is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html) license.

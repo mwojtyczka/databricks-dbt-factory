@@ -18,6 +18,26 @@ The tool can overwrite tasks in the existing Databricks job definition (in-place
 - [Contribution](#contribution)
 - [License](#license)
 
+# Motivation
+
+The current integration of dbt with Databricks Workflows treats the entire dbt project as a single execution unit (black box), limiting flexibility and debugging options.
+
+This project breaks down each dbt object (seed/snapshot/model/test) into separate Workflow task offering several key benefits:
+* Simplified Troubleshooting: Isolating tasks makes it easier to identify and resolve issues specific to a single model
+* Enhanced Logging and Notifications: Provides more detailed logs and precise error alerts, improving debugging efficiency
+* Better Retriability: Enables retrying only the failed model tasks, saving time and resources compared to rerunning the entire project
+* Seamless Testing: Allows running dbt data tests on tables immediately after a model completes, ensuring faster validation and feedback
+
+### Databricks Workflows run all dbt objects at once:
+![before](docs/before.png?)
+
+![dbt_task](docs/dbt_task.png?)
+
+### The tool generates workflows where dbt objects are run as individual Databricks Workflow tasks:
+![after](docs/after.png?)
+
+![workflow](docs/workflow.png?)
+
 # Installation
 
 ```shell

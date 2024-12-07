@@ -4,8 +4,6 @@ Databricks dbt factory
 Databricks dbt factory is a simple library to generate Databricks Job tasks based on dbt manifest.
 The tool can overwrite tasks in the existing Databricks job definition (in-place update, or creating new definition).
 
-# databricks_dbt_factory
-
 [![PyPI - Version](https://img.shields.io/pypi/v/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
 
@@ -46,7 +44,7 @@ pip install databricks-dbt-factory
 
 # Usage
 
-Generate new Databricks job spec in `job_definition_new.yaml` in the current directory:
+Update tasks in the existing Databricks job definition and write the results to `job_definition_new.yaml`:
 ```shell
 databricks_dbt_factory  \
   --dbt-manifest-path tests/test_data/manifest.json \
@@ -56,7 +54,24 @@ databricks_dbt_factory  \
   --target dev
 ```
 
-To check all input arguments see `databricks_dbt_factory --help`.
+**Arguments:**
+- `--new-job-name` (type: str, optional, default: None): Optional job name. If provided, the existing job name in the job spec is updated.
+- `--dbt-manifest-path` (type: str, required): Path to the manifest file.
+- `--input-job-spec-path` (type: str, required): Path to the input job spec file.
+- `--target-job-spec-path` (type: str, required): Path to the target job spec file.
+- `--target` (type: str, required): dbt target to use.
+- `--source` (type: str, optional, default: None): Optional project source. If not provided, WORKSPACE will be used.
+- `--warehouse_id` (type: str, optional, default: None): Optional SQL Warehouse to run dbt models on.
+- `--schema` (type: str, optional, default: None): Optional schema to write to.
+- `--catalog` (type: str, optional, default: None): Optional catalog to write to.
+- `--profiles-directory` (type: str, optional, default: None): Optional (relative) path to the profiles directory.
+- `--project-directory` (type: str, optional, default: None): Optional (relative) path to the project directory.
+- `--environment-key` (type: str, optional, default: Default): Optional (relative) key of an environment.
+- `--extra-dbt-command-options` (type: str, optional, default: ""): Optional additional dbt command options.
+- `--run-tests` (type: bool, optional, default: True): Whether to run data tests after the model. Enabled by default.
+- `--dry-run` (type: bool, optional, default: False): Print generated tasks without updating the job spec file. Disabled by default.
+
+You can also check all input arguments by running `databricks_dbt_factory --help`.
 
 Demo of the tool can be found [here](https://github.com/mwojtyczka/dbt-demo).
 

@@ -1,6 +1,6 @@
 from databricks_dbt_factory import TaskFactory
 from databricks_dbt_factory.FileHandler import FileHandler
-from databricks_dbt_factory.Task import Task
+from databricks_dbt_factory.DbtTask import DbtTask
 
 
 class DatabricksDbtFactory:
@@ -46,7 +46,7 @@ class DatabricksDbtFactory:
         tasks = self._create_tasks(dbt_manifest)
         return [task.to_dict() for task in tasks]
 
-    def _create_tasks(self, dbt_manifest: dict) -> list[Task]:
+    def _create_tasks(self, dbt_manifest: dict) -> list[DbtTask]:
         """
         Generates a list of Databricks job tasks based on the DBT manifest.
 
@@ -54,7 +54,7 @@ class DatabricksDbtFactory:
             dbt_manifest (dict): The DBT manifest content.
 
         Returns:
-            list[Task]: A list of Task instances.
+            list[DbtTask]: A list of Task instances.
         """
         dbt_nodes = dbt_manifest.get('nodes', {})
         tasks = []

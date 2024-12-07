@@ -33,15 +33,15 @@ class FileHandler:
         input_job_spec_path: str, new_tasks: list[dict], target_job_spec_path: str | None = None
     ) -> None:
         """Replace the tasks field in a Databricks job definition YAML file.
-,
-        Args:
-            input_job_spec_path (str): Path to the job definition YAML file.
-            new_tasks (dict): New tasks to replace the existing tasks in the job definition file.
-            target_job_spec_path (str, optional): Path to save the updated job definition file.
-            If not provided, the input file will be updated in place. Defaults to None.
+        ,
+                Args:
+                    input_job_spec_path (str): Path to the job definition YAML file.
+                    new_tasks (dict): New tasks to replace the existing tasks in the job definition file.
+                    target_job_spec_path (str, optional): Path to save the updated job definition file.
+                    If not provided, the input file will be updated in place. Defaults to None.
 
-        Raises:
-            KeyError: If no jobs are found in the provided YAML file.
+                Raises:
+                    KeyError: If no jobs are found in the provided YAML file.
         """
         with open(input_job_spec_path, 'r', encoding="utf-8") as file:
             job_definition = yaml.safe_load(file)

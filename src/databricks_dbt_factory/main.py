@@ -1,7 +1,7 @@
 import argparse
 from databricks_dbt_factory.DatabricksDbtFactory import DatabricksDbtFactory
 from databricks_dbt_factory.FileHandler import FileHandler
-from databricks_dbt_factory.Task import TaskOptions
+from databricks_dbt_factory.DbtTask import DbtTaskOptions
 from databricks_dbt_factory.TaskFactory import (
     ModelTaskFactory,
     SnapshotTaskFactory,
@@ -31,7 +31,7 @@ def main():
     file_handler = FileHandler()
     resolver = DbtDependencyResolver()
     dbt_options = f"--{args.target} --{args.profile_dir} {args.extra_dbt_options}"
-    task_options = TaskOptions(warehouse_id=args.warehouse_id)
+    task_options = DbtTaskOptions(warehouse_id=args.warehouse_id)
     task_factories = {
         'model': ModelTaskFactory(resolver, task_options, dbt_options),
         'snapshot': SnapshotTaskFactory(resolver, task_options, dbt_options),

@@ -1,7 +1,8 @@
 Databricks dbt factory
 ===
 
-Databricks dbt factory is a simple library to generate Databricks Job definition where individual dbt models are run as separate tasks.
+Databricks dbt factory is a simple library to generate Databricks Job tasks based on dbt manifest 
+with an option to overwrite it in the existing job definition.
 
 # databricks_dbt_factory
 
@@ -18,7 +19,9 @@ Databricks dbt factory is a simple library to generate Databricks Job definition
 
 ## Installation
 
-```console
+This is not available yet.
+
+```shell
 pip install databricks-dbt-factory
 ```
 
@@ -56,10 +59,10 @@ make test
 hatch build
 
 # use hatch directly
-hatch run databricks_dbt_factory --manifest-path tests/test_data/dbt_manifest.json --output-path job_definition.yaml --job-name dbt_job --
+hatch run databricks_dbt_factory --dbt-manifest-path tests/test_data/manifest.json --input-job-spec-path tests/test_data/job_definition_template.yaml --target-job-spec-path job_definition_new.yaml --source GIT --target dev
 # or install locally and run
 pip install .
-databricks_dbt_factory --manifest-path tests/test_data/dbt_manifest.json --output-path job_definition.yaml --job-name dbt_job
+databricks_dbt_factory --dbt-manifest-path tests/test_data/manifest.json --input-job-spec-path tests/test_data/job_definition_template.yaml --target-job-spec-path job_definition_new.yaml --source GIT --target dev
 ```
 
 ## License

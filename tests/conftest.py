@@ -1,5 +1,5 @@
 import pytest
-from databricks_dbt_factory.FileHandler import FileHandler
+from databricks_dbt_factory.SpecsHandler import SpecsHandler
 from databricks_dbt_factory.DbtFactory import DbtFactory
 from databricks_dbt_factory.DbtTask import DbtTaskOptions
 from databricks_dbt_factory.TaskFactory import (
@@ -13,7 +13,7 @@ from databricks_dbt_factory.TaskFactory import (
 
 @pytest.fixture
 def file_handler():
-    return FileHandler()
+    return SpecsHandler()
 
 
 @pytest.fixture

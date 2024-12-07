@@ -1,7 +1,6 @@
 import os
 from tempfile import NamedTemporaryFile
 from pathlib import Path
-
 import pytest
 import yaml
 
@@ -48,5 +47,5 @@ def test_generate(file_handler, databricks_dbt_factory):
     destination_job_definition_path = "job_definition.yaml"
 
     databricks_dbt_factory.create_tasks_and_update_job_spec(
-        dbt_manifest_path, job_definition_path, destination_job_definition_path
+        dbt_manifest_path, job_definition_path, destination_job_definition_path, "new_job_name"
     )

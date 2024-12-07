@@ -3,7 +3,7 @@ from databricks_dbt_factory.FileHandler import FileHandler
 from databricks_dbt_factory.DbtTask import DbtTask
 
 
-class DatabricksDbtFactory:
+class DbtFactory:
     """A factory for generating Databricks job definitions from DBT manifests."""
 
     def __init__(self, file_handler: FileHandler, task_factories: dict[str, TaskFactory]):

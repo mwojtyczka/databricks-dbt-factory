@@ -1,6 +1,6 @@
 import pytest
 from databricks_dbt_factory.FileHandler import FileHandler
-from databricks_dbt_factory.DatabricksDbtFactory import DatabricksDbtFactory
+from databricks_dbt_factory.DbtFactory import DbtFactory
 from databricks_dbt_factory.DbtTask import DbtTaskOptions
 from databricks_dbt_factory.TaskFactory import (
     ModelTaskFactory,
@@ -32,4 +32,4 @@ def databricks_dbt_factory(file_handler):
         'test': TestTaskFactory(resolver, task_options, dbt_options),
     }
 
-    return DatabricksDbtFactory(file_handler, task_factories)
+    return DbtFactory(file_handler, task_factories)

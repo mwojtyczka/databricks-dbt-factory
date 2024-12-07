@@ -29,20 +29,21 @@ class FileHandler:
             raise ValueError(f"Error parsing JSON from manifest file: {path}. Details: {e}") from e
 
     @staticmethod
-    def replace_tasks_in_yaml(
-        job_definition_path: str, new_tasks: list[dict], destination_job_definition_path: str | None = None
+    def replace_tasks_in_job_spec(
+        input_job_spec_path: str, new_tasks: list[dict], target_job_spec_path: str | None = None
     ) -> None:
         """Replace the tasks field in a Databricks job definition YAML file.
-
+,
         Args:
-            job_definition_path (str): Path to the job definition YAML file.
+            input_job_spec_path (str): Path to the job definition YAML file.
             new_tasks (dict): New tasks to replace the existing tasks in the job definition file.
-            destination_job_definition_path (str, optional): Path to save the updated job definition file.
+            target_job_spec_path (str, optional): Path to save the updated job definition file.
+            If not provided, the input file will be updated in place. Defaults to None.
 
         Raises:
             KeyError: If no jobs are found in the provided YAML file.
         """
-        with open(job_definition_path, 'r', encoding="utf-8") as file:
+        with open(input_job_spec_path, 'r', encoding="utf-8") as file:
             job_definition = yaml.safe_load(file)
 
         jobs = job_definition.get('resources', {}).get('jobs', {})
@@ -52,6 +53,6 @@ class FileHandler:
 
         jobs[next(iter(jobs))]['tasks'] = new_tasks  # Replace tasks field
 
-        destination_path = destination_job_definition_path or job_definition_path
-        with open(destination_path, 'w', encoding="utf-8") as file:
+        target_path = target_job_spec_path or input_job_spec_path
+        with open(target_path, 'w', encoding="utf-8") as file:
             yaml.dump(job_definition, file, sort_keys=False, width=1000)

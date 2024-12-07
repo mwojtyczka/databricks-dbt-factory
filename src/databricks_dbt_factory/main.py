@@ -13,7 +13,7 @@ from databricks_dbt_factory.TaskFactory import (
 
 def main():
     parser = argparse.ArgumentParser(description="Generate Databricks job definition from dbt manifest.")
-    parser.add_argument("--manifest-path", type=str, help="Path to the manifest file", required=True)
+    parser.add_argument("--dbt-manifest-path", type=str, help="Path to the manifest file", required=True)
     parser.add_argument(
         "--job-definition-path", type=str, help="Path to the destination job definition file", required=True
     )
@@ -40,7 +40,7 @@ def main():
     if args.run_tests:
         task_factories['test'] = TestTaskFactory(resolver, task_options, dbt_options)
     factory = DatabricksDbtFactory(file_handler, task_factories)
-    factory.create_job_tasks_and_update(args.manifest_path, args.job_definition_path)
+    factory.create_tasks_and_update_job_spec(args.dbt_manifest_path, args.job_definition_path)
 
 
 if __name__ == "__main__":

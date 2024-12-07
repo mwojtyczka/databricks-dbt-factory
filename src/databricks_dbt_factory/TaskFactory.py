@@ -15,9 +15,18 @@ class DbtNodeTypes(Enum):
 
 class DbtDependencyResolver:
     @staticmethod
-    def resolve(node_info: dict, dbt_dependency_types: list[str]) -> list[str]:
-        """Common logic for resolving dependencies based on node prefixes."""
-        dependencies = node_info.get('depends_on', {}).get('nodes', [])
+    def resolve(dbt_node_info: dict, dbt_dependency_types: list[str]) -> list[str]:
+        """
+        Resolves dependencies for a given DBT node.
+
+        Args:
+            dbt_node_info (dict): Information about the DBT node.
+            dbt_dependency_types (list[str]): List of valid DBT dependency types.
+
+        Returns:
+            list[str]: List of resolved dependencies.
+        """
+        dependencies = dbt_node_info.get('depends_on', {}).get('nodes', [])
         resolved_dependencies = []
         for dep in dependencies:
             if any(dep.startswith(dbt_type + ".") for dbt_type in dbt_dependency_types):
@@ -29,62 +38,122 @@ class TaskFactory(ABC):
     """Abstract base class for creating tasks."""
 
     def __init__(self, resolver: DbtDependencyResolver, task_options: TaskOptions, dbt_options: str = ""):
+        """
+        Initializes the TaskFactory.
+
+        Args:
+            resolver (DbtDependencyResolver): An instance of DbtDependencyResolver to resolve dependencies.
+            task_options (TaskOptions): Options for the task.
+            dbt_options (str, optional): Additional DBT options. Defaults to "".
+        """
         self.resolver = resolver
         self.task_options = task_options
         self.dbt_options = dbt_options
 
     @abstractmethod
-    def create_task(self, node_name: str, task_key: str, node_info: dict) -> Task:
-        """Abstract method to create a task."""
+    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> Task:
+        """
+        Abstract method to create a task.
+
+        Args:
+            dbt_node_name (str): Name of the DBT node.
+            dbt_node_info (dict): Information about the DBT node.
+            task_key (str): Key for the task.
+
+        Returns:
+            Task: An instance of Task.
+        """
+        pass
 
 
 class ModelTaskFactory(TaskFactory):
     """Factory for creating model tasks."""
 
-    @property
-    def valid_dbt_dependency_types(self) -> list[str]:
-        return [DbtNodeTypes.MODEL.value, DbtNodeTypes.SEED.value, DbtNodeTypes.SNAPSHOT.value, DbtNodeTypes.TEST.value]
+    _valid_dbt_deps_types: list[str] = [
+        DbtNodeTypes.MODEL.value,
+        DbtNodeTypes.SEED.value,
+        DbtNodeTypes.SNAPSHOT.value,
+        DbtNodeTypes.TEST.value,
+    ]
 
-    def create_task(self, node_name: str, task_key: str, node_info: dict) -> Task:
-        depends_on = self.resolver.resolve(node_info, self.valid_dbt_dependency_types)
-        dbt_commands = [f"dbt deps {self.dbt_options}", f"dbt run --select {node_name} {self.dbt_options}"]
+    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> Task:
+        """
+        Creates a model task.
+
+        Args:
+            dbt_node_name (str): Name of the DBT node.
+            dbt_node_info (dict): Information about the DBT node.
+            task_key (str): Key for the task.
+
+        Returns:
+            Task: An instance of Task.
+        """
+        depends_on = self.resolver.resolve(dbt_node_info, self._valid_dbt_deps_types)
+        dbt_commands = [f"dbt deps {self.dbt_options}", f"dbt run --select {dbt_node_name} {self.dbt_options}"]
         return Task(task_key, dbt_commands, self.task_options, depends_on)
 
 
 class SnapshotTaskFactory(TaskFactory):
     """Factory for creating snapshot tasks."""
 
-    @property
-    def valid_dbt_dependency_types(self) -> list[str]:
-        return [DbtNodeTypes.MODEL.value]
+    _valid_dbt_deps_types: list[str] = [DbtNodeTypes.MODEL.value]
 
-    def create_task(self, node_name: str, task_key: str, node_info: dict) -> Task:
-        depends_on = self.resolver.resolve(node_info, self.valid_dbt_dependency_types)
-        dbt_commands = [f"dbt deps {self.dbt_options}", f"dbt snapshot --select {node_name} {self.dbt_options}"]
+    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> Task:
+        """
+        Creates a snapshot task.
+
+        Args:
+            dbt_node_name (str): Name of the DBT node.
+            dbt_node_info (dict): Information about the DBT node.
+            task_key (str): Key for the task.
+
+        Returns:
+            Task: An instance of Task.
+        """
+        depends_on = self.resolver.resolve(dbt_node_info, self._valid_dbt_deps_types)
+        dbt_commands = [f"dbt deps {self.dbt_options}", f"dbt snapshot --select {dbt_node_name} {self.dbt_options}"]
         return Task(task_key, dbt_commands, self.task_options, depends_on)
 
 
 class SeedTaskFactory(TaskFactory):
     """Factory for creating seed tasks."""
 
-    @property
-    def valid_dbt_dependency_types(self) -> list[str]:
-        return []  # Seeds don't have dependencies
+    _valid_dbt_deps_types: list[str] = []  # Seeds don't have dependencies
 
-    def create_task(self, node_name: str, task_key: str, node_info: dict) -> Task:
-        depends_on = self.resolver.resolve(node_info, self.valid_dbt_dependency_types)
-        dbt_commands = [f"dbt deps {self.dbt_options}", f"dbt seed --select {node_name} {self.dbt_options}"]
+    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> Task:
+        """
+        Creates a seed task.
+
+        Args:
+            dbt_node_name (str): Name of the DBT node.
+            dbt_node_info (dict): Information about the DBT node.
+            task_key (str): Key for the task.
+
+        Returns:
+            Task: An instance of Task.
+        """
+        depends_on = self.resolver.resolve(dbt_node_info, self._valid_dbt_deps_types)
+        dbt_commands = [f"dbt deps {self.dbt_options}", f"dbt seed --select {dbt_node_name} {self.dbt_options}"]
         return Task(task_key, dbt_commands, self.task_options, depends_on)
 
 
 class TestTaskFactory(TaskFactory):
     """Factory for creating test tasks."""
 
-    @property
-    def valid_dbt_dependency_types(self) -> list[str]:
-        return [DbtNodeTypes.MODEL.value]
+    _valid_dbt_deps_types: list[str] = [DbtNodeTypes.MODEL.value]
 
-    def create_task(self, node_name: str, task_key: str, node_info: dict) -> Task:
-        depends_on = self.resolver.resolve(node_info, self.valid_dbt_dependency_types)
-        dbt_commands = [f"dbt deps {self.dbt_options}", f"dbt test --select {node_name} {self.dbt_options}"]
+    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> Task:
+        """
+        Creates a test task.
+
+        Args:
+            dbt_node_name (str): Name of the DBT node.
+            dbt_node_info (dict): Information about the DBT node.
+            task_key (str): Key for the task.
+
+        Returns:
+            Task: An instance of Task.
+        """
+        depends_on = self.resolver.resolve(dbt_node_info, self._valid_dbt_deps_types)
+        dbt_commands = [f"dbt deps {self.dbt_options}", f"dbt test --select {dbt_node_name} {self.dbt_options}"]
         return Task(task_key, dbt_commands, self.task_options, depends_on)

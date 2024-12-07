@@ -38,6 +38,8 @@ databricks_dbt_factory  \
 
 To check all input arguments see `databricks_dbt_factory --help`.
 
+Demo of the tool can be found [here](https://github.com/mwojtyczka/dbt-demo).
+
 # Contribution
 
 See contribution guidance [here](CONTRIBUTING.md).

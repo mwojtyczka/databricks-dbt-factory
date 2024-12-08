@@ -32,10 +32,14 @@ Benefits:
 ### Databricks Workflows run dbt projects as a single "black box" task:
 ![before](docs/before.png?)
 
+Example of a workflow:
+
 ![dbt_task](docs/dbt_task.png?)
 
 ### The tool update Databricks Workflows so that dbt objects within a project are run as individual tasks:
 ![after](docs/after.png?)
+
+Example of the updated workflow:
 
 ![workflow](docs/workflow.png?)
 

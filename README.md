@@ -2,7 +2,10 @@ Databricks dbt factory
 ===
 
 Databricks dbt factory is a simple library to generate Databricks Job tasks based on dbt manifest.
-The tool can overwrite tasks in the existing Databricks job definition (in-place update, or creating new definition).
+The tool can generate workflow tasks and overwrite them in the existing Databricks job definition (in-place update, or creating new definition).
+
+It’s important to note that the tool only generate job tasks (and updates them in an existing job definition). 
+It’s not a tool to generate a complete job definition from scratch. There are existing Databricks products to do this.
 
 [![PyPI - Version](https://img.shields.io/pypi/v/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)

@@ -15,23 +15,23 @@ class DbtNodeTypes(Enum):
 
 class DbtDependencyResolver:
     @staticmethod
-    def resolve(dbt_node_info: dict, dbt_dependency_types: list[str]) -> list[str]:
+    def resolve(node_info: dict, valid_deps_types: list[str]) -> list[str]:
         """
         Resolves dependencies for a given DBT node.
 
         Args:
-            dbt_node_info (dict): Information about the DBT node.
-            dbt_dependency_types (list[str]): List of valid DBT dependency types.
+            node_info (dict): Information about the DBT node.
+            valid_deps_types (list[str]): List of valid DBT dependency types for the node.
 
         Returns:
             list[str]: List of resolved dependencies.
         """
-        dependencies = dbt_node_info.get('depends_on', {}).get('nodes', [])
-        resolved_dependencies = []
-        for dep in dependencies:
-            if any(dep.startswith(dbt_type + ".") for dbt_type in dbt_dependency_types):
-                resolved_dependencies.append(dep.replace('.', '_'))
-        return resolved_dependencies
+        deps = node_info.get('depends_on', {}).get('nodes', [])
+        resolved_deps = []
+        for dep in deps:
+            if any(dep.startswith(dbt_type + ".") for dbt_type in valid_deps_types):
+                resolved_deps.append(dep.replace('.', '_'))
+        return resolved_deps
 
 
 class TaskFactory(ABC):

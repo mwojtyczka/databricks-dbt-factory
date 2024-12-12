@@ -1,6 +1,7 @@
 from databricks_dbt_factory import TaskFactory
 from databricks_dbt_factory.SpecsHandler import SpecsHandler
 from databricks_dbt_factory.DbtTask import DbtTask
+from databricks_dbt_factory.Utils import generate_task_key
 
 
 class DbtFactory:
@@ -75,7 +76,7 @@ class DbtFactory:
                 continue
 
             node_name = node_info['name']
-            task_key = node_full_name.replace('.', '_')  # make sure it can be used as a task key
+            task_key = generate_task_key(node_full_name)
             factory = self.task_factories[resource_type]
 
             task = factory.create_task(node_name, node_info, task_key)

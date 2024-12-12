@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 
 from databricks_dbt_factory.DbtTask import DbtTask, DbtTaskOptions
+from databricks_dbt_factory.Utils import generate_task_key
 
 
 class DbtNodeTypes(Enum):
@@ -28,9 +29,9 @@ class DbtDependencyResolver:
         """
         deps = node_info.get('depends_on', {}).get('nodes', [])
         resolved_deps = []
-        for dep in deps:
-            if any(dep.startswith(dbt_type + ".") for dbt_type in valid_deps_types):
-                resolved_deps.append(dep.replace('.', '_'))
+        for node_full_name in deps:
+            if any(node_full_name.startswith(dbt_type + ".") for dbt_type in valid_deps_types):
+                resolved_deps.append(generate_task_key(node_full_name))
         return resolved_deps
 
 

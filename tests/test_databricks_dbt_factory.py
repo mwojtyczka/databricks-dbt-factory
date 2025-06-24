@@ -15,7 +15,7 @@ def cleanup_file(file_path: str):
 
 
 def test_create_job_spec_and_update(file_handler, databricks_dbt_factory):
-    """Test job definition generation and saving to file."""
+    """Test databricks job definition generation and saving to file."""
     dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"
     input_job_definition_path = BASE_PATH + "/test_data/job_definition_template.yaml"
     expected_job_definition_path = BASE_PATH + "/test_data/job_definition.yaml"

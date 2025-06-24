@@ -9,7 +9,7 @@ class DbtFactory:
 
     def __init__(self, file_handler: SpecsHandler, task_factories: dict[str, TaskFactory]):
         """
-        Initializes the DatabricksDbtFactory.
+        Initializes the dbt factory.
 
         Args:
             file_handler (SpecsHandler): An instance of FileHandler to handle file operations.

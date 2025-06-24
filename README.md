@@ -1,11 +1,10 @@
 Databricks dbt factory
 ===
 
-Databricks dbt factory is a simple library to generate Databricks Job tasks based on dbt manifest.
-The tool can generate workflow tasks and overwrite them in the existing Databricks job definition (in-place update, or creating new definition).
+Databricks dbt Factory is a lightweight library that generates a Databricks Workflow task for each dbt model, based on your dbt manifest.
+It creates a DAG of tasks that run each dbt model, test, seed, and snapshot as a separate task in Databricks Workflows.
 
-It’s important to note that the tool only generate job tasks (and updates them in an existing job definition). 
-It’s not a tool to generate a complete job definition from scratch. There are existing Databricks products to do this.
+The tool can create or update tasks directly within an existing Databricks workflow (in-place updates or additions).
 
 [![PyPI - Version](https://img.shields.io/pypi/v/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
@@ -15,6 +14,7 @@ It’s not a tool to generate a complete job definition from scratch. There are 
 **Table of Contents**
 
 - [Motivation](#motivation)
+- [How it works](#benefits)
 - [Installation](#installation)
 - [Usage](#usage)
 - [Contribution](#contribution)
@@ -22,29 +22,27 @@ It’s not a tool to generate a complete job definition from scratch. There are 
 
 # Motivation
 
-The current integration of dbt with Databricks Workflows treats the entire dbt project as a single execution unit (black box).
+By default, dbt's integration with Databricks Workflows treats an entire dbt project as a single execution unit — a black box.
 
-This tool updates Databricks Workflows so that dbt objects within a project (models / tests / seeds / snapshots) are run as separate tasks.
+Databricks dbt Factory changes that by updating Databricks Workflows to run dbt objects (models, tests, seeds, snapshots) as individual tasks.
 
-Benefits:
-* Simplified Troubleshooting: Isolating tasks makes it easier to identify and resolve issues specific to a single model
-* Enhanced Logging and Notifications: Provides more detailed logs and precise error alerts, improving debugging efficiency
-* Better Retriability: Enables retrying only the failed model tasks, saving time and resources compared to rerunning the entire project
-* Seamless Testing: Allows running dbt data tests on tables immediately after a model completes, ensuring faster validation and feedback
+![before](docs/dbt-factory.png?)
 
-### Databricks Workflows run dbt projects as a single "black box" task:
-![before](docs/before.png?)
+### Benefits
 
-Example of a workflow:
+✅ Simplified troubleshooting — Quickly pinpoint and fix issues at the model level.
 
-![dbt_task](docs/dbt_task.png?)
+✅ Enhanced logging & notifications — Gain detailed logs and precise error alerts for faster debugging.
 
-### The tool update Databricks Workflows so that dbt objects within a project are run as individual tasks:
-![after](docs/after.png?)
+✅ Improved retriability — Retry only the failed model tasks without rerunning the full project.
 
-Example of the updated workflow:
+✅ Seamless testing — Automatically run dbt data tests on tables right after each model finishes, enabling faster validation and feedback.
 
-![workflow](docs/workflow.png?)
+# How it works
+
+![after](docs/arch.png?)
+
+The tool reads the dbt manifest file and the existing Databricks workflow definition, then generates a new workflow definition.
 
 # Installation
 
@@ -54,7 +52,7 @@ pip install databricks-dbt-factory
 
 # Usage
 
-Update tasks in the existing Databricks job definition and write the results to `job_definition_new.yaml`:
+Update tasks in the existing Databricks workflow (job) definition and write the results to `job_definition_new.yaml`:
 ```shell
 databricks_dbt_factory  \
   --dbt-manifest-path tests/test_data/manifest.json \

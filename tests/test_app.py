@@ -12,7 +12,7 @@ def test_main_given_default_args(monkeypatch):
     """Test the main function for job spec generation."""
     dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"
     input_job_spec_path = BASE_PATH + "/test_data/job_definition_template.yaml"
-    expected_job_definition_path = BASE_PATH + "/test_data/job_definition_no_deps.yaml"
+    expected_job_definition_path = BASE_PATH + "/test_data/job_definition_default.yaml"
 
     with NamedTemporaryFile(suffix=".yaml", delete=False) as temp_file:
         target_job_spec_path = temp_file.name
@@ -27,8 +27,6 @@ def test_main_given_default_args(monkeypatch):
             input_job_spec_path,
             "--target-job-spec-path",
             target_job_spec_path,
-            "--target",
-            "dev",
         ],
     )
 
@@ -40,8 +38,6 @@ def test_main_given_default_args(monkeypatch):
 
         with open(target_job_spec_path, "r", encoding="utf-8") as file:
             job_definition = yaml.safe_load(file)
-
-        remove_source_from_spec(expected_job_definition)
 
         assert job_definition == expected_job_definition
     finally:
@@ -132,8 +128,8 @@ def test_main_all_args(monkeypatch):
             os.remove(target_job_spec_path)
 
 
-def remove_source_from_spec(expected_job_definition):
-    """Remove 'source' key from dbt_task in the expected job definition."""
+def remove_target_from_spec(expected_job_definition):
+    """Remove 'target' key from dbt_task in the expected job definition."""
     spec = dict(expected_job_definition)
 
     for task in expected_job_definition["resources"]["jobs"]["dbt_sql_job"]["tasks"]:

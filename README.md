@@ -69,7 +69,7 @@ Note that `--input-job-spec-path` and `--target-job-spec-path` can be the same f
 - `--dbt-manifest-path` (type: str, required): Path to the dbt manifest file.
 - `--input-job-spec-path` (type: str, required): Path to the input job spec file.
 - `--target-job-spec-path` (type: str, required): Path to the target job spec file.
-- `--target` (type: str, required): dbt target to use.
+- `--target` (type: str, required): optional dbt target to use. If not provided, the default target from the dbt profile will be used.
 - `--source` (type: str, optional, default: None): Optional dbt project source (`GIT` or `WORKSPACE`). If not provided, `WORKSPACE` will be used.
 - `--warehouse_id` (type: str, optional, default: None): Optional SQL Warehouse to run dbt models on.
 - `--schema` (type: str, optional, default: None): Optional metastore schema (database) to use in the dbt task.

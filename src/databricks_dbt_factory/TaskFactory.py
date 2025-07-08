@@ -104,7 +104,7 @@ class ModelTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(dbt_node_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt run --select {dbt_node_name} {self.dbt_options}")
+        commands.append(f"dbt run --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -129,7 +129,7 @@ class SnapshotTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(dbt_node_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt snapshot --select {dbt_node_name} {self.dbt_options}")
+        commands.append(f"dbt snapshot --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -155,7 +155,7 @@ class SeedTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(dbt_node_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt seed --select {dbt_node_name} {self.dbt_options}")
+        commands.append(f"dbt seed --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -181,6 +181,6 @@ class TestTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(dbt_node_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt test --select {dbt_node_name} {self.dbt_options}")
+        commands.append(f"dbt test --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)

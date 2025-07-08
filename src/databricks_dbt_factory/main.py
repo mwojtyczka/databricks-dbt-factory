@@ -17,10 +17,7 @@ def main():
     file_handler = SpecsHandler()
     resolver = DbtDependencyResolver()
 
-    dbt_options = f"--target {args.target}" + (
-        f" {args.extra_dbt_command_options}" if args.extra_dbt_command_options else ""
-    )
-
+    dbt_options = build_dbt_options(args)
     dbt_tasks_deps = (
         [item.strip() for item in args.dbt_tasks_deps.split(",") if item.strip()] if args.dbt_tasks_deps else []
     )
@@ -51,6 +48,19 @@ def main():
     )
 
 
+def build_dbt_options(args):
+    """Builds the dbt command options based on the provided arguments."""
+    dbt_options = ""
+
+    if args.target:
+        dbt_options += f"--target {args.target}"
+
+    if args.extra_dbt_command_options:
+        dbt_options += f" {args.extra_dbt_command_options}"
+
+    return dbt_options
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate Databricks job definition from dbt manifest.")
     parser.add_argument(
@@ -68,7 +78,7 @@ def parse_args():
         help="Path to the target job spec file.",
         required=True,
     )
-    parser.add_argument("--target", type=str, help="dbt target to use", required=True)
+    parser.add_argument("--target", type=str, help="Optional dbt target to use.", required=False)
     parser.add_argument(
         "--source",
         type=str,

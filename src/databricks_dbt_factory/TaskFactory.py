@@ -65,6 +65,19 @@ class TaskFactory(ABC):
             DbtTask: An instance of Task.
         """
 
+    def get_dbt_deps_command(self, dbt_task_name: str) -> str | None:
+        """Adds the dbt deps command if enabled and applicable.
+        Only return the command if enabled, and available in the task deps or not specific tasks provided.
+
+        Args:
+            dbt_task_name (str): Name of the DBT task.
+        """
+        if self.task_options.dbt_deps_enabled and (
+            not self.task_options.dbt_tasks_deps or dbt_task_name in self.task_options.dbt_tasks_deps
+        ):
+            return f"dbt deps {self.dbt_options}"
+        return None
+
 
 class ModelTaskFactory(TaskFactory):
     """Factory for creating model tasks."""
@@ -87,9 +100,12 @@ class ModelTaskFactory(TaskFactory):
             DbtNodeTypes.SNAPSHOT.value,
             DbtNodeTypes.TEST.value,
         ]
-
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
-        commands = [f"dbt deps {self.dbt_options}", f"dbt run --select {dbt_node_name} {self.dbt_options}"]
+
+        dbt_deps = self.get_dbt_deps_command(dbt_node_name)
+        commands = [dbt_deps] if dbt_deps else []
+        commands.append(f"dbt run --select {dbt_node_name} {self.dbt_options}")
+
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
 
@@ -109,9 +125,12 @@ class SnapshotTaskFactory(TaskFactory):
             DbtTask: An instance of Task.
         """
         valid_dbt_deps_types: list[str] = [DbtNodeTypes.MODEL.value]
-
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
-        commands = [f"dbt deps {self.dbt_options}", f"dbt snapshot --select {dbt_node_name} {self.dbt_options}"]
+
+        dbt_deps = self.get_dbt_deps_command(dbt_node_name)
+        commands = [dbt_deps] if dbt_deps else []
+        commands.append(f"dbt snapshot --select {dbt_node_name} {self.dbt_options}")
+
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
 
@@ -133,7 +152,11 @@ class SeedTaskFactory(TaskFactory):
         valid_dbt_deps_types: list[str] = []  # Seeds don't have dependencies
 
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
-        commands = [f"dbt deps {self.dbt_options}", f"dbt seed --select {dbt_node_name} {self.dbt_options}"]
+
+        dbt_deps = self.get_dbt_deps_command(dbt_node_name)
+        commands = [dbt_deps] if dbt_deps else []
+        commands.append(f"dbt seed --select {dbt_node_name} {self.dbt_options}")
+
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
 
@@ -155,5 +178,9 @@ class TestTaskFactory(TaskFactory):
         valid_dbt_deps_types: list[str] = [DbtNodeTypes.MODEL.value]
 
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
-        commands = [f"dbt deps {self.dbt_options}", f"dbt test --select {dbt_node_name} {self.dbt_options}"]
+
+        dbt_deps = self.get_dbt_deps_command(dbt_node_name)
+        commands = [dbt_deps] if dbt_deps else []
+        commands.append(f"dbt test --select {dbt_node_name} {self.dbt_options}")
+
         return DbtTask(task_key, commands, self.task_options, depends_on)

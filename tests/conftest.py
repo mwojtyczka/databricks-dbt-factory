@@ -12,16 +12,35 @@ from databricks_dbt_factory.TaskFactory import (
 
 
 @pytest.fixture
-def file_handler():
+def file_handler() -> SpecsHandler:
     return SpecsHandler()
 
 
 @pytest.fixture
-def databricks_dbt_factory(file_handler):
+def dbt_factory(file_handler: SpecsHandler):
+    return create_dbt_factory(file_handler)
+
+
+@pytest.fixture
+def dbt_factory_with_deps(file_handler: SpecsHandler):
+    return create_dbt_factory(file_handler, dbt_deps_enabled=True)
+
+
+@pytest.fixture
+def dbt_factory_with_deps_selected(file_handler: SpecsHandler):
+    return create_dbt_factory(
+        file_handler,
+        dbt_deps_enabled=True,
+        dbt_tasks_deps=["diamonds_prices", "second_dbt_model"],
+    )
+
+
+def create_dbt_factory(
+    handler: SpecsHandler, dbt_deps_enabled: bool = False, dbt_tasks_deps: list[str] | None = None
+) -> DbtFactory:
     resolver = DbtDependencyResolver()
     task_options = DbtTaskOptions(
-        source="GIT",
-        environment_key="Default",
+        source="GIT", environment_key="Default", dbt_deps_enabled=dbt_deps_enabled, dbt_tasks_deps=dbt_tasks_deps
     )
     dbt_options = "--target dev"
 
@@ -32,4 +51,4 @@ def databricks_dbt_factory(file_handler):
         'test': TestTaskFactory(resolver, task_options, dbt_options),
     }
 
-    return DbtFactory(file_handler, task_factories)
+    return DbtFactory(handler, task_factories)

@@ -16,7 +16,15 @@ def main():
 
     file_handler = SpecsHandler()
     resolver = DbtDependencyResolver()
-    dbt_options = f"--target {args.target} {args.extra_dbt_command_options}"
+
+    dbt_options = f"--target {args.target}" + (
+        f" {args.extra_dbt_command_options}" if args.extra_dbt_command_options else ""
+    )
+
+    dbt_tasks_deps = (
+        [item.strip() for item in args.dbt_tasks_deps.split(",") if item.strip()] if args.dbt_tasks_deps else []
+    )
+
     task_options = DbtTaskOptions(
         environment_key=args.environment_key,
         warehouse_id=args.warehouse_id,
@@ -25,6 +33,8 @@ def main():
         profiles_directory=args.profiles_directory,
         project_directory=args.project_directory,
         source=args.source,
+        dbt_deps_enabled=args.enable_dbt_deps,
+        dbt_tasks_deps=dbt_tasks_deps,
     )
     task_factories = {
         'model': ModelTaskFactory(resolver, task_options, dbt_options),
@@ -105,6 +115,20 @@ def parse_args():
         help="Whether to run data tests after the model. Enabled by default.",
         required=False,
         default=True,
+    )
+    parser.add_argument(
+        "--enable-dbt-deps",
+        type=bool,
+        help="Optional flag to enable dbt deps to be run before each task.",
+        required=False,
+        default=False,
+    )
+    parser.add_argument(
+        "--dbt-tasks-deps",
+        type=str,
+        help="Optional list of tasks that require dbt deps. Only in effect if `--enable-dbt-deps` is enabled.",
+        required=False,
+        default=None,
     )
     parser.add_argument(
         "--dry-run",

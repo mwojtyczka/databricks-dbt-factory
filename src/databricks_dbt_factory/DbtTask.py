@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -37,6 +37,12 @@ class DbtTaskOptions:
     """ID of the SQL warehouse to connect to. If provided, we automatically generate and provide the
     profile and connection details to dbt. It can be overridden on a per-command basis by using the
     `--profiles-dir` command line argument."""
+
+    dbt_deps_enabled: bool = False
+    """Optional flag to enable dbt deps to be run before each task. Defaults to False."""
+
+    dbt_tasks_deps: list[str] = field(default_factory=list)
+    """Optional comma separated list of tasks that requires dbt debs. Only in effect if dbt_deps_enabled is enabled."""
 
 
 @dataclass(frozen=True)

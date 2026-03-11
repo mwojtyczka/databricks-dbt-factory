@@ -35,12 +35,26 @@ def dbt_factory_with_deps_selected(file_handler: SpecsHandler):
     )
 
 
+@pytest.fixture
+def notebook_factory(file_handler: SpecsHandler):
+    return create_dbt_factory(file_handler, task_type="notebook", notebook_path="./notebooks/dbt_runner.py")
+
+
 def create_dbt_factory(
-    handler: SpecsHandler, dbt_deps_enabled: bool = False, dbt_tasks_deps: list[str] | None = None
+    handler: SpecsHandler,
+    dbt_deps_enabled: bool = False,
+    dbt_tasks_deps: list[str] | None = None,
+    task_type: str = "dbt",
+    notebook_path: str | None = None,
 ) -> DbtFactory:
     resolver = DbtDependencyResolver()
     task_options = DbtTaskOptions(
-        source="GIT", environment_key="Default", dbt_deps_enabled=dbt_deps_enabled, dbt_tasks_deps=dbt_tasks_deps
+        source="GIT",
+        environment_key="Default",
+        dbt_deps_enabled=dbt_deps_enabled,
+        dbt_tasks_deps=dbt_tasks_deps,
+        task_type=task_type,
+        notebook_path=notebook_path,
     )
     dbt_options = "--target dev"
 

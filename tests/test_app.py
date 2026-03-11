@@ -45,6 +45,47 @@ def test_main_given_default_args(monkeypatch):
             os.remove(target_job_spec_path)
 
 
+def test_main_notebook_mode(monkeypatch):
+    """Test the main function for notebook task type generation."""
+    dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"
+    input_job_spec_path = BASE_PATH + "/test_data/job_definition_template.yaml"
+    expected_job_definition_path = BASE_PATH + "/test_data/job_definition_notebook_default.yaml"
+
+    with NamedTemporaryFile(suffix=".yaml", delete=False) as temp_file:
+        target_job_spec_path = temp_file.name
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            dbt_manifest_path,
+            "--input-job-spec-path",
+            input_job_spec_path,
+            "--target-job-spec-path",
+            target_job_spec_path,
+            "--task-type",
+            "notebook",
+            "--notebook-path",
+            "./notebooks/dbt_runner.py",
+        ],
+    )
+
+    try:
+        main()
+
+        with open(expected_job_definition_path, "r", encoding="utf-8") as file:
+            expected_job_definition = yaml.safe_load(file)
+
+        with open(target_job_spec_path, "r", encoding="utf-8") as file:
+            job_definition = yaml.safe_load(file)
+
+        assert job_definition == expected_job_definition
+    finally:
+        if os.path.exists(target_job_spec_path):
+            os.remove(target_job_spec_path)
+
+
 def test_main_all_args(monkeypatch):
     """Test the main function for job spec generation."""
     dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"

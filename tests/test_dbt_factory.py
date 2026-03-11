@@ -29,6 +29,13 @@ def test_create_job_spec_and_update_with_selected_dbt_deps(dbt_factory_with_deps
     )
 
 
+def test_notebook_task_generation(notebook_factory):
+    run_job_spec_test(
+        notebook_factory,
+        BASE_PATH + "/test_data/job_definition_notebook_no_deps.yaml",
+    )
+
+
 def run_job_spec_test(dbt_factory, expected_job_definition_path):
     """Helper function to test databricks job definition generation."""
     dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"

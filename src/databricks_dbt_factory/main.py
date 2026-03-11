@@ -32,6 +32,9 @@ def main():
         source=args.source,
         dbt_deps_enabled=args.enable_dbt_deps,
         dbt_tasks_deps=dbt_tasks_deps,
+        task_type=args.task_type,
+        notebook_path=args.notebook_path,
+        job_cluster_key=args.job_cluster_key,
     )
     task_factories = {
         'model': ModelTaskFactory(resolver, task_options, dbt_options),
@@ -141,6 +144,28 @@ def parse_args():
         default=None,
     )
     parser.add_argument(
+        "--task-type",
+        type=str,
+        help="Task type to generate: 'dbt' for native dbt_task (default), 'notebook' for notebook_task wrapper.",
+        required=False,
+        default="dbt",
+        choices=["dbt", "notebook"],
+    )
+    parser.add_argument(
+        "--notebook-path",
+        type=str,
+        help="Path to the dbt runner notebook. Required when --task-type is 'notebook'.",
+        required=False,
+        default=None,
+    )
+    parser.add_argument(
+        "--job-cluster-key",
+        type=str,
+        help="Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with --environment-key.",
+        required=False,
+        default=None,
+    )
+    parser.add_argument(
         "--dry-run",
         type=bool,
         help="Print generated tasks without updating the job spec file. Disabled by default.",
@@ -148,6 +173,13 @@ def parse_args():
         default=False,
     )
     args = parser.parse_args()
+
+    if args.task_type == "notebook" and not args.notebook_path:
+        parser.error("--notebook-path is required when --task-type is 'notebook'")
+
+    if args.job_cluster_key and args.environment_key != "Default":
+        parser.error("--job-cluster-key and --environment-key are mutually exclusive")
+
     return args
 
 

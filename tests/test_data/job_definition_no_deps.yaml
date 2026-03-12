@@ -16,290 +16,125 @@ resources:
           - dbt-databricks
       tasks:
       - task_key: diamonds_list_colors
+        depends_on:
+        - task_key: diamonds_four_cs
+        environment_key: Default
         dbt_task:
           commands:
           - dbt run --select diamonds_list_colors --target dev
           source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: diamonds_four_cs
       - task_key: diamonds_prices
+        depends_on: []
+        environment_key: Default
         dbt_task:
           commands:
           - dbt run --select diamonds_prices --target dev
           source: GIT
-        environment_key: Default
-        depends_on: []
       - task_key: diamonds_four_cs
+        depends_on: []
+        environment_key: Default
         dbt_task:
           commands:
           - dbt run --select diamonds_four_cs --target dev
           source: GIT
-        environment_key: Default
-        depends_on: []
       - task_key: zzz_game_details
+        depends_on: []
+        environment_key: Default
         dbt_task:
           commands:
           - dbt run --select zzz_game_details --target dev
           source: GIT
-        environment_key: Default
-        depends_on: []
       - task_key: second_dbt_model
+        depends_on:
+        - task_key: first_dbt_model_tests
+        environment_key: Default
         dbt_task:
           commands:
           - dbt run --select second_dbt_model --target dev
           source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: first_dbt_model_test_unique_first_dbt_model_id
-        - task_key: first_dbt_model_test_not_null_first_dbt_model_id
       - task_key: first_dbt_model
+        depends_on: []
+        environment_key: Default
         dbt_task:
           commands:
           - dbt run --select first_dbt_model --target dev
           source: GIT
-        environment_key: Default
-        depends_on: []
-      - task_key: zzz_game_details_test_zzz_game_details_check_scores
-        dbt_task:
-          commands:
-          - dbt test --select zzz_game_details_check_scores --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_zzz_game_details_check_dates
-        dbt_task:
-          commands:
-          - dbt test --select zzz_game_details_check_dates --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_win_loss_records_test_zzz_win_loss_records_check_records
-        dbt_task:
-          commands:
-          - dbt test --select zzz_win_loss_records_check_records --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_win_loss_records
-      - task_key: diamonds_list_colors_test_diamonds_list_colors_test
-        dbt_task:
-          commands:
-          - dbt test --select diamonds_list_colors_test --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: diamonds_list_colors
       - task_key: seed_country_codes
+        depends_on: []
+        environment_key: Default
         dbt_task:
           commands:
           - dbt seed --select country_codes --target dev
           source: GIT
-        environment_key: Default
-        depends_on: []
-      - task_key: zzz_game_details_test_unique_zzz_game_details_game_id
-        dbt_task:
-          commands:
-          - dbt test --select unique_zzz_game_details_game_id --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_not_null_zzz_game_details_game_id
-        dbt_task:
-          commands:
-          - dbt test --select not_null_zzz_game_details_game_id --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_not_null_zzz_game_details_home
-        dbt_task:
-          commands:
-          - dbt test --select not_null_zzz_game_details_home --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle
-        dbt_task:
-          commands:
-          - dbt test --select accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_not_null_zzz_game_details_visitor
-        dbt_task:
-          commands:
-          - dbt test --select not_null_zzz_game_details_visitor --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle
-        dbt_task:
-          commands:
-          - dbt test --select accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_not_null_zzz_game_details_home_score
-        dbt_task:
-          commands:
-          - dbt test --select not_null_zzz_game_details_home_score --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_not_null_zzz_game_details_visitor_score
-        dbt_task:
-          commands:
-          - dbt test --select not_null_zzz_game_details_visitor_score --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_not_null_zzz_game_details_winner
-        dbt_task:
-          commands:
-          - dbt test --select not_null_zzz_game_details_winner --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle
-        dbt_task:
-          commands:
-          - dbt test --select accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: zzz_game_details_test_not_null_zzz_game_details_date
-        dbt_task:
-          commands:
-          - dbt test --select not_null_zzz_game_details_date --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: zzz_game_details
-      - task_key: first_dbt_model_test_unique_first_dbt_model_id
-        dbt_task:
-          commands:
-          - dbt test --select unique_first_dbt_model_id --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: first_dbt_model
-      - task_key: first_dbt_model_test_not_null_first_dbt_model_id
-        dbt_task:
-          commands:
-          - dbt test --select not_null_first_dbt_model_id --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: first_dbt_model
-      - task_key: second_dbt_model_test_unique_second_dbt_model_id
-        dbt_task:
-          commands:
-          - dbt test --select unique_second_dbt_model_id --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: second_dbt_model
-      - task_key: second_dbt_model_test_not_null_second_dbt_model_id
-        dbt_task:
-          commands:
-          - dbt test --select not_null_second_dbt_model_id --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: second_dbt_model
-      - task_key: second_dbt_model_test_not_null_second_dbt_model_amount_usd
-        dbt_task:
-          commands:
-          - dbt test --select not_null_second_dbt_model_amount_usd --target dev
-          source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: second_dbt_model
       - task_key: changed_country
+        depends_on:
+        - task_key: snapshot_country_snapshot
+        environment_key: Default
         dbt_task:
           commands:
           - dbt run --select changed_country --target dev
           source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: snapshot_country_snapshot
       - task_key: country
+        depends_on:
+        - task_key: seed_country_codes
+        environment_key: Default
         dbt_task:
           commands:
           - dbt run --select country --target dev
           source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: seed_country_codes
       - task_key: snapshot_country_snapshot
+        depends_on:
+        - task_key: country
+        environment_key: Default
         dbt_task:
           commands:
           - dbt snapshot --select country_snapshot --target dev
           source: GIT
-        environment_key: Default
-        depends_on:
-        - task_key: country
       - task_key: zzz_win_loss_records
+        depends_on:
+        - task_key: zzz_game_details_tests
+        environment_key: Default
         dbt_task:
           commands:
           - dbt run --select zzz_win_loss_records --target dev
           source: GIT
-        environment_key: Default
+      - task_key: diamonds_list_colors_tests
         depends_on:
-        - task_key: zzz_game_details_test_zzz_game_details_check_scores
-        - task_key: zzz_game_details_test_zzz_game_details_check_dates
-        - task_key: zzz_game_details_test_unique_zzz_game_details_game_id
-        - task_key: zzz_game_details_test_not_null_zzz_game_details_game_id
-        - task_key: zzz_game_details_test_not_null_zzz_game_details_home
-        - task_key: zzz_game_details_test_accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle
-        - task_key: zzz_game_details_test_not_null_zzz_game_details_visitor
-        - task_key: zzz_game_details_test_accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle
-        - task_key: zzz_game_details_test_not_null_zzz_game_details_home_score
-        - task_key: zzz_game_details_test_not_null_zzz_game_details_visitor_score
-        - task_key: zzz_game_details_test_not_null_zzz_game_details_winner
-        - task_key: zzz_game_details_test_accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle
-        - task_key: zzz_game_details_test_not_null_zzz_game_details_date
-      - task_key: zzz_win_loss_records_test_unique_zzz_win_loss_records_team
+        - task_key: diamonds_list_colors
+        environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select unique_zzz_win_loss_records_team --target dev
+          - dbt test --select diamonds_list_colors --target dev
           source: GIT
-        environment_key: Default
+      - task_key: first_dbt_model_tests
         depends_on:
-        - task_key: zzz_win_loss_records
-      - task_key: zzz_win_loss_records_test_not_null_zzz_win_loss_records_team
+        - task_key: first_dbt_model
+        environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_win_loss_records_team --target dev
+          - dbt test --select first_dbt_model --target dev
           source: GIT
-        environment_key: Default
+      - task_key: second_dbt_model_tests
         depends_on:
-        - task_key: zzz_win_loss_records
-      - task_key: zzz_win_loss_records_test_not_null_zzz_win_loss_records_wins
+        - task_key: second_dbt_model
+        environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_win_loss_records_wins --target dev
+          - dbt test --select second_dbt_model --target dev
           source: GIT
-        environment_key: Default
+      - task_key: zzz_game_details_tests
         depends_on:
-        - task_key: zzz_win_loss_records
-      - task_key: zzz_win_loss_records_test_not_null_zzz_win_loss_records_losses
+        - task_key: zzz_game_details
+        environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_win_loss_records_losses --target dev
+          - dbt test --select zzz_game_details --target dev
           source: GIT
-        environment_key: Default
+      - task_key: zzz_win_loss_records_tests
         depends_on:
         - task_key: zzz_win_loss_records
+        environment_key: Default
+        dbt_task:
+          commands:
+          - dbt test --select zzz_win_loss_records --target dev
+          source: GIT

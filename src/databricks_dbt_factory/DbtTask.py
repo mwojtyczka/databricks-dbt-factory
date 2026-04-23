@@ -1,6 +1,14 @@
 import json
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
+
+
+class TaskType(Enum):
+    """Supported task types for generated Databricks tasks."""
+
+    DBT = "dbt"
+    NOTEBOOK = "notebook"
 
 
 @dataclass(frozen=True)
@@ -45,15 +53,35 @@ class DbtTaskOptions:
     dbt_tasks_deps: list[str] = field(default_factory=list)
     """Optional comma separated list of tasks that requires dbt debs. Only in effect if dbt_deps_enabled is enabled."""
 
-    task_type: str = "dbt"
-    """Task type to generate: 'dbt' for native dbt_task, 'notebook' for notebook_task wrapper.
+    task_type: TaskType = TaskType.DBT
+    """Task type to generate: `TaskType.DBT` for native dbt_task, `TaskType.NOTEBOOK` for notebook_task
+    wrapper. Strings are accepted and coerced — any value outside the enum raises `ValueError`.
     Notebook mode enables base environment support and environment variables on serverless."""
 
     notebook_path: str | None = None
-    """Path to the dbt runner notebook. Required when task_type is 'notebook'."""
+    """Path to the dbt runner notebook. Required when task_type is `TaskType.NOTEBOOK`."""
 
     job_cluster_key: str | None = None
     """Job cluster key for running tasks on job compute instead of serverless."""
+
+    def __post_init__(self):
+        if not isinstance(self.task_type, TaskType):
+            object.__setattr__(self, 'task_type', TaskType(self.task_type))
+        if self.task_type is TaskType.NOTEBOOK:
+            unsupported = [
+                name
+                for name, value in (
+                    ('warehouse_id', self.warehouse_id),
+                    ('schema', self.schema),
+                    ('catalog', self.catalog),
+                )
+                if value
+            ]
+            if unsupported:
+                raise ValueError(
+                    f"{', '.join(unsupported)} cannot be set with task_type=NOTEBOOK; "
+                    "notebook tasks connect via profiles.yml."
+                )
 
 
 
@@ -68,7 +96,7 @@ class DbtTask:
 
     def to_dict(self) -> dict:
         """Converts the Task to a dictionary suitable for the job definition."""
-        if self.options.task_type == "notebook":
+        if self.options.task_type is TaskType.NOTEBOOK:
             return self._to_notebook_dict()
         return self._to_dbt_dict()
 

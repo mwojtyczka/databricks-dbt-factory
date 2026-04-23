@@ -1,9 +1,10 @@
 import os
 from tempfile import NamedTemporaryFile
 from pathlib import Path
+import pytest
 import yaml
 
-from databricks_dbt_factory.main import main
+from databricks_dbt_factory.main import main, parse_args
 
 BASE_PATH = str(Path(__file__).resolve().parent)
 
@@ -123,7 +124,6 @@ def test_main_all_args(monkeypatch):
             "--source",
             "GIT",
             "--enable-dbt-deps",
-            "true",
             "--dbt-tasks-deps",
             "diamonds_prices,second_dbt_model",
             "--warehouse_id",
@@ -139,7 +139,6 @@ def test_main_all_args(monkeypatch):
             "--extra-dbt-command-options",
             extra_dbt_command_options,
             "--run-tests",
-            "true",
         ],
     )
 
@@ -167,6 +166,89 @@ def test_main_all_args(monkeypatch):
     finally:
         if os.path.exists(target_job_spec_path):
             os.remove(target_job_spec_path)
+
+
+REQUIRED_ARGS = [
+    "--dbt-manifest-path",
+    "manifest.json",
+    "--input-job-spec-path",
+    "in.yaml",
+    "--target-job-spec-path",
+    "out.yaml",
+]
+
+
+def test_explicit_environment_key_with_job_cluster_key_is_rejected(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", *REQUIRED_ARGS, "--job-cluster-key", "foo", "--environment-key", "Default"],
+    )
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
+def test_job_cluster_key_alone_parses(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS, "--job-cluster-key", "foo"])
+    args = parse_args()
+    assert args.job_cluster_key == "foo"
+    assert args.environment_key is None
+
+
+def test_environment_key_alone_parses(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS, "--environment-key", "Default"])
+    args = parse_args()
+    assert args.environment_key == "Default"
+    assert args.job_cluster_key is None
+
+
+def test_no_prefixed_flags_actually_disable(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            *REQUIRED_ARGS,
+            "--no-run-tests",
+            "--no-bundle-tests",
+            "--no-gate-on-tests",
+            "--no-enable-dbt-deps",
+            "--no-dry-run",
+        ],
+    )
+    args = parse_args()
+    assert args.run_tests is False
+    assert args.bundle_tests is False
+    assert args.gate_on_tests is False
+    assert args.enable_dbt_deps is False
+    assert args.dry_run is False
+
+
+def test_bare_bool_flags_default_to_enabled(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", *REQUIRED_ARGS, "--bundle-tests", "--gate-on-tests", "--run-tests"],
+    )
+    args = parse_args()
+    assert args.run_tests is True
+    assert args.bundle_tests is True
+    assert args.gate_on_tests is True
+
+
+def test_notebook_task_type_with_warehouse_id_is_rejected(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            *REQUIRED_ARGS,
+            "--task-type",
+            "notebook",
+            "--notebook-path",
+            "/n",
+            "--warehouse_id",
+            "wh123",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        parse_args()
 
 
 def remove_target_from_spec(expected_job_definition):

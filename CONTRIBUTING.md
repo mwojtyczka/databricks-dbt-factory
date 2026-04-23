@@ -49,6 +49,54 @@ databricks_dbt_factory  \
   --target dev
 ```
 
+## End-to-end testing on Databricks
+
+Unit tests (`make test`) cover factory logic in isolation. For changes that affect how generated
+tasks run on Databricks (task type, cluster/environment config, command shape, the notebook
+runner, etc.), verify end-to-end against a real workspace.
+
+The flow is: **generate** a job definition from a manifest → **deploy** it as a Databricks Asset
+Bundle → **run** it and confirm the tasks execute correctly.
+
+1. **Generate the job definition** using the CLI against one of the test manifests (or your own):
+
+    ```shell
+    databricks_dbt_factory \
+      --dbt-manifest-path tests/test_data/manifest.json \
+      --input-job-spec-path tests/test_data/job_definition_template.yaml \
+      --target-job-spec-path job_definition_new.yaml \
+      --source GIT \
+      --target dev
+    ```
+
+    For notebook-task-type testing, also pass `--task-type notebook --notebook-path <path>`.
+
+2. **Wrap the generated spec in a DAB** (`databricks.yml`). Use a **unique `bundle.name`** per
+    test iteration — DABs are declarative, so anything previously deployed under the same bundle
+    name but no longer in `include` is **deleted**. Example:
+
+    ```yaml
+    bundle:
+      name: dbt_factory_test_<iteration>
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+    include:
+      - job_definition_new.yaml
+    ```
+
+3. **Deploy and run:**
+
+    ```shell
+    databricks bundle validate
+    databricks bundle deploy
+    databricks bundle run <job-resource-name>
+    ```
+
+4. **Verify** the job runs in the Databricks UI — task graph matches expectations, each task
+    succeeds, and (for test tasks) failures surface the way your change intends.
+
+Tip: run against a scratch workspace so mistakes don't interfere with real jobs.
+
 ## First contribution
 
 Here are the example steps to submit your first contribution:

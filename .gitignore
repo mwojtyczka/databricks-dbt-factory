@@ -154,4 +154,3 @@ dev/cleanup.py
 .python-version
 .databricks-login.json
 .local-dev
-CLAUDE.md

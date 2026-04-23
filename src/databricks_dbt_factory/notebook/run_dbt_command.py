@@ -51,6 +51,7 @@ for command_str in json.loads(dbt_commands):
     result = runner.invoke(args)
 
     if not result.success:
-        raise Exception(f"dbt command failed: dbt {' '.join(args)}\n{result.exception}")
+        detail = result.exception or result.result or "(no further details)"
+        raise RuntimeError(f"dbt command failed: dbt {' '.join(args)}\n{detail}")
 
     print(f"Completed successfully: dbt {' '.join(args)}")

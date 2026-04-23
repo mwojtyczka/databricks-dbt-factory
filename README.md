@@ -180,12 +180,51 @@ The notebook:
 - `--environment-key` (type: str, optional, default: Default): Key of the serverless environment. Mutually exclusive with `--job-cluster-key`.
 - `--job-cluster-key` (type: str, optional): Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with `--environment-key`.
 - `--extra-dbt-command-options` (type: str, optional, default: ""): Additional dbt command options to include.
-- `--run-tests` (type: bool, optional, default: True): Whether to run data tests after each model.
-- `--enable-dbt-deps` (type: bool, optional, default: False): Whether to run dbt deps before each task. Disabled by default.
-- `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is enabled.
-- `--dry-run` (type: bool, optional, default: False): Print generated tasks without updating the job spec file.
+- `--run-tests` / `--no-run-tests` (flag, default: enabled): Run data tests after each model.
+- `--bundle-tests` / `--no-bundle-tests` (flag, default: enabled): Bundle tests per resource into one `dbt test --select <resource>` task. See [Test handling](#test-handling).
+- `--gate-on-tests` / `--no-gate-on-tests` (flag, default: enabled): Make downstream tasks depend on upstream `_tests` tasks so failing tests halt the DAG. Only meaningful when `--bundle-tests` is enabled. See [Test handling](#test-handling).
+- `--enable-dbt-deps` / `--no-enable-dbt-deps` (flag, default: disabled): Run dbt deps before each task.
+- `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
+- `--dry-run` / `--no-dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
 
 You can also check all input arguments by running `databricks_dbt_factory --help`.
+
+## Test handling
+
+When `--run-tests` is enabled, the factory produces tasks for dbt tests. Two modes are available,
+controlled by `--bundle-tests`:
+
+### Bundled (default, `--bundle-tests`)
+
+One Databricks task per tested resource, named `<resource>_tests`, running
+`dbt test --select <resource>`. Downstream models/seeds/snapshots that depend on a tested resource
+are rewired to depend on the `<resource>_tests` task, so data only flows downstream after its
+upstream tests pass.
+
+- **Pros:** simpler DAG, fewer tasks, each resource's tests travel together through dbt's native
+  test selection.
+- **Cons:** per-test parallelism is lost — all tests for a resource run inside one Databricks task.
+  A failure shows up as one red `<resource>_tests` task rather than a specific red `<test_name>`
+  task in the UI; drill into the task logs to see which individual test(s) failed.
+
+#### Gating behavior (`--gate-on-tests`)
+
+By default, the factory rewires downstream models/seeds/snapshots to depend on the upstream
+`<resource>_tests` task — a failing test halts the DAG. Pass `--no-gate-on-tests` to keep the
+`<resource>_tests` tasks in the DAG (still running, still visible) without blocking downstream
+execution when they fail. Useful for dev iteration, backfills, or test triage where you want
+to run downstream models even if some tests fail. Only meaningful when bundling is on; ignored
+under `--no-bundle-tests`.
+
+### Per-test (`--no-bundle-tests`)
+
+One Databricks task per dbt test node, running `dbt test --select <test_name>`. Each test task
+gates on its parent model/seed/snapshot; source tests run standalone. Downstream models are **not**
+rewired — they depend on the parent resource task directly.
+
+- **Pros:** per-test parallelism; failing tests are individually visible in the Databricks UI.
+- **Cons:** much larger DAG (one task per test, and dbt projects routinely have many more tests
+  than models).
 
 ## Task types
 

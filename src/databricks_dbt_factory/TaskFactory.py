@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 from enum import Enum
 
 from databricks_dbt_factory.DbtTask import DbtTask, DbtTaskOptions
-from databricks_dbt_factory.Utils import generate_task_key
 
 
 class DbtNodeTypes(Enum):
@@ -15,8 +14,13 @@ class DbtNodeTypes(Enum):
 
 
 class DbtDependencyResolver:
-    @staticmethod
-    def resolve(node_info: dict, valid_deps_types: list[str]) -> list[str]:
+    def __init__(self) -> None:
+        self.task_key_map: dict[str, str] = {}
+
+    def set_task_key_map(self, task_key_map: dict[str, str]) -> None:
+        self.task_key_map = task_key_map
+
+    def resolve(self, node_info: dict, valid_deps_types: list[str]) -> list[str]:
         """
         Resolves dependencies for a given DBT node.
 
@@ -31,7 +35,7 @@ class DbtDependencyResolver:
         resolved_deps = []
         for node_full_name in deps:
             if any(node_full_name.startswith(dbt_type + ".") for dbt_type in valid_deps_types):
-                resolved_deps.append(generate_task_key(node_full_name))
+                resolved_deps.append(self.task_key_map[node_full_name])
         return resolved_deps
 
 
@@ -165,7 +169,7 @@ class TestTaskFactory(TaskFactory):
 
     def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
         """
-        Creates a test task.
+        Creates a test task for a single dbt test node.
 
         Args:
             dbt_node_name (str): Name of the DBT node.
@@ -175,12 +179,37 @@ class TestTaskFactory(TaskFactory):
         Returns:
             DbtTask: An instance of Task.
         """
-        valid_dbt_deps_types: list[str] = [DbtNodeTypes.MODEL.value]
+        valid_dbt_deps_types: list[str] = [
+            DbtNodeTypes.MODEL.value,
+            DbtNodeTypes.SEED.value,
+            DbtNodeTypes.SNAPSHOT.value,
+        ]
 
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
 
         dbt_deps = self.get_dbt_deps_command(dbt_node_name)
         commands = [dbt_deps] if dbt_deps else []
         commands.append(f"dbt test --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+
+        return DbtTask(task_key, commands, self.task_options, depends_on)
+
+    def create_bundled_task(
+        self, task_key: str, select: str, deps_command_name: str, depends_on: list[str]
+    ) -> DbtTask:
+        """
+        Creates a single test task that runs all tests for a given resource via `dbt test --select`.
+
+        Args:
+            task_key (str): Key for the bundled task.
+            select (str): Pre-computed dbt `--select` argument (bare or qualified, with `source:` prefix when applicable).
+            deps_command_name (str): Name used by `get_dbt_deps_command` to decide whether to prepend `dbt deps`.
+            depends_on (list[str]): Upstream task keys this bundled task should gate on.
+
+        Returns:
+            DbtTask: An instance of Task.
+        """
+        dbt_deps = self.get_dbt_deps_command(deps_command_name)
+        commands = [dbt_deps] if dbt_deps else []
+        commands.append(f"dbt test --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)

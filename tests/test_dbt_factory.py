@@ -8,6 +8,230 @@ import yaml
 BASE_PATH = str(Path(__file__).resolve().parent)
 
 
+def _model(package: str, name: str, depends_on: list[str] | None = None) -> tuple[str, dict]:
+    full_name = f"model.{package}.{name}"
+    return full_name, {
+        'resource_type': 'model',
+        'name': name,
+        'package_name': package,
+        'depends_on': {'nodes': depends_on or []},
+    }
+
+
+def _test(package: str, name: str, depends_on: list[str]) -> tuple[str, dict]:
+    full_name = f"test.{package}.{name}"
+    return full_name, {
+        'resource_type': 'test',
+        'name': name,
+        'package_name': package,
+        'depends_on': {'nodes': depends_on},
+    }
+
+
+def _seed(package: str, name: str) -> tuple[str, dict]:
+    full_name = f"seed.{package}.{name}"
+    return full_name, {
+        'resource_type': 'seed',
+        'name': name,
+        'package_name': package,
+        'depends_on': {'nodes': []},
+    }
+
+
+def _snapshot(package: str, name: str, depends_on: list[str] | None = None) -> tuple[str, dict]:
+    full_name = f"snapshot.{package}.{name}"
+    return full_name, {
+        'resource_type': 'snapshot',
+        'name': name,
+        'package_name': package,
+        'depends_on': {'nodes': depends_on or []},
+    }
+
+
+def _source(package: str, source_name: str, table: str) -> tuple[str, dict]:
+    full_name = f"source.{package}.{source_name}.{table}"
+    return full_name, {
+        'resource_type': 'source',
+        'name': table,
+        'source_name': source_name,
+        'package_name': package,
+    }
+
+
+def test_collision_produces_distinct_test_tasks_with_qualified_select(dbt_factory):
+    nodes = dict(
+        [
+            _model('pkg_a', 'customers'),
+            _model('pkg_b', 'customers'),
+            _model('pkg_a', 'orders', depends_on=['model.pkg_a.customers', 'model.pkg_b.customers']),
+            _test('pkg_a', 'unique_customers_id', ['model.pkg_a.customers']),
+            _test('pkg_b', 'not_null_customers_id', ['model.pkg_b.customers']),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'pkg_a_customers_tests' in by_key
+    assert 'pkg_b_customers_tests' in by_key
+    assert by_key['pkg_a_customers_tests']['dbt_task']['commands'] == [
+        'dbt test --select pkg_a.customers --target dev'
+    ]
+    assert by_key['pkg_b_customers_tests']['dbt_task']['commands'] == [
+        'dbt test --select pkg_b.customers --target dev'
+    ]
+    assert by_key['pkg_a_customers_tests']['depends_on'] == [{'task_key': 'pkg_a_customers'}]
+    assert by_key['pkg_b_customers_tests']['depends_on'] == [{'task_key': 'pkg_b_customers'}]
+
+    assert {dep['task_key'] for dep in by_key['orders']['depends_on']} == {
+        'pkg_a_customers_tests',
+        'pkg_b_customers_tests',
+    }
+
+
+def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory):
+    nodes = dict(
+        [
+            _seed('pkg', 'countries'),
+            _model('pkg', 'enriched', depends_on=['seed.pkg.countries']),
+            _test('pkg', 'unique_countries_code', ['seed.pkg.countries']),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'seed_countries_tests' in by_key
+    assert by_key['seed_countries_tests']['dbt_task']['commands'] == [
+        'dbt test --select countries --target dev'
+    ]
+    assert by_key['seed_countries_tests']['depends_on'] == [{'task_key': 'seed_countries'}]
+    assert by_key['enriched']['depends_on'] == [{'task_key': 'seed_countries_tests'}]
+
+
+def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory):
+    nodes = dict(
+        [
+            _snapshot('pkg', 'orders_snap'),
+            _model('pkg', 'orders_history', depends_on=['snapshot.pkg.orders_snap']),
+            _test('pkg', 'not_null_orders_snap_id', ['snapshot.pkg.orders_snap']),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'snapshot_orders_snap_tests' in by_key
+    assert by_key['snapshot_orders_snap_tests']['dbt_task']['commands'] == [
+        'dbt test --select orders_snap --target dev'
+    ]
+    assert by_key['snapshot_orders_snap_tests']['depends_on'] == [{'task_key': 'snapshot_orders_snap'}]
+    assert by_key['orders_history']['depends_on'] == [{'task_key': 'snapshot_orders_snap_tests'}]
+
+
+def test_tests_on_source_produce_standalone_task(dbt_factory):
+    nodes = dict(
+        [
+            _test('pkg', 'unique_raw_customers_id', ['source.pkg.raw.customers']),
+        ]
+    )
+    sources = dict([_source('pkg', 'raw', 'customers')])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes, 'sources': sources})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'source_raw_customers_tests' in by_key
+    assert by_key['source_raw_customers_tests']['dbt_task']['commands'] == [
+        'dbt test --select source:raw.customers --target dev'
+    ]
+    assert by_key['source_raw_customers_tests']['depends_on'] == []
+
+
+def test_flat_mode_emits_one_task_per_test_node(dbt_factory_flat):
+    nodes = dict(
+        [
+            _model('pkg', 'customers'),
+            _model('pkg', 'orders', depends_on=['model.pkg.customers']),
+            _test('pkg', 'unique_customers_id', ['model.pkg.customers']),
+            _test('pkg', 'not_null_customers_id', ['model.pkg.customers']),
+        ]
+    )
+
+    tasks = dbt_factory_flat.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'test_unique_customers_id' in by_key
+    assert 'test_not_null_customers_id' in by_key
+    assert 'customers_tests' not in by_key
+
+    assert by_key['test_unique_customers_id']['dbt_task']['commands'] == [
+        'dbt test --select unique_customers_id --target dev'
+    ]
+    assert by_key['test_unique_customers_id']['depends_on'] == [{'task_key': 'customers'}]
+    assert by_key['orders']['depends_on'] == [{'task_key': 'customers'}]
+
+
+def test_flat_mode_test_on_seed_gates_on_seed(dbt_factory_flat):
+    nodes = dict(
+        [
+            _seed('pkg', 'countries'),
+            _test('pkg', 'unique_countries_code', ['seed.pkg.countries']),
+        ]
+    )
+
+    tasks = dbt_factory_flat.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['test_unique_countries_code']['depends_on'] == [{'task_key': 'seed_countries'}]
+
+
+def test_ungated_mode_emits_bundled_tests_without_rewiring_downstream(dbt_factory_ungated):
+    nodes = dict(
+        [
+            _model('pkg', 'customers'),
+            _model('pkg', 'orders', depends_on=['model.pkg.customers']),
+            _test('pkg', 'unique_customers_id', ['model.pkg.customers']),
+        ]
+    )
+
+    tasks = dbt_factory_ungated.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'customers_tests' in by_key
+    assert by_key['customers_tests']['depends_on'] == [{'task_key': 'customers'}]
+    assert by_key['orders']['depends_on'] == [{'task_key': 'customers'}]
+
+
+def test_bundled_task_factory_assembles_commands(dbt_factory):
+    test_factory = dbt_factory.task_factories['test']
+    task = test_factory.create_bundled_task(
+        task_key='customers_tests',
+        select='customers',
+        deps_command_name='customers',
+        depends_on=['customers'],
+    )
+    assert task.task_key == 'customers_tests'
+    assert task.commands == ['dbt test --select customers --target dev']
+    assert task.depends_on == ['customers']
+
+
+def test_no_collision_keeps_bare_names_in_test_select(dbt_factory):
+    nodes = dict(
+        [
+            _model('pkg_a', 'customers'),
+            _model('pkg_a', 'orders', depends_on=['model.pkg_a.customers']),
+            _test('pkg_a', 'unique_customers_id', ['model.pkg_a.customers']),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'customers_tests' in by_key
+    assert by_key['customers_tests']['dbt_task']['commands'] == ['dbt test --select customers --target dev']
+    assert by_key['orders']['depends_on'] == [{'task_key': 'customers_tests'}]
+
+
 def test_create_job_spec_and_update(dbt_factory):
     run_job_spec_test(
         dbt_factory,

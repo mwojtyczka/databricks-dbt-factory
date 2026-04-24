@@ -30,7 +30,7 @@ make test
 ## Local installation and execution
 
 ```shell
-hatch build
+make build
 
 # use hatch directly
 hatch run databricks_dbt_factory \

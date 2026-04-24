@@ -121,15 +121,23 @@ databricks_dbt_factory  \
   --input-job-spec-path job_template.yaml \
   --target-job-spec-path job_definition.yaml \
   --task-type notebook \
-  --project-directory /Workspace/Users/you@example.com/my_dbt_project \
-  --profiles-directory /Workspace/Users/you@example.com/my_dbt_project \
-  --source WORKSPACE \
+  --source GIT \
   --target dev
 ```
 
 The packaged runner notebook (`run_dbt_command.py`) is copied next to the generated job spec
 automatically. The `databricks bundle deploy` DAB command uploads it to the workspace along with the job.
 Pass `--notebook-path <path>` if you want to pin the notebook elsewhere and manage it yourself.
+
+If your dbt project lives in the workspace instead of git (`--source WORKSPACE`), also pass `--project-directory` and `--profiles-directory` pointing at the absolute workspace paths of the uploaded project, e.g.:
+
+```shell
+databricks_dbt_factory ... \
+  --task-type notebook \
+  --source WORKSPACE \
+  --project-directory /Workspace/Users/you@example.com/my_dbt_project \
+  --profiles-directory /Workspace/Users/you@example.com/my_dbt_project
+```
 
 ### Providing your own cluster (non-serverless mode)
 
@@ -157,10 +165,8 @@ databricks_dbt_factory  \
   --input-job-spec-path job_template.yaml \
   --target-job-spec-path job_definition.yaml \
   --task-type notebook \
-  --project-directory /Workspace/Users/you@example.com/my_dbt_project \
-  --profiles-directory /Workspace/Users/you@example.com/my_dbt_project \
   --job-cluster-key dbt_cluster \
-  --source WORKSPACE \
+  --source GIT \
   --target dev
 ```
 
@@ -267,6 +273,78 @@ Each task calls a shared runner notebook (`run_dbt_command.py`) with parameteriz
 - Faster execution by avoiding cold start problem - all dependencies can be pre pre-cached inside  `base_environment`
 - Supports running the dbt process on job compute via `--job-cluster-key` (SQL execution still uses the warehouse in `profiles.yml`)
 - More flexibility - The runner notebook is editable. Want to load secrets from a scope before dbt runs? Run dbt, then call a Python API with the result? Emit a Slack message on failure? Tag the run with Git SHA? Add a few lines to the runner notebook.
+
+
+## End-to-end example
+
+A complete working project is available at [mwojtyczka/dbt-demo](https://github.com/mwojtyczka/dbt-demo).
+The steps below walk through running it end-to-end.
+
+1. **Clone the demo project.**
+
+    ```shell
+    git clone https://github.com/mwojtyczka/dbt-demo.git
+    cd dbt-demo
+    ```
+
+2. **Install dependencies.**
+
+    ```shell
+    pip install dbt-databricks databricks-dbt-factory
+    ```
+
+    Install the [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install):
+
+    ```shell
+    brew install databricks
+    ```
+
+3. **Set auth environment variables.** The demo's `profiles.yml` reads these to connect to
+    Databricks:
+
+    ```shell
+    export DBT_HOST="https://<your-workspace>.cloud.databricks.com"
+    export DBT_ACCESS_TOKEN="<your-pat>"
+    ```
+
+4. **Compile the dbt project** to produce dbt manifest file (`target/manifest.json`), which the factory reads:
+
+    ```shell
+    dbt compile
+    ```
+
+5. **Create Databricks Workflow.** This reads the manifest and the job template (`resources/dbt_sql_job.yml`) and writes a new, fully-expanded job spec to `resources/dbt_sql_job_explicit_tasks.yml` — one task per dbt node, wired up with the right dependencies:
+
+    ```shell
+    databricks_dbt_factory \
+      --dbt-manifest-path target/manifest.json \
+      --input-job-spec-path resources/dbt_sql_job.yml \
+      --target-job-spec-path resources/dbt_sql_job_explicit_tasks.yml \
+      --target '${bundle.target}' \
+      --project-directory ../ \
+      --profiles-directory . \
+      --environment-key Default \
+      --new-job-name dbt_sql_job_explicit_tasks
+    ```
+
+    For best performance, add `--task-type notebook` to the command above — it routes dbt execution through the packaged runner notebook (pre-cached base environments, faster cold starts). See [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance) for the full rationale.
+
+6. **Authenticate the Databricks CLI to your workspace.** The `databricks.yml` in the demo references a specific profile (e.g. `FIELD-ENG`) under each target. Log in so that profile resolves:
+
+    ```shell
+    databricks auth login --host https://<your-workspace>.cloud.databricks.com
+    ```
+
+    You can verify with `databricks auth profiles`. If your `databricks.yml` uses a different profile name, pass `--profile <name>` on the login command to match.
+
+7. **Deploy and run the bundle:**
+
+    ```shell
+    databricks bundle deploy --target dev
+    databricks bundle run dbt_sql_job_explicit_tasks
+    ```
+
+   Open the run URL the CLI prints to watch the generated task graph execute in the Databricks UI.
 
 # Contribution
 

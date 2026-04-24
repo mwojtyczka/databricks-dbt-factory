@@ -155,7 +155,7 @@ databricks bundle run <job-resource-key>    # trigger a run (e.g. dbt_sql_job)
 - Each task succeeds — or, when intentionally breaking a test:
   - In the default per-test mode, the individual `test_<name>` task fails; downstream models
     still run (they depend on the parent resource task, not the test).
-  - Under `--bundle-tests`, the `<resource>_tests` task fails and downstream models/seeds/snapshots
+  - Under `--bundle-tests`, the `tests_<resource>` task fails and downstream models/seeds/snapshots
     gated on it are skipped.
 - For notebook tasks, confirm `dbt_commands` / `project_directory` / `profiles_directory`
   parameters render correctly in the task run page.

@@ -23,9 +23,10 @@ class DbtFactory:
             task_factories (dict[str, TaskFactory]): Maps dbt resource types (`model`, `seed`,
                 `snapshot`, `test`) to their respective `TaskFactory` instances. Omitting `test`
                 disables test-task generation entirely.
-            bundle_tests (bool): When True, emit one `<resource>_tests` task per tested resource
-                and rewire downstream models/seeds/snapshots to depend on the upstream's `_tests`
-                task so failing tests halt the DAG. When False, emit one task per dbt test node.
+            bundle_tests (bool): When True, emit one `tests_<resource>` task per tested resource
+                and rewire downstream models/seeds/snapshots to depend on the upstream's
+                `tests_<resource>` task so failing tests halt the DAG. When False, emit one task
+                per dbt test node.
         """
         self.file_handler = file_handler
         self.task_factories = task_factories
@@ -208,7 +209,7 @@ class DbtFactory:
         Classifies test nodes for bundled mode so that no test is silently dropped.
 
         - Tests with exactly 1 testable dep: will be covered by their resource's bundled
-          `<resource>_tests` task under `--indirect-selection cautious`.
+          `tests_<resource>` task under `--indirect-selection cautious`.
         - Tests with >1 testable deps (cross-model, e.g. `relationships`): emitted as their own
           tasks with multi-resource deps — `cautious` filters them out of bundles.
         - Tests with 0 testable deps (singular/custom tests that don't `ref()` or `source()`
@@ -217,7 +218,7 @@ class DbtFactory:
         Returns:
             (single_model_tested, standalone_tests):
                 - `single_model_tested`: full names of resources with at least one single-model
-                  test — these become `<resource>_tests` bundled tasks.
+                  test — these become `tests_<resource>` bundled tasks.
                 - `standalone_tests`: list of `(test_full_name, test_node_info)` for tests
                   that must run as individual tasks (cross-model or zero-dep).
         """
@@ -273,10 +274,10 @@ class DbtFactory:
 
     @staticmethod
     def _rewire_deps(deps: list[str] | None, task_keys_with_tests: set[str]) -> list[str]:
-        """Rewrites dependencies that point at a tested resource to its `_tests` gating task."""
+        """Rewrites dependencies that point at a tested resource to its `tests_<resource>` gating task."""
         rewired: list[str] = []
         for dep_key in deps or []:
-            rewired.append(f"{dep_key}_tests" if dep_key in task_keys_with_tests else dep_key)
+            rewired.append(f"tests_{dep_key}" if dep_key in task_keys_with_tests else dep_key)
         return rewired
 
     def _build_bundled_test_tasks(
@@ -285,7 +286,7 @@ class DbtFactory:
         dbt_sources: dict,
         nodes_with_tests: set[str],
     ) -> list[DbtTask]:
-        """Emits one `<resource>_tests` task per tested resource using `TestTaskFactory.create_bundled_task`."""
+        """Emits one `tests_<resource>` task per tested resource using `TestTaskFactory.create_bundled_task`."""
         test_factory = self.task_factories['test']
         tasks: list[DbtTask] = []
         for full_name in sorted(nodes_with_tests):
@@ -297,7 +298,7 @@ class DbtFactory:
             select = f"source:{info['package_name']}.{info['source_name']}.{bare_name}" if is_source else qualified
             tasks.append(
                 test_factory.create_bundled_task(
-                    task_key=f"{resource_task_key}_tests",
+                    task_key=f"tests_{resource_task_key}",
                     select=select,
                     deps_command_name=bare_name,
                     depends_on=[] if is_source else [resource_task_key],

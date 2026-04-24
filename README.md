@@ -192,7 +192,7 @@ databricks_dbt_factory  \
 - `--job-cluster-key` (type: str, optional): Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with `--environment-key`.
 - `--extra-dbt-command-options` (type: str, optional, default: ""): Additional dbt command options to include.
 - `--no-run-tests` (flag, default: tests enabled): Skip generating dbt test tasks. Tests are included by default.
-- `--bundle-tests` (flag, default: disabled): Bundle single-model tests per resource into one `dbt test --select <resource> --indirect-selection cautious` task, and gate downstream models/seeds/snapshots on the upstream's `_tests` task so failing tests halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Test handling](#test-handling).
+- `--bundle-tests` (flag, default: disabled): Bundle single-model tests per resource into one `dbt test --select <resource>` task, and gate downstream models/seeds/snapshots on the upstream's `tests_<resource>` task so failing tests halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Test handling](#test-handling).
 - `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
 - `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
@@ -227,11 +227,8 @@ The factory classifies each dbt test node into one of two buckets based on its `
 
 - **Single-model tests** (most tests: `unique`, `not_null`, `accepted_values`, column-level
   checks, …) — collapsed into one Databricks task per tested resource, with task key
-  `<resource_task_key>_tests` (e.g. `model_my_project_customers_tests`) running
-  `dbt test --select <package>.<resource> --indirect-selection cautious`. The `cautious`
-  indirect selector tells dbt "only run tests whose referenced resources are entirely within
-  this selection" — which makes the bundle correct: cross-model tests that happen to touch
-  this resource are filtered out here and handled separately.
+  `tests_<resource_task_key>` (e.g. `tests_model_my_project_customers`) that runs all the
+  resource's single-model tests together.
 
 - **Cross-model tests** (e.g. `relationships`, custom tests that reference multiple models) —
   emitted as their own tasks, one per test node, with deps on **every** resource the test
@@ -239,19 +236,20 @@ The factory classifies each dbt test node into one of two buckets based on its `
   because their correctness requires all their endpoints to be built first.
 
 Downstream models/seeds/snapshots that depend on a tested resource are rewired to depend on
-the upstream's `_tests` task, so data only flows downstream after its upstream single-model
-tests pass. Cross-model test tasks don't gate downstream execution — they run as leaf
-assertions.
+the upstream's `tests_<resource>` task, so data only flows downstream after its upstream
+single-model tests pass. Cross-model test tasks don't gate downstream execution — they run
+as leaf assertions.
 
-Severity handling: warn-severity test failures exit 0 in dbt, so the bundled `_tests` task is
-green and downstream still runs. Error-severity failures exit non-zero, the `_tests` task goes
-red, and downstream is skipped. Same end result as per-test mode (warn ≠ blocking, error =
-blocking), just via dbt's exit code rather than our dep-graph filtering.
+Severity handling: warn-severity test failures exit 0 in dbt, so the bundled `tests_<resource>`
+task is green and downstream still runs. Error-severity failures exit non-zero, the
+`tests_<resource>` task goes red, and downstream is skipped. Same end result as per-test mode
+(warn ≠ blocking, error = blocking), just via dbt's exit code rather than our dep-graph
+filtering.
 
 - **Pros:** significantly smaller DAG, dbt's native test selection handles the per-test
   execution inside a bundled task.
 - **Cons:** per-test failure visibility is lost inside a bundle — a failure shows up as one red
-  `<resource>_tests` task rather than a specific red `<test_name>` task in the UI; drill into
+  `tests_<resource>` task rather than a specific red `<test_name>` task in the UI; drill into
   the task logs to see which individual test(s) failed. (Cross-model test tasks retain their
   per-test visibility because they aren't bundled.)
 

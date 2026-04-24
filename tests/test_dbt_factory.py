@@ -18,13 +18,14 @@ def _model(package: str, name: str, depends_on: list[str] | None = None) -> tupl
     }
 
 
-def _test(package: str, name: str, depends_on: list[str]) -> tuple[str, dict]:
+def _test(package: str, name: str, depends_on: list[str], severity: str = 'error') -> tuple[str, dict]:
     full_name = f"test.{package}.{name}"
     return full_name, {
         'resource_type': 'test',
         'name': name,
         'package_name': package,
         'depends_on': {'nodes': depends_on},
+        'config': {'severity': severity},
     }
 
 
@@ -147,7 +148,9 @@ def test_tests_on_source_produce_standalone_task(dbt_factory_bundled):
     assert by_key['source_pkg_raw_customers_tests']['depends_on'] == []
 
 
-def test_flat_mode_emits_one_task_per_test_node(dbt_factory):
+def test_flat_mode_emits_one_task_per_test_node_and_gates_downstream(dbt_factory):
+    # Per-test mode mirrors `dbt build`: downstream models wait on upstream tests, so a
+    # failing `severity: error` test skips downstream via Databricks task failure.
     nodes = dict(
         [
             _model('pkg', 'customers'),
@@ -168,7 +171,100 @@ def test_flat_mode_emits_one_task_per_test_node(dbt_factory):
         'dbt test --select unique_customers_id --target dev'
     ]
     assert by_key['test_pkg_unique_customers_id']['depends_on'] == [{'task_key': 'model_pkg_customers'}]
-    assert by_key['model_pkg_orders']['depends_on'] == [{'task_key': 'model_pkg_customers'}]
+    # orders depends on customers AND every test attached to customers
+    assert {dep['task_key'] for dep in by_key['model_pkg_orders']['depends_on']} == {
+        'model_pkg_customers',
+        'test_pkg_unique_customers_id',
+        'test_pkg_not_null_customers_id',
+    }
+
+
+def test_flat_mode_cross_model_test_does_not_create_cycle(dbt_factory):
+    # Relationship test references BOTH `orders` and `customers`. Without care, extending
+    # `orders`'s deps with "tests of upstream (customers)" would pull in the relationship test,
+    # which itself depends on `orders` — a direct cycle.
+    nodes = dict(
+        [
+            _model('pkg', 'customers'),
+            _model('pkg', 'orders', depends_on=['model.pkg.customers']),
+            _model('pkg', 'payments', depends_on=['model.pkg.orders']),
+            _test('pkg', 'unique_customers_id', ['model.pkg.customers']),
+            _test(
+                'pkg',
+                'relationships_orders_customer_id__ref_customers',
+                ['model.pkg.orders', 'model.pkg.customers'],
+            ),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    # orders depends on customers + unique_customers_id, but NOT on the relationship test
+    # (that test references orders itself — including it would cycle)
+    assert {dep['task_key'] for dep in by_key['model_pkg_orders']['depends_on']} == {
+        'model_pkg_customers',
+        'test_pkg_unique_customers_id',
+    }
+
+    # payments (downstream of orders) picks up the relationship test — safe, payments
+    # transitively depends on both orders and customers (the test's refs)
+    payments_deps = {dep['task_key'] for dep in by_key['model_pkg_payments']['depends_on']}
+    assert 'model_pkg_orders' in payments_deps
+    assert 'test_pkg_relationships_orders_customer_id__ref_customers' in payments_deps
+
+
+def test_flat_mode_transitive_cross_model_test_does_not_create_cycle(dbt_factory):
+    # Transitive cycle case: test T refs {A, C} where C is downstream of B which is downstream
+    # of A. Extending B's deps with "tests of upstream (A)" must NOT add T, because T depends
+    # on C and C depends on B → B → T → C → B cycle. Only nodes downstream of both A and C
+    # (i.e. downstream of C) should get T.
+    nodes = dict(
+        [
+            _model('pkg', 'a'),
+            _model('pkg', 'b', depends_on=['model.pkg.a']),
+            _model('pkg', 'c', depends_on=['model.pkg.b']),
+            _model('pkg', 'd', depends_on=['model.pkg.c']),
+            _test('pkg', 'relationship_a_c', ['model.pkg.a', 'model.pkg.c']),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    # B's ancestors = {A}. Test T refs = {A, C}. C ∉ ancestors(B) → skip T.
+    assert by_key['model_pkg_b']['depends_on'] == [{'task_key': 'model_pkg_a'}]
+    # C's ancestors = {A, B}. C IS in T.refs → skip T (direct self-reference).
+    assert by_key['model_pkg_c']['depends_on'] == [{'task_key': 'model_pkg_b'}]
+    # D's ancestors = {A, B, C}. T.refs = {A, C} ⊆ ancestors(D) → add T.
+    d_deps = {dep['task_key'] for dep in by_key['model_pkg_d']['depends_on']}
+    assert d_deps == {'model_pkg_c', 'test_pkg_relationship_a_c'}
+
+
+def test_flat_mode_warn_severity_tests_do_not_gate_downstream(dbt_factory):
+    # Only error-severity tests gate downstream (matches `dbt build`: dbt exits 0 on warn
+    # so a gate wouldn't block anyway; we just keep the DAG cleaner).
+    nodes = dict(
+        [
+            _model('pkg', 'customers'),
+            _model('pkg', 'orders', depends_on=['model.pkg.customers']),
+            _test('pkg', 'unique_customers_id', ['model.pkg.customers'], severity='warn'),
+            _test('pkg', 'not_null_customers_id', ['model.pkg.customers'], severity='error'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    # Both test tasks still exist (warn tests still run — they just don't gate anything)
+    assert 'test_pkg_unique_customers_id' in by_key
+    assert 'test_pkg_not_null_customers_id' in by_key
+
+    # orders gates on customers + the error-severity test, but NOT the warn-severity one
+    assert {dep['task_key'] for dep in by_key['model_pkg_orders']['depends_on']} == {
+        'model_pkg_customers',
+        'test_pkg_not_null_customers_id',
+    }
 
 
 def test_flat_mode_test_on_seed_gates_on_seed(dbt_factory):

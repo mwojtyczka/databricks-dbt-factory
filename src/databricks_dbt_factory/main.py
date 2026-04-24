@@ -1,4 +1,8 @@
 import argparse
+import shutil
+from importlib import resources
+from pathlib import Path
+
 from databricks_dbt_factory.DbtFactory import DbtFactory
 from databricks_dbt_factory.SpecsHandler import SpecsHandler
 from databricks_dbt_factory.DbtTask import DbtTaskOptions
@@ -9,6 +13,8 @@ from databricks_dbt_factory.TaskFactory import (
     TestTaskFactory,
     DbtDependencyResolver,
 )
+
+_RUNNER_NOTEBOOK_FILENAME = "run_dbt_command.py"
 
 
 def main():
@@ -22,6 +28,10 @@ def main():
         [item.strip() for item in args.dbt_tasks_deps.split(",") if item.strip()] if args.dbt_tasks_deps else []
     )
 
+    notebook_path = args.notebook_path
+    if args.task_type == "notebook" and notebook_path is None:
+        notebook_path = _copy_runner_notebook_next_to(args.target_job_spec_path)
+
     task_options = DbtTaskOptions(
         environment_key=args.environment_key if args.environment_key is not None else "Default",
         warehouse_id=args.warehouse_id,
@@ -33,7 +43,7 @@ def main():
         dbt_deps_enabled=args.enable_dbt_deps,
         dbt_tasks_deps=dbt_tasks_deps,
         task_type=args.task_type,
-        notebook_path=args.notebook_path,
+        notebook_path=notebook_path,
         job_cluster_key=args.job_cluster_key,
     )
     task_factories = {
@@ -49,6 +59,23 @@ def main():
     factory.create_tasks_and_update_job_spec(
         args.dbt_manifest_path, args.input_job_spec_path, args.target_job_spec_path, args.new_job_name, args.dry_run
     )
+
+
+def _copy_runner_notebook_next_to(target_job_spec_path: str) -> str:
+    """
+    Copies the packaged dbt runner notebook next to the generated job spec so it gets
+    uploaded by `databricks bundle deploy` without a separate manual step.
+
+    Returns the relative path used in `notebook_path` (the same directory as the spec).
+    Overwrites any existing file at the destination.
+    """
+    source = resources.files("databricks_dbt_factory") / "notebook" / _RUNNER_NOTEBOOK_FILENAME
+    dest_dir = Path(target_job_spec_path).resolve().parent
+    dest = dest_dir / _RUNNER_NOTEBOOK_FILENAME
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with resources.as_file(source) as src_path:
+        shutil.copyfile(src_path, dest)
+    return f"./{_RUNNER_NOTEBOOK_FILENAME}"
 
 
 def build_dbt_options(args):
@@ -169,7 +196,12 @@ def parse_args():
     parser.add_argument(
         "--notebook-path",
         type=str,
-        help="Path to the dbt runner notebook. Required when --task-type is 'notebook'.",
+        help=(
+            "Path to the dbt runner notebook (used when --task-type is 'notebook'). If omitted, "
+            "the factory copies the packaged runner notebook next to the generated job spec and "
+            "references it relatively, so `databricks bundle deploy` uploads it automatically. "
+            "Pass an explicit path to pin the notebook elsewhere and manage it yourself."
+        ),
         required=False,
         default=None,
     )
@@ -188,9 +220,6 @@ def parse_args():
         default=False,
     )
     args = parser.parse_args()
-
-    if args.task_type == "notebook" and not args.notebook_path:
-        parser.error("--notebook-path is required when --task-type is 'notebook'")
 
     if args.job_cluster_key and args.environment_key is not None:
         parser.error("--job-cluster-key and --environment-key are mutually exclusive")

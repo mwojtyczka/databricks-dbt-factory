@@ -114,12 +114,16 @@ databricks_dbt_factory  \
   --input-job-spec-path job_template.yaml \
   --target-job-spec-path job_definition.yaml \
   --task-type notebook \
-  --notebook-path /Workspace/Users/you@example.com/notebooks/run_dbt_command.py \
   --project-directory /Workspace/Users/you@example.com/my_dbt_project \
   --profiles-directory /Workspace/Users/you@example.com/my_dbt_project \
   --source WORKSPACE \
   --target dev
 ```
+
+The packaged runner notebook (`run_dbt_command.py`) is copied next to the generated job spec
+automatically — `databricks bundle deploy` uploads it to the workspace along with the job.
+No manual `databricks workspace import` step needed. Pass `--notebook-path <path>` only if
+you want to pin the notebook elsewhere and manage it yourself.
 
 To run the dbt process on a job cluster instead of serverless, use `--job-cluster-key`
 and define the cluster in your job template. Note that `--job-cluster-key` controls where
@@ -146,16 +150,12 @@ databricks_dbt_factory  \
   --input-job-spec-path job_template.yaml \
   --target-job-spec-path job_definition.yaml \
   --task-type notebook \
-  --notebook-path /Workspace/Users/you@example.com/notebooks/run_dbt_command.py \
   --project-directory /Workspace/Users/you@example.com/my_dbt_project \
   --profiles-directory /Workspace/Users/you@example.com/my_dbt_project \
   --job-cluster-key dbt_cluster \
   --source WORKSPACE \
   --target dev
 ```
-
-The runner notebook (`src/databricks_dbt_factory/notebook/run_dbt_command.py`) ships with
-this package. Upload it to your Databricks workspace and reference it via `--notebook-path`.
 
 The notebook:
 - Accepts `dbt_commands`, `project_directory`, and `profiles_directory` as parameters
@@ -171,7 +171,7 @@ The notebook:
 - `--target` (type: str, optional): dbt target to use. If not provided, the default target from the dbt profile will be used.
 - `--source` (type: str, optional, default: None): Project source (`GIT` or `WORKSPACE`). If not provided, `WORKSPACE` will be used.
 - `--task-type` (type: str, optional, default: "dbt"): Task type to generate — `dbt` for native dbt_task, `notebook` for notebook_task wrapper.
-- `--notebook-path` (type: str, required when task-type is "notebook"): Workspace path to the dbt runner notebook.
+- `--notebook-path` (type: str, optional): Path to the dbt runner notebook used when `--task-type notebook`. If omitted, the packaged runner notebook is copied next to the generated job spec and referenced relatively, so `databricks bundle deploy` uploads it automatically.
 - `--warehouse_id` (type: str, optional): SQL Warehouse ID. Only used with native dbt_task.
 - `--schema` (type: str, optional): Metastore schema. Only used with native dbt_task.
 - `--catalog` (type: str, optional): Metastore catalog. Only used with native dbt_task.
@@ -188,7 +188,7 @@ The notebook:
 
 You can also check all input arguments by running `databricks_dbt_factory --help`.
 
-## Test handling
+## DBT Tests handling
 
 When `--run-tests` is enabled, the factory produces tasks for dbt tests. Two modes are available,
 controlled by `--bundle-tests`:
@@ -197,13 +197,18 @@ controlled by `--bundle-tests`:
 
 One Databricks task per dbt test node, running `dbt test --select <test_name>`. Each test task's
 `depends_on` includes every model/seed/snapshot the test references, so multi-model tests
-(e.g. `relationships`) only run after all their endpoints are built. Downstream models are **not**
-rewired — they depend on the parent resource task directly.
+(e.g. `relationships`) only run after all their endpoints are built. **Downstream models are
+gated only on error-severity tests**: every model/seed/snapshot task depends on the
+`severity: error` test tasks attached to its upstream resources, so a failing error test skips
+the downstream task. This matches `dbt build` semantics. **`severity: warn` tests still run as their own tasks but are
+kept out of downstream `depends_on`** — they surface findings without cluttering the DAG or
+blocking anything.
 
-- **Pros:** per-test parallelism; failing tests are individually visible in the Databricks UI;
-  cross-model tests wait for every endpoint they reference.
+- **Pros:** per-test failures are individually visible in the Databricks UI; downstream
+  execution halts on error-severity test failure just like `dbt build`; cross-model tests wait
+  for every endpoint they reference; warn tests stay informational, no DAG gating.
 - **Cons:** larger DAG (one task per test, and dbt projects routinely have many more tests than
-  models).
+  models); each downstream model's `depends_on` list grows with error-severity upstream tests.
 
 ### Bundled (`--bundle-tests`)
 
@@ -225,8 +230,12 @@ The factory classifies each dbt test node into one of two buckets based on its `
 Downstream models/seeds/snapshots that depend on a tested resource are rewired to depend on
 the upstream's `_tests` task, so data only flows downstream after its upstream single-model
 tests pass. Cross-model test tasks don't gate downstream execution — they run as leaf
-assertions. (If you want tests to report without blocking, use dbt's `severity: warn` on the
-individual tests instead.)
+assertions.
+
+Severity handling: warn-severity test failures exit 0 in dbt, so the bundled `_tests` task is
+green and downstream still runs. Error-severity failures exit non-zero, the `_tests` task goes
+red, and downstream is skipped. Same end result as per-test mode (warn ≠ blocking, error =
+blocking), just via dbt's exit code rather than our dep-graph filtering.
 
 - **Pros:** significantly smaller DAG, dbt's native test selection handles the per-test
   execution inside a bundled task.

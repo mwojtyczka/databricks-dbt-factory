@@ -90,17 +90,118 @@ class DbtFactory:
         bundle = 'test' in self.task_factories and self.bundle_tests
         single_model_tested: set[str] = set()
         standalone_tests: list[tuple[str, dict]] = []
+        tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]] = {}
+        ancestors: dict[str, set[str]] = {}
         if bundle:
             single_model_tested, standalone_tests = self._classify_tests(dbt_nodes, dbt_sources)
+        elif 'test' in self.task_factories:
+            tests_by_resource = self._index_tests_by_resource(dbt_nodes, dbt_sources)
+            ancestors = self._compute_ancestors(dbt_nodes, dbt_sources)
         task_keys_with_tests = {generate_task_key(fn) for fn in single_model_tested}
 
-        tasks = self._build_resource_tasks(dbt_nodes, bundle, task_keys_with_tests)
+        tasks = self._build_resource_tasks(dbt_nodes, bundle, task_keys_with_tests, tests_by_resource, ancestors)
 
         if bundle:
             tasks.extend(self._build_bundled_test_tasks(dbt_nodes, dbt_sources, single_model_tested))
             tasks.extend(self._build_standalone_test_tasks(standalone_tests))
 
         return tasks
+
+    def _compute_ancestors(self, dbt_nodes: dict, dbt_sources: dict) -> dict[str, set[str]]:
+        """
+        Maps each testable resource's full name to the set of resources it transitively depends
+        on (not including itself). Used in per-test mode to decide whether a test can safely
+        gate a downstream node: a test `T` with refs `R` is only safe to add to node `N`'s
+        deps if `R ⊆ ancestors(N)` — i.e. `N` already waits for all of `T`'s endpoints,
+        transitively. Otherwise adding `T` would create a cycle (since `T` depends on each
+        ref, and some ref might depend on `N`).
+        """
+        ancestors: dict[str, set[str]] = {}
+
+        def visit(full_name: str) -> set[str]:
+            cached = ancestors.get(full_name)
+            if cached is not None:
+                return cached
+            result: set[str] = set()
+            info = dbt_nodes.get(full_name) or dbt_sources.get(full_name)
+            if info is not None:
+                for dep in info.get('depends_on', {}).get('nodes', []):
+                    if dep in dbt_nodes or dep in dbt_sources:
+                        result.add(dep)
+                        result.update(visit(dep))
+            ancestors[full_name] = result
+            return result
+
+        for full_name in list(dbt_nodes.keys()) + list(dbt_sources.keys()):
+            visit(full_name)
+        return ancestors
+
+    def _index_tests_by_resource(
+        self, dbt_nodes: dict, dbt_sources: dict
+    ) -> dict[str, list[tuple[str, frozenset[str]]]]:
+        """
+        Maps each testable resource's full name to a list of (test_task_key, test_refs) pairs
+        for tests whose `severity` is `error` (the default). Warn-severity tests still run but
+        are NOT indexed here, so they do not appear in any downstream model's `depends_on` —
+        their job is to surface findings, not halt the DAG. This matches `dbt build` semantics:
+        dbt itself exits 0 on warn-severity failures, so even if we did gate on them the
+        Databricks task would succeed and downstream would run; keeping warn tests out of the
+        dep graph just avoids the extra DAG clutter.
+
+        The refs set is carried alongside each test so `_extend_deps_with_upstream_tests` can
+        avoid cycles: a test with refs that aren't all ancestors of a candidate node would
+        create a cycle if added as that node's dep.
+        """
+        index: dict[str, list[tuple[str, frozenset[str]]]] = {}
+        for node_full_name, node_info in dbt_nodes.items():
+            if node_info['resource_type'] != 'test':
+                continue
+            if self._test_severity(node_info) != 'error':
+                continue
+            test_task_key = generate_task_key(node_full_name)
+            refs: set[str] = set()
+            for dep in node_info.get('depends_on', {}).get('nodes', []):
+                if dep.startswith(self._DBT_TEST_TARGET_PREFIXES) and (dep in dbt_nodes or dep in dbt_sources):
+                    refs.add(dep)
+            frozen_refs = frozenset(refs)
+            for resource_full in refs:
+                index.setdefault(resource_full, []).append((test_task_key, frozen_refs))
+        return index
+
+    @staticmethod
+    def _test_severity(test_node_info: dict) -> str:
+        """Reads the test's severity from the manifest, defaulting to `error` when unset."""
+        config = test_node_info.get('config') or {}
+        severity = config.get('severity')
+        if isinstance(severity, str):
+            return severity.lower()
+        return 'error'
+
+    @staticmethod
+    def _extend_deps_with_upstream_tests(
+        node_full_name: str,
+        existing_deps: list[str] | None,
+        tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
+        ancestors_by_node: dict[str, set[str]],
+    ) -> list[str]:
+        """
+        Appends task keys of tests that safely gate this node — i.e. tests whose refs are all
+        ancestors of the current node. This prevents both direct and transitive cycles: a test
+        `T` with refs `R` is added to node `N`'s deps only if `N` transitively depends on every
+        resource in `R`. If any ref of `T` is downstream of (or equal to) `N`, adding `T` would
+        cycle because `T` already depends on that ref, and the ref depends on `N`.
+        """
+        extended: list[str] = list(existing_deps or [])
+        seen = set(extended)
+        node_ancestors = ancestors_by_node.get(node_full_name, set())
+        for ancestor in node_ancestors:
+            for test_key, test_refs in tests_by_resource.get(ancestor, []):
+                if test_key in seen:
+                    continue
+                if test_refs <= node_ancestors:
+                    extended.append(test_key)
+                    seen.add(test_key)
+        return extended
 
     def _classify_tests(self, dbt_nodes: dict, dbt_sources: dict) -> tuple[set[str], list[tuple[str, dict]]]:
         """
@@ -140,6 +241,8 @@ class DbtFactory:
         dbt_nodes: dict,
         bundle: bool,
         task_keys_with_tests: set[str],
+        tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
+        ancestors_by_node: dict[str, set[str]],
     ) -> list[DbtTask]:
         """Builds tasks for every non-test resource (plus per-test tasks when not bundling)."""
         tasks: list[DbtTask] = []
@@ -154,8 +257,16 @@ class DbtFactory:
             factory = self.task_factories[resource_type]
             task = factory.create_task(node_info['name'], node_info, task_key)
 
-            if bundle and resource_type in self._GATEABLE_TYPES:
-                task = replace(task, depends_on=self._rewire_deps(task.depends_on, task_keys_with_tests))
+            if resource_type in self._GATEABLE_TYPES:
+                if bundle:
+                    task = replace(task, depends_on=self._rewire_deps(task.depends_on, task_keys_with_tests))
+                elif tests_by_resource:
+                    task = replace(
+                        task,
+                        depends_on=self._extend_deps_with_upstream_tests(
+                            node_full_name, task.depends_on, tests_by_resource, ancestors_by_node
+                        ),
+                    )
 
             tasks.append(task)
         return tasks

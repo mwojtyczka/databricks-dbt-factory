@@ -46,6 +46,40 @@ def test_main_given_default_args(monkeypatch):
             os.remove(target_job_spec_path)
 
 
+def test_main_notebook_mode_auto_copies_runner_notebook(monkeypatch, tmp_path):
+    """When --notebook-path is omitted, the factory copies the packaged runner notebook
+    next to the generated job spec and references it relatively."""
+    target_job_spec_path = tmp_path / "job_definition.yaml"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target_job_spec_path),
+            "--task-type",
+            "notebook",
+        ],
+    )
+
+    main()
+
+    copied_notebook = tmp_path / "run_dbt_command.py"
+    assert copied_notebook.exists(), "runner notebook should have been copied next to the job spec"
+    assert "dbtRunner" in copied_notebook.read_text(), "copied file should be the packaged runner"
+
+    with open(target_job_spec_path, "r", encoding="utf-8") as file:
+        job_definition = yaml.safe_load(file)
+
+    tasks = job_definition["resources"]["jobs"]["dbt_sql_job"]["tasks"]
+    for task in tasks:
+        assert task["notebook_task"]["notebook_path"] == "./run_dbt_command.py"
+
+
 def test_main_notebook_mode(monkeypatch):
     """Test the main function for notebook task type generation."""
     dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"

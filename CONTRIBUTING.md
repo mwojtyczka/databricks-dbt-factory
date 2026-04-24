@@ -103,30 +103,13 @@ databricks_dbt_factory \
   --target dev
 ```
 
-For **notebook task type**, also pass `--task-type notebook --notebook-path <workspace-path>`
-and (for `--source WORKSPACE`) `--project-directory` / `--profiles-directory` pointing at the
-uploaded dbt project. See the [Task types](../README.md#task-types) section in the README for
-full examples.
+For **notebook task type**, also pass `--task-type notebook`. The factory copies the packaged
+runner notebook next to the generated job spec automatically — no separate workspace upload
+needed; `databricks bundle deploy` will sync it in Step 3. (For `--source WORKSPACE`, also
+pass `--project-directory` / `--profiles-directory` pointing at the uploaded dbt project; see
+the [Task types](../README.md#task-types) section in the README for full examples.)
 
-### 2. Upload prerequisites (notebook task type only)
-
-Skip this step for native `dbt` tasks.
-
-The runner notebook referenced by `--notebook-path` must exist in the workspace **before**
-deploy. Upload it with:
-
-```shell
-databricks workspace import \
-  --file src/databricks_dbt_factory/notebook/run_dbt_command.py \
-  --language PYTHON \
-  /Workspace/Users/<you@example.com>/notebooks/run_dbt_command.py
-```
-
-If you're running with `--source WORKSPACE`, the dbt project directory and `profiles.yml` must
-already live at the paths you passed to `--project-directory` / `--profiles-directory`. Upload
-them with `databricks workspace import-dir` or sync from your repo.
-
-### 3. Wrap the generated spec in a DAB
+### 2. Wrap the generated spec in a DAB
 
 Create `databricks.yml` in the same directory as `job_definition_new.yaml`:
 
@@ -148,9 +131,12 @@ deployed under the same bundle name but no longer in `include` is **deleted** on
 
 If the generated spec uses `--source GIT`, it already contains a `git_source` block; the
 workspace must be able to reach that repo/branch (public URL or a Git credential configured in
-the workspace). For `--source WORKSPACE`, no extra git config is needed — but see step 2.
+the workspace). For `--source WORKSPACE`, no extra git config is needed, but the dbt project
+directory and `profiles.yml` must already exist at the paths passed to `--project-directory` /
+`--profiles-directory` (upload them with `databricks workspace import-dir` or sync from your
+repo).
 
-### 4. Validate, deploy, run
+### 3. Validate, deploy, run
 
 ```shell
 databricks bundle validate                  # schema + reference check, no write
@@ -163,7 +149,7 @@ databricks bundle run <job-resource-key>    # trigger a run (e.g. dbt_sql_job)
 
 `databricks bundle run` prints the run URL — open it to watch the DAG in the UI.
 
-### 5. Verify
+### 4. Verify
 
 - Task graph matches the expected topology (models, tests, snapshots, seeds in the right order).
 - Each task succeeds — or, when intentionally breaking a test:
@@ -174,7 +160,7 @@ databricks bundle run <job-resource-key>    # trigger a run (e.g. dbt_sql_job)
 - For notebook tasks, confirm `dbt_commands` / `project_directory` / `profiles_directory`
   parameters render correctly in the task run page.
 
-### 6. Clean up
+### 5. Clean up
 
 ```shell
 databricks bundle destroy --target dev

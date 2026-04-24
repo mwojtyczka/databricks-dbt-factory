@@ -181,8 +181,7 @@ The notebook:
 - `--job-cluster-key` (type: str, optional): Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with `--environment-key`.
 - `--extra-dbt-command-options` (type: str, optional, default: ""): Additional dbt command options to include.
 - `--run-tests` / `--no-run-tests` (flag, default: enabled): Run data tests after each model.
-- `--bundle-tests` / `--no-bundle-tests` (flag, default: enabled): Bundle tests per resource into one `dbt test --select <resource>` task. See [Test handling](#test-handling).
-- `--gate-on-tests` / `--no-gate-on-tests` (flag, default: enabled): Make downstream tasks depend on upstream `_tests` tasks so failing tests halt the DAG. Only meaningful when `--bundle-tests` is enabled. See [Test handling](#test-handling).
+- `--bundle-tests` / `--no-bundle-tests` (flag, default: disabled): Bundle single-model tests per resource into one `dbt test --select <resource> --indirect-selection cautious` task, and gate downstream models/seeds/snapshots on the upstream's `_tests` task so failing tests halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Test handling](#test-handling).
 - `--enable-dbt-deps` / `--no-enable-dbt-deps` (flag, default: disabled): Run dbt deps before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
 - `--dry-run` / `--no-dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
@@ -194,37 +193,47 @@ You can also check all input arguments by running `databricks_dbt_factory --help
 When `--run-tests` is enabled, the factory produces tasks for dbt tests. Two modes are available,
 controlled by `--bundle-tests`:
 
-### Bundled (default, `--bundle-tests`)
+### Per-test (default)
 
-One Databricks task per tested resource, named `<resource>_tests`, running
-`dbt test --select <resource>`. Downstream models/seeds/snapshots that depend on a tested resource
-are rewired to depend on the `<resource>_tests` task, so data only flows downstream after its
-upstream tests pass.
-
-- **Pros:** simpler DAG, fewer tasks, each resource's tests travel together through dbt's native
-  test selection.
-- **Cons:** per-test parallelism is lost — all tests for a resource run inside one Databricks task.
-  A failure shows up as one red `<resource>_tests` task rather than a specific red `<test_name>`
-  task in the UI; drill into the task logs to see which individual test(s) failed.
-
-#### Gating behavior (`--gate-on-tests`)
-
-By default, the factory rewires downstream models/seeds/snapshots to depend on the upstream
-`<resource>_tests` task — a failing test halts the DAG. Pass `--no-gate-on-tests` to keep the
-`<resource>_tests` tasks in the DAG (still running, still visible) without blocking downstream
-execution when they fail. Useful for dev iteration, backfills, or test triage where you want
-to run downstream models even if some tests fail. Only meaningful when bundling is on; ignored
-under `--no-bundle-tests`.
-
-### Per-test (`--no-bundle-tests`)
-
-One Databricks task per dbt test node, running `dbt test --select <test_name>`. Each test task
-gates on its parent model/seed/snapshot; source tests run standalone. Downstream models are **not**
+One Databricks task per dbt test node, running `dbt test --select <test_name>`. Each test task's
+`depends_on` includes every model/seed/snapshot the test references, so multi-model tests
+(e.g. `relationships`) only run after all their endpoints are built. Downstream models are **not**
 rewired — they depend on the parent resource task directly.
 
-- **Pros:** per-test parallelism; failing tests are individually visible in the Databricks UI.
-- **Cons:** much larger DAG (one task per test, and dbt projects routinely have many more tests
-  than models).
+- **Pros:** per-test parallelism; failing tests are individually visible in the Databricks UI;
+  cross-model tests wait for every endpoint they reference.
+- **Cons:** larger DAG (one task per test, and dbt projects routinely have many more tests than
+  models).
+
+### Bundled (`--bundle-tests`)
+
+The factory classifies each dbt test node into one of two buckets based on its `depends_on`:
+
+- **Single-model tests** (most tests: `unique`, `not_null`, `accepted_values`, column-level
+  checks, …) — collapsed into one Databricks task per tested resource, with task key
+  `<resource_task_key>_tests` (e.g. `model_my_project_customers_tests`) running
+  `dbt test --select <package>.<resource> --indirect-selection cautious`. The `cautious`
+  indirect selector tells dbt "only run tests whose referenced resources are entirely within
+  this selection" — which makes the bundle correct: cross-model tests that happen to touch
+  this resource are filtered out here and handled separately.
+
+- **Cross-model tests** (e.g. `relationships`, custom tests that reference multiple models) —
+  emitted as their own tasks, one per test node, with deps on **every** resource the test
+  references. These run in parallel with the bundled tasks; they don't fit inside a bundle
+  because their correctness requires all their endpoints to be built first.
+
+Downstream models/seeds/snapshots that depend on a tested resource are rewired to depend on
+the upstream's `_tests` task, so data only flows downstream after its upstream single-model
+tests pass. Cross-model test tasks don't gate downstream execution — they run as leaf
+assertions. (If you want tests to report without blocking, use dbt's `severity: warn` on the
+individual tests instead.)
+
+- **Pros:** significantly smaller DAG, dbt's native test selection handles the per-test
+  execution inside a bundled task.
+- **Cons:** per-test failure visibility is lost inside a bundle — a failure shows up as one red
+  `<resource>_tests` task rather than a specific red `<test_name>` task in the UI; drill into
+  the task logs to see which individual test(s) failed. (Cross-model test tasks retain their
+  per-test visibility because they aren't bundled.)
 
 ## Task types
 

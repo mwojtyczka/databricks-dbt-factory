@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 
 from databricks_dbt_factory.DbtTask import DbtTask, DbtTaskOptions
+from databricks_dbt_factory.Utils import generate_task_key
 
 
 class DbtNodeTypes(Enum):
@@ -14,13 +15,8 @@ class DbtNodeTypes(Enum):
 
 
 class DbtDependencyResolver:
-    def __init__(self) -> None:
-        self.task_key_map: dict[str, str] = {}
-
-    def set_task_key_map(self, task_key_map: dict[str, str]) -> None:
-        self.task_key_map = task_key_map
-
-    def resolve(self, node_info: dict, valid_deps_types: list[str]) -> list[str]:
+    @staticmethod
+    def resolve(node_info: dict, valid_deps_types: list[str]) -> list[str]:
         """
         Resolves dependencies for a given DBT node.
 
@@ -35,7 +31,7 @@ class DbtDependencyResolver:
         resolved_deps = []
         for node_full_name in deps:
             if any(node_full_name.startswith(dbt_type + ".") for dbt_type in valid_deps_types):
-                resolved_deps.append(self.task_key_map[node_full_name])
+                resolved_deps.append(generate_task_key(node_full_name))
         return resolved_deps
 
 
@@ -193,15 +189,17 @@ class TestTaskFactory(TaskFactory):
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
-    def create_bundled_task(
-        self, task_key: str, select: str, deps_command_name: str, depends_on: list[str]
-    ) -> DbtTask:
+    def create_bundled_task(self, task_key: str, select: str, deps_command_name: str, depends_on: list[str]) -> DbtTask:
         """
-        Creates a single test task that runs all tests for a given resource via `dbt test --select`.
+        Creates a single test task that runs the single-model tests for a given resource via
+        `dbt test --select <resource> --indirect-selection cautious`. The cautious selector
+        ensures only tests whose referenced resources are entirely within this bundle are
+        included; cross-model tests (e.g. `relationships`) are excluded and handled separately.
 
         Args:
             task_key (str): Key for the bundled task.
-            select (str): Pre-computed dbt `--select` argument (bare or qualified, with `source:` prefix when applicable).
+            select (str): Pre-computed dbt `--select` argument (qualified model name, or
+                `source:<pkg>.<src>.<tbl>` for sources).
             deps_command_name (str): Name used by `get_dbt_deps_command` to decide whether to prepend `dbt deps`.
             depends_on (list[str]): Upstream task keys this bundled task should gate on.
 
@@ -210,6 +208,9 @@ class TestTaskFactory(TaskFactory):
         """
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt test --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+        commands.append(
+            f"dbt test --select {select} --indirect-selection cautious"
+            + (f" {self.dbt_options}" if self.dbt_options else "")
+        )
 
         return DbtTask(task_key, commands, self.task_options, depends_on)

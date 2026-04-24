@@ -139,6 +139,7 @@ def test_main_all_args(monkeypatch):
             "--extra-dbt-command-options",
             extra_dbt_command_options,
             "--run-tests",
+            "--bundle-tests",
         ],
     )
 
@@ -209,7 +210,6 @@ def test_no_prefixed_flags_actually_disable(monkeypatch):
             *REQUIRED_ARGS,
             "--no-run-tests",
             "--no-bundle-tests",
-            "--no-gate-on-tests",
             "--no-enable-dbt-deps",
             "--no-dry-run",
         ],
@@ -217,7 +217,6 @@ def test_no_prefixed_flags_actually_disable(monkeypatch):
     args = parse_args()
     assert args.run_tests is False
     assert args.bundle_tests is False
-    assert args.gate_on_tests is False
     assert args.enable_dbt_deps is False
     assert args.dry_run is False
 
@@ -225,12 +224,11 @@ def test_no_prefixed_flags_actually_disable(monkeypatch):
 def test_bare_bool_flags_default_to_enabled(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
-        ["main.py", *REQUIRED_ARGS, "--bundle-tests", "--gate-on-tests", "--run-tests"],
+        ["main.py", *REQUIRED_ARGS, "--bundle-tests", "--run-tests"],
     )
     args = parse_args()
     assert args.run_tests is True
     assert args.bundle_tests is True
-    assert args.gate_on_tests is True
 
 
 def test_notebook_task_type_with_warehouse_id_is_rejected(monkeypatch):

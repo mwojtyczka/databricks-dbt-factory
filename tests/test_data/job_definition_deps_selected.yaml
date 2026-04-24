@@ -15,15 +15,15 @@ resources:
           dependencies:
           - dbt-databricks
       tasks:
-      - task_key: diamonds_list_colors
+      - task_key: model_dbt_demo_diamonds_list_colors
         depends_on:
-        - task_key: diamonds_four_cs
+        - task_key: model_dbt_demo_diamonds_four_cs
         environment_key: Default
         dbt_task:
           commands:
           - dbt run --select diamonds_list_colors --target dev
           source: GIT
-      - task_key: diamonds_prices
+      - task_key: model_dbt_demo_diamonds_prices
         depends_on: []
         environment_key: Default
         dbt_task:
@@ -31,113 +31,113 @@ resources:
           - dbt deps --target dev
           - dbt run --select diamonds_prices --target dev
           source: GIT
-      - task_key: diamonds_four_cs
+      - task_key: model_dbt_demo_diamonds_four_cs
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
           - dbt run --select diamonds_four_cs --target dev
           source: GIT
-      - task_key: zzz_game_details
+      - task_key: model_dbt_demo_zzz_game_details
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
           - dbt run --select zzz_game_details --target dev
           source: GIT
-      - task_key: second_dbt_model
+      - task_key: model_dbt_demo_second_dbt_model
         depends_on:
-        - task_key: first_dbt_model_tests
+        - task_key: model_dbt_demo_first_dbt_model_tests
         environment_key: Default
         dbt_task:
           commands:
           - dbt deps --target dev
           - dbt run --select second_dbt_model --target dev
           source: GIT
-      - task_key: first_dbt_model
+      - task_key: model_dbt_demo_first_dbt_model
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
           - dbt run --select first_dbt_model --target dev
           source: GIT
-      - task_key: seed_country_codes
+      - task_key: seed_dbt_demo_country_codes
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
           - dbt seed --select country_codes --target dev
           source: GIT
-      - task_key: changed_country
+      - task_key: model_dbt_demo_changed_country
         depends_on:
-        - task_key: snapshot_country_snapshot
+        - task_key: snapshot_dbt_demo_country_snapshot
         environment_key: Default
         dbt_task:
           commands:
           - dbt run --select changed_country --target dev
           source: GIT
-      - task_key: country
+      - task_key: model_dbt_demo_country
         depends_on:
-        - task_key: seed_country_codes
+        - task_key: seed_dbt_demo_country_codes
         environment_key: Default
         dbt_task:
           commands:
           - dbt run --select country --target dev
           source: GIT
-      - task_key: snapshot_country_snapshot
+      - task_key: snapshot_dbt_demo_country_snapshot
         depends_on:
-        - task_key: country
+        - task_key: model_dbt_demo_country
         environment_key: Default
         dbt_task:
           commands:
           - dbt snapshot --select country_snapshot --target dev
           source: GIT
-      - task_key: zzz_win_loss_records
+      - task_key: model_dbt_demo_zzz_win_loss_records
         depends_on:
-        - task_key: zzz_game_details_tests
+        - task_key: model_dbt_demo_zzz_game_details_tests
         environment_key: Default
         dbt_task:
           commands:
           - dbt run --select zzz_win_loss_records --target dev
           source: GIT
-      - task_key: diamonds_list_colors_tests
+      - task_key: model_dbt_demo_diamonds_list_colors_tests
         depends_on:
-        - task_key: diamonds_list_colors
+        - task_key: model_dbt_demo_diamonds_list_colors
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select diamonds_list_colors --target dev
+          - dbt test --select dbt_demo.diamonds_list_colors --indirect-selection cautious --target dev
           source: GIT
-      - task_key: first_dbt_model_tests
+      - task_key: model_dbt_demo_first_dbt_model_tests
         depends_on:
-        - task_key: first_dbt_model
+        - task_key: model_dbt_demo_first_dbt_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select first_dbt_model --target dev
+          - dbt test --select dbt_demo.first_dbt_model --indirect-selection cautious --target dev
           source: GIT
-      - task_key: second_dbt_model_tests
+      - task_key: model_dbt_demo_second_dbt_model_tests
         depends_on:
-        - task_key: second_dbt_model
+        - task_key: model_dbt_demo_second_dbt_model
         environment_key: Default
         dbt_task:
           commands:
           - dbt deps --target dev
-          - dbt test --select second_dbt_model --target dev
+          - dbt test --select dbt_demo.second_dbt_model --indirect-selection cautious --target dev
           source: GIT
-      - task_key: zzz_game_details_tests
+      - task_key: model_dbt_demo_zzz_game_details_tests
         depends_on:
-        - task_key: zzz_game_details
+        - task_key: model_dbt_demo_zzz_game_details
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select zzz_game_details --target dev
+          - dbt test --select dbt_demo.zzz_game_details --indirect-selection cautious --target dev
           source: GIT
-      - task_key: zzz_win_loss_records_tests
+      - task_key: model_dbt_demo_zzz_win_loss_records_tests
         depends_on:
-        - task_key: zzz_win_loss_records
+        - task_key: model_dbt_demo_zzz_win_loss_records
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select zzz_win_loss_records --target dev
+          - dbt test --select dbt_demo.zzz_win_loss_records --indirect-selection cautious --target dev
           source: GIT

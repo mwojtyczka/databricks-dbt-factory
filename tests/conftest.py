@@ -18,12 +18,12 @@ def file_handler() -> SpecsHandler:
 
 @pytest.fixture
 def dbt_factory(file_handler: SpecsHandler):
-    return create_dbt_factory(file_handler)
+    return create_dbt_factory(file_handler, bundle_tests=True)
 
 
 @pytest.fixture
 def dbt_factory_with_deps(file_handler: SpecsHandler):
-    return create_dbt_factory(file_handler, dbt_deps_enabled=True)
+    return create_dbt_factory(file_handler, dbt_deps_enabled=True, bundle_tests=True)
 
 
 @pytest.fixture
@@ -32,22 +32,20 @@ def dbt_factory_with_deps_selected(file_handler: SpecsHandler):
         file_handler,
         dbt_deps_enabled=True,
         dbt_tasks_deps=["diamonds_prices", "second_dbt_model"],
+        bundle_tests=True,
     )
 
 
 @pytest.fixture
 def notebook_factory(file_handler: SpecsHandler):
-    return create_dbt_factory(file_handler, task_type="notebook", notebook_path="./notebooks/dbt_runner.py")
+    return create_dbt_factory(
+        file_handler, task_type="notebook", notebook_path="./notebooks/dbt_runner.py", bundle_tests=True
+    )
 
 
 @pytest.fixture
 def dbt_factory_flat(file_handler: SpecsHandler):
     return create_dbt_factory(file_handler, bundle_tests=False)
-
-
-@pytest.fixture
-def dbt_factory_ungated(file_handler: SpecsHandler):
-    return create_dbt_factory(file_handler, gate_on_tests=False)
 
 
 def create_dbt_factory(
@@ -56,8 +54,7 @@ def create_dbt_factory(
     dbt_tasks_deps: list[str] | None = None,
     task_type: str = "dbt",
     notebook_path: str | None = None,
-    bundle_tests: bool = True,
-    gate_on_tests: bool = True,
+    bundle_tests: bool = False,
 ) -> DbtFactory:
     resolver = DbtDependencyResolver()
     task_options = DbtTaskOptions(
@@ -77,4 +74,4 @@ def create_dbt_factory(
         'test': TestTaskFactory(resolver, task_options, dbt_options),
     }
 
-    return DbtFactory(handler, task_factories, bundle_tests=bundle_tests, gate_on_tests=gate_on_tests)
+    return DbtFactory(handler, task_factories, bundle_tests=bundle_tests)

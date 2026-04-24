@@ -68,21 +68,19 @@ class DbtTaskOptions:
         if not isinstance(self.task_type, TaskType):
             object.__setattr__(self, 'task_type', TaskType(self.task_type))
         if self.task_type is TaskType.NOTEBOOK:
-            unsupported = [
-                name
-                for name, value in (
-                    ('warehouse_id', self.warehouse_id),
-                    ('schema', self.schema),
-                    ('catalog', self.catalog),
-                )
-                if value
-            ]
+            unsupported = []
+            for name, value in (
+                ('warehouse_id', self.warehouse_id),
+                ('schema', self.schema),
+                ('catalog', self.catalog),
+            ):
+                if value:
+                    unsupported.append(name)
             if unsupported:
                 raise ValueError(
                     f"{', '.join(unsupported)} cannot be set with task_type=NOTEBOOK; "
                     "notebook tasks connect via profiles.yml."
                 )
-
 
 
 @dataclass(frozen=True)

@@ -45,9 +45,7 @@ def main():
     if args.run_tests:
         task_factories['test'] = TestTaskFactory(resolver, task_options, dbt_options)
 
-    factory = DbtFactory(
-        file_handler, task_factories, bundle_tests=args.bundle_tests, gate_on_tests=args.gate_on_tests
-    )
+    factory = DbtFactory(file_handler, task_factories, bundle_tests=args.bundle_tests)
     factory.create_tasks_and_update_job_spec(
         args.dbt_manifest_path, args.input_job_spec_path, args.target_job_spec_path, args.new_job_name, args.dry_run
     )
@@ -135,23 +133,16 @@ def parse_args():
         "--bundle-tests",
         action=argparse.BooleanOptionalAction,
         help=(
-            "Bundle tests per resource into a single `dbt test --select <resource>` task. "
-            "Enabled by default; use --no-bundle-tests to emit one Databricks task per dbt test node "
-            "(historic behavior)."
+            "Bundle single-model tests for a given resource into one "
+            "`dbt test --select <pkg>.<resource> --indirect-selection cautious` task (default: "
+            "disabled — one task per test node). Cross-model tests (e.g. `relationships`) are "
+            "detected from the manifest and emitted as their own tasks gated on every referenced "
+            "resource, so no tests are silently dropped. Trade-off: fewer tasks and a smaller "
+            "DAG, but per-test failures show up as a single red `<resource>_tests` task — drill "
+            "into the logs to see which assertion failed."
         ),
         required=False,
-        default=True,
-    )
-    parser.add_argument(
-        "--gate-on-tests",
-        action=argparse.BooleanOptionalAction,
-        help=(
-            "Downstream models/seeds/snapshots depend on their upstream's `_tests` task so a failing "
-            "test halts the DAG. Enabled by default; use --no-gate-on-tests to keep tests in the DAG "
-            "without blocking downstream execution. Only meaningful with --bundle-tests."
-        ),
-        required=False,
-        default=True,
+        default=False,
     )
     parser.add_argument(
         "--enable-dbt-deps",
@@ -205,15 +196,14 @@ def parse_args():
         parser.error("--job-cluster-key and --environment-key are mutually exclusive")
 
     if args.task_type == "notebook":
-        conflicting = [
-            flag
-            for flag, value in (
-                ("--warehouse_id", args.warehouse_id),
-                ("--schema", args.schema),
-                ("--catalog", args.catalog),
-            )
-            if value
-        ]
+        conflicting = []
+        for flag, value in (
+            ("--warehouse_id", args.warehouse_id),
+            ("--schema", args.schema),
+            ("--catalog", args.catalog),
+        ):
+            if value:
+                conflicting.append(flag)
         if conflicting:
             parser.error(
                 f"{', '.join(conflicting)} cannot be used with --task-type notebook; "

@@ -192,7 +192,7 @@ databricks_dbt_factory  \
 - `--job-cluster-key` (type: str, optional): Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with `--environment-key`.
 - `--extra-dbt-command-options` (type: str, optional, default: ""): Additional dbt command options to include.
 - `--no-run-tests` (flag, default: tests enabled): Skip generating dbt test tasks. Tests are included by default.
-- `--bundle-tests` (flag, default: disabled): Bundle single-model tests per resource into one `dbt test --select <resource>` task, and gate downstream models/seeds/snapshots on the upstream's `tests_<resource>` task so failing tests halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Test handling](#test-handling).
+- `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle single-model tests per resource into one `dbt test --select <resource>` task. Fewer Databricks tasks means fewer task startups, fewer dbt cold starts, and noticeably faster end-to-end runtime for projects with many tests. Downstream models/seeds/snapshots gate on the upstream's `tests_<resource>` task so failing tests still halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Test handling](#test-handling).
 - `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
 - `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
@@ -221,7 +221,20 @@ blocking anything.
 - **Cons:** larger DAG (one task per test, and dbt projects routinely have many more tests than
   models); each downstream model's `depends_on` list grows with error-severity upstream tests.
 
-### Bundled (`--bundle-tests`)
+### Bundled (`--bundle-tests`) — recommended for performance
+
+**This is the faster mode.** For projects with many tests (most real-world projects have far
+more tests than models), bundling dramatically reduces end-to-end runtime by cutting down on:
+
+- **Task startup overhead.** Every Databricks task pays a cold-start tax. Going from N test
+  tasks per resource down to one means N−1 fewer cold starts per resource.
+- **Repeated dbt initialization.** Each `dbt test` invocation parses the manifest, connects to
+  the warehouse, and sets up the adapter. Bundling reduces this from once-per-test to
+  once-per-resource.
+- **DAG coordination.** Fewer tasks means less scheduler pressure on the job run.
+
+For a 100-model project with ~5 tests per model, that's ~500 test tasks collapsing to ~100 —
+typically a large wall-clock win.
 
 The factory classifies each dbt test node into one of two buckets based on its `depends_on`:
 
@@ -246,8 +259,8 @@ task is green and downstream still runs. Error-severity failures exit non-zero, 
 (warn ≠ blocking, error = blocking), just via dbt's exit code rather than our dep-graph
 filtering.
 
-- **Pros:** significantly smaller DAG, dbt's native test selection handles the per-test
-  execution inside a bundled task.
+- **Pros:** **faster** — fewer task startups and fewer dbt invocations translate directly into
+  shorter end-to-end run times; smaller, cleaner DAG in the UI.
 - **Cons:** per-test failure visibility is lost inside a bundle — a failure shows up as one red
   `tests_<resource>` task rather than a specific red `<test_name>` task in the UI; drill into
   the task logs to see which individual test(s) failed. (Cross-model test tasks retain their

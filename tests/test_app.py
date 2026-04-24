@@ -139,7 +139,6 @@ def test_main_all_args(monkeypatch):
             "--extra-dbt-command-options",
             extra_dbt_command_options,
             "--run-tests",
-            "--bundle-tests",
         ],
     )
 

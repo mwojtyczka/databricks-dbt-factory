@@ -58,7 +58,7 @@ def _source(package: str, source_name: str, table: str) -> tuple[str, dict]:
     }
 
 
-def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(dbt_factory):
+def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(dbt_factory_bundled):
     nodes = dict(
         [
             _model('pkg_a', 'customers'),
@@ -69,7 +69,7 @@ def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(db
         ]
     )
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
     assert 'model_pkg_a_customers_tests' in by_key
@@ -89,7 +89,7 @@ def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(db
     }
 
 
-def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory):
+def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory_bundled):
     nodes = dict(
         [
             _seed('pkg', 'countries'),
@@ -98,7 +98,7 @@ def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory):
         ]
     )
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
     assert 'seed_pkg_countries_tests' in by_key
@@ -109,7 +109,7 @@ def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory):
     assert by_key['model_pkg_enriched']['depends_on'] == [{'task_key': 'seed_pkg_countries_tests'}]
 
 
-def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory):
+def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory_bundled):
     nodes = dict(
         [
             _snapshot('pkg', 'orders_snap'),
@@ -118,7 +118,7 @@ def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory):
         ]
     )
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
     assert 'snapshot_pkg_orders_snap_tests' in by_key
@@ -129,7 +129,7 @@ def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory):
     assert by_key['model_pkg_orders_history']['depends_on'] == [{'task_key': 'snapshot_pkg_orders_snap_tests'}]
 
 
-def test_tests_on_source_produce_standalone_task(dbt_factory):
+def test_tests_on_source_produce_standalone_task(dbt_factory_bundled):
     nodes = dict(
         [
             _test('pkg', 'unique_raw_customers_id', ['source.pkg.raw.customers']),
@@ -137,7 +137,7 @@ def test_tests_on_source_produce_standalone_task(dbt_factory):
     )
     sources = dict([_source('pkg', 'raw', 'customers')])
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes, 'sources': sources})
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes, 'sources': sources})
     by_key = {t['task_key']: t for t in tasks}
 
     assert 'source_pkg_raw_customers_tests' in by_key
@@ -147,7 +147,7 @@ def test_tests_on_source_produce_standalone_task(dbt_factory):
     assert by_key['source_pkg_raw_customers_tests']['depends_on'] == []
 
 
-def test_flat_mode_emits_one_task_per_test_node(dbt_factory_flat):
+def test_flat_mode_emits_one_task_per_test_node(dbt_factory):
     nodes = dict(
         [
             _model('pkg', 'customers'),
@@ -157,7 +157,7 @@ def test_flat_mode_emits_one_task_per_test_node(dbt_factory_flat):
         ]
     )
 
-    tasks = dbt_factory_flat.create_tasks({'nodes': nodes})
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
     assert 'test_pkg_unique_customers_id' in by_key
@@ -171,7 +171,7 @@ def test_flat_mode_emits_one_task_per_test_node(dbt_factory_flat):
     assert by_key['model_pkg_orders']['depends_on'] == [{'task_key': 'model_pkg_customers'}]
 
 
-def test_flat_mode_test_on_seed_gates_on_seed(dbt_factory_flat):
+def test_flat_mode_test_on_seed_gates_on_seed(dbt_factory):
     nodes = dict(
         [
             _seed('pkg', 'countries'),
@@ -179,14 +179,14 @@ def test_flat_mode_test_on_seed_gates_on_seed(dbt_factory_flat):
         ]
     )
 
-    tasks = dbt_factory_flat.create_tasks({'nodes': nodes})
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['test_pkg_unique_countries_code']['depends_on'] == [{'task_key': 'seed_pkg_countries'}]
 
 
-def test_bundled_task_factory_assembles_commands(dbt_factory):
-    test_factory = dbt_factory.task_factories['test']
+def test_bundled_task_factory_assembles_commands(dbt_factory_bundled):
+    test_factory = dbt_factory_bundled.task_factories['test']
     task = test_factory.create_bundled_task(
         task_key='model_pkg_customers_tests',
         select='pkg.customers',
@@ -198,7 +198,7 @@ def test_bundled_task_factory_assembles_commands(dbt_factory):
     assert task.depends_on == ['model_pkg_customers']
 
 
-def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_factory):
+def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_factory_bundled):
     # The relationship test spans two models, so it must NOT be collapsed into either model's
     # bundled `_tests` task (dbt would hit a TABLE_OR_VIEW_NOT_FOUND on the un-built endpoint).
     # It should emit its own task with deps on both referenced models.
@@ -215,7 +215,7 @@ def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_fact
         ]
     )
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
     # Single-model test → bundled with cautious selection (relationship test is excluded by dbt)
@@ -239,7 +239,7 @@ def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_fact
     assert 'model_pkg_game_details_tests' not in by_key
 
 
-def test_single_package_bundled_test_uses_qualified_select(dbt_factory):
+def test_single_package_bundled_test_uses_qualified_select(dbt_factory_bundled):
     nodes = dict(
         [
             _model('pkg_a', 'customers'),
@@ -248,7 +248,7 @@ def test_single_package_bundled_test_uses_qualified_select(dbt_factory):
         ]
     )
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
     assert 'model_pkg_a_customers_tests' in by_key

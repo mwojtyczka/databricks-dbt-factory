@@ -18,12 +18,12 @@ def file_handler() -> SpecsHandler:
 
 @pytest.fixture
 def dbt_factory(file_handler: SpecsHandler):
-    return create_dbt_factory(file_handler, bundle_tests=True)
+    return create_dbt_factory(file_handler)
 
 
 @pytest.fixture
 def dbt_factory_with_deps(file_handler: SpecsHandler):
-    return create_dbt_factory(file_handler, dbt_deps_enabled=True, bundle_tests=True)
+    return create_dbt_factory(file_handler, dbt_deps_enabled=True)
 
 
 @pytest.fixture
@@ -32,20 +32,17 @@ def dbt_factory_with_deps_selected(file_handler: SpecsHandler):
         file_handler,
         dbt_deps_enabled=True,
         dbt_tasks_deps=["diamonds_prices", "second_dbt_model"],
-        bundle_tests=True,
     )
 
 
 @pytest.fixture
 def notebook_factory(file_handler: SpecsHandler):
-    return create_dbt_factory(
-        file_handler, task_type="notebook", notebook_path="./notebooks/dbt_runner.py", bundle_tests=True
-    )
+    return create_dbt_factory(file_handler, task_type="notebook", notebook_path="./notebooks/dbt_runner.py")
 
 
 @pytest.fixture
-def dbt_factory_flat(file_handler: SpecsHandler):
-    return create_dbt_factory(file_handler, bundle_tests=False)
+def dbt_factory_bundled(file_handler: SpecsHandler):
+    return create_dbt_factory(file_handler, bundle_tests=True)
 
 
 def create_dbt_factory(

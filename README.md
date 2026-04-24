@@ -191,18 +191,18 @@ databricks_dbt_factory  \
 - `--environment-key` (type: str, optional, default: Default): Key of the serverless environment. Mutually exclusive with `--job-cluster-key`.
 - `--job-cluster-key` (type: str, optional): Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with `--environment-key`.
 - `--extra-dbt-command-options` (type: str, optional, default: ""): Additional dbt command options to include.
-- `--run-tests` / `--no-run-tests` (flag, default: enabled): Run data tests after each model.
-- `--bundle-tests` / `--no-bundle-tests` (flag, default: disabled): Bundle single-model tests per resource into one `dbt test --select <resource> --indirect-selection cautious` task, and gate downstream models/seeds/snapshots on the upstream's `_tests` task so failing tests halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Test handling](#test-handling).
-- `--enable-dbt-deps` / `--no-enable-dbt-deps` (flag, default: disabled): Run dbt deps before each task.
+- `--no-run-tests` (flag, default: tests enabled): Skip generating dbt test tasks. Tests are included by default.
+- `--bundle-tests` (flag, default: disabled): Bundle single-model tests per resource into one `dbt test --select <resource> --indirect-selection cautious` task, and gate downstream models/seeds/snapshots on the upstream's `_tests` task so failing tests halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Test handling](#test-handling).
+- `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
-- `--dry-run` / `--no-dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
+- `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
 
 You can also check all input arguments by running `databricks_dbt_factory --help`.
 
 ## DBT Tests handling
 
-When `--run-tests` is enabled, the factory produces tasks for dbt tests. Two modes are available,
-controlled by `--bundle-tests`:
+The factory produces tasks for dbt tests from the manifest by default (pass `--no-run-tests`
+to skip them). Two modes are available, controlled by `--bundle-tests`:
 
 ### Per-test (default)
 

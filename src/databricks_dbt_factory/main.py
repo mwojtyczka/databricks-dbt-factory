@@ -61,7 +61,6 @@ def main():
         'snapshot': SnapshotTaskFactory(resolver, task_options, dbt_options),
         'seed': SeedTaskFactory(resolver, task_options, dbt_options),
     }
-
     if args.run_tests:
         task_factories['test'] = TestTaskFactory(resolver, task_options, dbt_options)
 
@@ -185,33 +184,28 @@ def parse_args():
         default="",
     )
     parser.add_argument(
-        "--run-tests",
-        action=argparse.BooleanOptionalAction,
-        help="Run data tests after each model. Enabled by default; use --no-run-tests to disable.",
-        required=False,
-        default=True,
+        "--no-run-tests",
+        action="store_false",
+        dest="run_tests",
+        help="Skip generating dbt test tasks. Tests are included by default.",
     )
     parser.add_argument(
         "--bundle-tests",
-        action=argparse.BooleanOptionalAction,
+        action="store_true",
         help=(
             "Bundle single-model tests for a given resource into one "
             "`dbt test --select <pkg>.<resource> --indirect-selection cautious` task (default: "
-            "disabled — one task per test node). Cross-model tests (e.g. `relationships`) are "
-            "detected from the manifest and emitted as their own tasks gated on every referenced "
+            "one task per test node). Cross-model tests (e.g. `relationships`) are detected "
+            "from the manifest and emitted as their own tasks gated on every referenced "
             "resource, so no tests are silently dropped. Trade-off: fewer tasks and a smaller "
             "DAG, but per-test failures show up as a single red `<resource>_tests` task — drill "
             "into the logs to see which assertion failed."
         ),
-        required=False,
-        default=False,
     )
     parser.add_argument(
         "--enable-dbt-deps",
-        action=argparse.BooleanOptionalAction,
-        help="Run `dbt deps` before each task. Disabled by default; use --enable-dbt-deps to enable.",
-        required=False,
-        default=False,
+        action="store_true",
+        help="Run `dbt deps` before each task.",
     )
     parser.add_argument(
         "--dbt-tasks-deps",
@@ -249,10 +243,8 @@ def parse_args():
     )
     parser.add_argument(
         "--dry-run",
-        action=argparse.BooleanOptionalAction,
-        help="Print generated tasks without updating the job spec file. Disabled by default.",
-        required=False,
-        default=False,
+        action="store_true",
+        help="Print generated tasks without updating the job spec file.",
     )
     args = parser.parse_args()
 

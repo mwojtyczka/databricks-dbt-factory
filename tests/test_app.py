@@ -214,7 +214,6 @@ def test_main_all_args(monkeypatch):
             project_dir,
             "--extra-dbt-command-options",
             extra_dbt_command_options,
-            "--run-tests",
         ],
     )
 
@@ -277,33 +276,32 @@ def test_environment_key_alone_parses(monkeypatch):
     assert args.job_cluster_key is None
 
 
-def test_no_prefixed_flags_actually_disable(monkeypatch):
+def test_boolean_flags_default(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS])
+    args = parse_args()
+    assert args.run_tests is True  # tests enabled by default
+    assert args.bundle_tests is False
+    assert args.enable_dbt_deps is False
+    assert args.dry_run is False
+
+
+def test_boolean_flags_toggled(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         [
             "main.py",
             *REQUIRED_ARGS,
             "--no-run-tests",
-            "--no-bundle-tests",
-            "--no-enable-dbt-deps",
-            "--no-dry-run",
+            "--bundle-tests",
+            "--enable-dbt-deps",
+            "--dry-run",
         ],
     )
     args = parse_args()
     assert args.run_tests is False
-    assert args.bundle_tests is False
-    assert args.enable_dbt_deps is False
-    assert args.dry_run is False
-
-
-def test_bare_bool_flags_default_to_enabled(monkeypatch):
-    monkeypatch.setattr(
-        "sys.argv",
-        ["main.py", *REQUIRED_ARGS, "--bundle-tests", "--run-tests"],
-    )
-    args = parse_args()
-    assert args.run_tests is True
     assert args.bundle_tests is True
+    assert args.enable_dbt_deps is True
+    assert args.dry_run is True
 
 
 def test_notebook_task_type_with_warehouse_id_is_rejected(monkeypatch):

@@ -30,7 +30,7 @@ make test
 ## Local installation and execution
 
 ```shell
-hatch build
+make build
 
 # use hatch directly
 hatch run databricks_dbt_factory \
@@ -39,6 +39,7 @@ hatch run databricks_dbt_factory \
   --target-job-spec-path job_definition_new.yaml \
   --source GIT \
   --target dev
+
 # or install locally and run
 pip install .
 databricks_dbt_factory  \
@@ -71,6 +72,99 @@ Here are the example steps to submit your first contribution:
     request description to [automatically link it](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/using-keywords-in-issues-and-pull-requests#linking-a-pull-request-to-an-issue)
     to an existing issue. 
 15. announce PR for the review
+
+## End-to-end testing on Databricks
+
+Unit tests (`make test`) cover factory logic in isolation. For changes that affect how generated
+tasks run on Databricks (task type, cluster/environment config, command shape, the notebook
+runner, etc.), verify end-to-end against a real workspace.
+
+The flow is: **generate** a job definition from a manifest → **deploy** it as a Databricks Asset
+Bundle (DAB) → **run** it and confirm the tasks execute correctly.
+
+### 0. Prerequisites
+
+- Databricks CLI v0.205+ installed: `databricks --version`
+- Authenticated to the target workspace: `databricks auth login --host https://<workspace>`
+  (or select an existing profile with `databricks auth profiles`)
+- A scratch workspace you don't mind deploying to — DABs are declarative and will overwrite
+  or delete resources that share a bundle name on re-deploy.
+
+### 1. Generate the job definition
+
+Run the CLI against one of the test manifests (or your own):
+
+```shell
+databricks_dbt_factory \
+  --dbt-manifest-path tests/test_data/manifest.json \
+  --input-job-spec-path tests/test_data/job_definition_template.yaml \
+  --target-job-spec-path job_definition_new.yaml \
+  --source GIT \
+  --target dev
+```
+
+For **notebook task type**, also pass `--task-type notebook`. The factory copies the packaged
+runner notebook next to the generated job spec automatically — no separate workspace upload
+needed; `databricks bundle deploy` will sync it in Step 3. (For `--source WORKSPACE`, also
+pass `--project-directory` / `--profiles-directory` pointing at the uploaded dbt project; see
+the [Task types](../README.md#task-types) section in the README for full examples.)
+
+### 2. Wrap the generated spec in a DAB
+
+Create `databricks.yml` in the same directory as `job_definition_new.yaml`:
+
+```yaml
+bundle:
+  name: dbt_factory_test_<iteration>
+workspace:
+  host: https://<your-workspace>.cloud.databricks.com
+targets:
+  dev:
+    mode: development
+    default: true
+include:
+  - job_definition_new.yaml
+```
+
+Use a **unique `bundle.name`** per test iteration — DABs are declarative, so anything previously
+deployed under the same bundle name but no longer in `include` is **deleted** on the next deploy.
+
+If the generated spec uses `--source GIT`, it already contains a `git_source` block; the
+workspace must be able to reach that repo/branch (public URL or a Git credential configured in
+the workspace). For `--source WORKSPACE`, no extra git config is needed, but the dbt project
+directory and `profiles.yml` must already exist at the paths passed to `--project-directory` /
+`--profiles-directory` (upload them with `databricks workspace import-dir` or sync from your
+repo).
+
+### 3. Validate, deploy, run
+
+```shell
+databricks bundle validate                  # schema + reference check, no write
+databricks bundle deploy --target dev       # push resources to the workspace
+databricks bundle run <job-resource-key>    # trigger a run (e.g. dbt_sql_job)
+```
+
+`<job-resource-key>` is the key under `resources.jobs:` in the generated YAML, **not** the
+`name` field. For the default test manifest that's `dbt_sql_job`.
+
+`databricks bundle run` prints the run URL — open it to watch the DAG in the UI.
+
+### 4. Verify
+
+- Task graph matches the expected topology (models, tests, snapshots, seeds in the right order).
+- Each task succeeds — or, when intentionally breaking a test:
+  - In the default per-test mode, the individual `test_<name>` task fails; downstream models
+    still run (they depend on the parent resource task, not the test).
+  - Under `--bundle-tests`, the `tests_<resource>` task fails and downstream models/seeds/snapshots
+    gated on it are skipped.
+- For notebook tasks, confirm `dbt_commands` / `project_directory` / `profiles_directory`
+  parameters render correctly in the task run page.
+
+### 5. Clean up
+
+```shell
+databricks bundle destroy --target dev
+```
 
 ## Troubleshooting
 

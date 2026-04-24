@@ -165,7 +165,7 @@ class TestTaskFactory(TaskFactory):
 
     def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
         """
-        Creates a test task.
+        Creates a test task for a single dbt test node.
 
         Args:
             dbt_node_name (str): Name of the DBT node.
@@ -175,12 +175,42 @@ class TestTaskFactory(TaskFactory):
         Returns:
             DbtTask: An instance of Task.
         """
-        valid_dbt_deps_types: list[str] = [DbtNodeTypes.MODEL.value]
+        valid_dbt_deps_types: list[str] = [
+            DbtNodeTypes.MODEL.value,
+            DbtNodeTypes.SEED.value,
+            DbtNodeTypes.SNAPSHOT.value,
+        ]
 
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
 
         dbt_deps = self.get_dbt_deps_command(dbt_node_name)
         commands = [dbt_deps] if dbt_deps else []
         commands.append(f"dbt test --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+
+        return DbtTask(task_key, commands, self.task_options, depends_on)
+
+    def create_bundled_task(self, task_key: str, select: str, deps_command_name: str, depends_on: list[str]) -> DbtTask:
+        """
+        Creates a single test task that runs the single-model tests for a given resource via
+        `dbt test --select <resource> --indirect-selection cautious`. The cautious selector
+        ensures only tests whose referenced resources are entirely within this bundle are
+        included; cross-model tests (e.g. `relationships`) are excluded and handled separately.
+
+        Args:
+            task_key (str): Key for the bundled task.
+            select (str): Pre-computed dbt `--select` argument (qualified model name, or
+                `source:<pkg>.<src>.<tbl>` for sources).
+            deps_command_name (str): Name used by `get_dbt_deps_command` to decide whether to prepend `dbt deps`.
+            depends_on (list[str]): Upstream task keys this bundled task should gate on.
+
+        Returns:
+            DbtTask: An instance of Task.
+        """
+        dbt_deps = self.get_dbt_deps_command(deps_command_name)
+        commands = [dbt_deps] if dbt_deps else []
+        commands.append(
+            f"dbt test --select {select} --indirect-selection cautious"
+            + (f" {self.dbt_options}" if self.dbt_options else "")
+        )
 
         return DbtTask(task_key, commands, self.task_options, depends_on)

@@ -1,9 +1,10 @@
 import os
 from tempfile import NamedTemporaryFile
 from pathlib import Path
+import pytest
 import yaml
 
-from databricks_dbt_factory.main import main
+from databricks_dbt_factory.main import main, parse_args
 
 BASE_PATH = str(Path(__file__).resolve().parent)
 
@@ -27,6 +28,123 @@ def test_main_given_default_args(monkeypatch):
             input_job_spec_path,
             "--target-job-spec-path",
             target_job_spec_path,
+        ],
+    )
+
+    try:
+        main()
+
+        with open(expected_job_definition_path, "r", encoding="utf-8") as file:
+            expected_job_definition = yaml.safe_load(file)
+
+        with open(target_job_spec_path, "r", encoding="utf-8") as file:
+            job_definition = yaml.safe_load(file)
+
+        assert job_definition == expected_job_definition
+    finally:
+        if os.path.exists(target_job_spec_path):
+            os.remove(target_job_spec_path)
+
+
+def test_main_notebook_mode_auto_copies_runner_notebook_next_to_spec(monkeypatch, tmp_path):
+    """Without --project-directory, the factory copies the runner notebook next to the
+    generated job spec and emits `notebook_path: ./run_dbt_command.py`."""
+    target_job_spec_path = tmp_path / "job_definition.yaml"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target_job_spec_path),
+            "--task-type",
+            "notebook",
+        ],
+    )
+
+    main()
+
+    copied_notebook = tmp_path / "run_dbt_command.py"
+    assert copied_notebook.exists(), "runner notebook should have been copied next to the job spec"
+    assert "dbtRunner" in copied_notebook.read_text(), "copied file should be the packaged runner"
+
+    with open(target_job_spec_path, "r", encoding="utf-8") as file:
+        job_definition = yaml.safe_load(file)
+
+    tasks = job_definition["resources"]["jobs"]["dbt_sql_job"]["tasks"]
+    for task in tasks:
+        assert task["notebook_task"]["notebook_path"] == "./run_dbt_command.py"
+
+
+def test_main_notebook_mode_auto_copies_runner_notebook_to_project_root(monkeypatch, tmp_path):
+    """With a relative --project-directory (e.g. `../`), the factory copies the runner to
+    the computed project root and emits a matching relative notebook_path from the spec."""
+    spec_dir = tmp_path / "resources"
+    spec_dir.mkdir()
+    target_job_spec_path = spec_dir / "job_definition.yaml"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target_job_spec_path),
+            "--task-type",
+            "notebook",
+            "--project-directory",
+            "../",
+        ],
+    )
+
+    main()
+
+    copied_notebook = tmp_path / "run_dbt_command.py"
+    assert copied_notebook.exists(), "runner should have been copied to the project root (one level up from the spec)"
+    assert not (spec_dir / "run_dbt_command.py").exists(), "runner should NOT be copied next to the spec in this case"
+
+    with open(target_job_spec_path, "r", encoding="utf-8") as file:
+        job_definition = yaml.safe_load(file)
+
+    tasks = job_definition["resources"]["jobs"]["dbt_sql_job"]["tasks"]
+    for task in tasks:
+        assert task["notebook_task"]["notebook_path"] == "../run_dbt_command.py"
+        # With the runner at project root, CWD at runtime = project root. We explicitly
+        # pin project_directory to "." so the spec is self-documenting (the user's original
+        # "../" would resolve one level too high and has been rewritten).
+        assert task["notebook_task"]["base_parameters"]["project_directory"] == "."
+
+
+def test_main_notebook_mode(monkeypatch):
+    """Test the main function for notebook task type generation."""
+    dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"
+    input_job_spec_path = BASE_PATH + "/test_data/job_definition_template.yaml"
+    expected_job_definition_path = BASE_PATH + "/test_data/job_definition_notebook_default.yaml"
+
+    with NamedTemporaryFile(suffix=".yaml", delete=False) as temp_file:
+        target_job_spec_path = temp_file.name
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            dbt_manifest_path,
+            "--input-job-spec-path",
+            input_job_spec_path,
+            "--target-job-spec-path",
+            target_job_spec_path,
+            "--task-type",
+            "notebook",
+            "--notebook-path",
+            "./notebooks/dbt_runner.py",
         ],
     )
 
@@ -82,7 +200,6 @@ def test_main_all_args(monkeypatch):
             "--source",
             "GIT",
             "--enable-dbt-deps",
-            "true",
             "--dbt-tasks-deps",
             "diamonds_prices,second_dbt_model",
             "--warehouse_id",
@@ -97,8 +214,6 @@ def test_main_all_args(monkeypatch):
             project_dir,
             "--extra-dbt-command-options",
             extra_dbt_command_options,
-            "--run-tests",
-            "true",
         ],
     )
 
@@ -126,6 +241,85 @@ def test_main_all_args(monkeypatch):
     finally:
         if os.path.exists(target_job_spec_path):
             os.remove(target_job_spec_path)
+
+
+REQUIRED_ARGS = [
+    "--dbt-manifest-path",
+    "manifest.json",
+    "--input-job-spec-path",
+    "in.yaml",
+    "--target-job-spec-path",
+    "out.yaml",
+]
+
+
+def test_explicit_environment_key_with_job_cluster_key_is_rejected(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", *REQUIRED_ARGS, "--job-cluster-key", "foo", "--environment-key", "Default"],
+    )
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
+def test_job_cluster_key_alone_parses(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS, "--job-cluster-key", "foo"])
+    args = parse_args()
+    assert args.job_cluster_key == "foo"
+    assert args.environment_key is None
+
+
+def test_environment_key_alone_parses(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS, "--environment-key", "Default"])
+    args = parse_args()
+    assert args.environment_key == "Default"
+    assert args.job_cluster_key is None
+
+
+def test_boolean_flags_default(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS])
+    args = parse_args()
+    assert args.run_tests is True  # tests enabled by default
+    assert args.bundle_tests is False
+    assert args.enable_dbt_deps is False
+    assert args.dry_run is False
+
+
+def test_boolean_flags_toggled(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            *REQUIRED_ARGS,
+            "--no-run-tests",
+            "--bundle-tests",
+            "--enable-dbt-deps",
+            "--dry-run",
+        ],
+    )
+    args = parse_args()
+    assert args.run_tests is False
+    assert args.bundle_tests is True
+    assert args.enable_dbt_deps is True
+    assert args.dry_run is True
+
+
+def test_notebook_task_type_with_warehouse_id_is_rejected(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            *REQUIRED_ARGS,
+            "--task-type",
+            "notebook",
+            "--notebook-path",
+            "/n",
+            "--warehouse_id",
+            "wh123",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        parse_args()
 
 
 def remove_target_from_spec(expected_job_definition):

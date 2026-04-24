@@ -25,3 +25,6 @@ integration:
 
 coverage:
 	hatch run coverage && open htmlcov/index.html
+
+build:
+	hatch build

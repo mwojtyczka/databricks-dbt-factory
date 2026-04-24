@@ -86,7 +86,7 @@ verify      = ["black --check .",
 profile = "black"
 
 [tool.mypy]
-exclude = ['venv', '.venv']
+exclude = ['venv', '.venv', 'src/databricks_dbt_factory/notebook']
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -98,11 +98,17 @@ filterwarnings = ["ignore::DeprecationWarning"]
 target-version = ["py310"]
 line-length = 120
 skip-string-normalization = true
+extend-exclude = '''
+/(
+  src/databricks_dbt_factory/notebook
+)/
+'''
 
 [tool.ruff]
 cache-dir = ".venv/ruff-cache"
 target-version = "py310"
 line-length = 120
+extend-exclude = ["src/databricks_dbt_factory/notebook"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["databricks.labs.dqx"]
@@ -154,7 +160,7 @@ fail-under = 10.0
 # ignore-list. The regex matches against paths and can be in Posix or Windows
 # format. Because '\\' represents the directory delimiter on Windows systems, it
 # can't be used as an escape character.
-# ignore-paths =
+ignore-paths = ["src/databricks_dbt_factory/notebook"]
 
 # Files or directories matching the regular expression patterns are skipped. The
 # regex matches against base names, not paths. The default value ignores Emacs
@@ -534,7 +540,8 @@ disable = [
     "consider-using-assignment-expr",
     "logging-fstring-interpolation",
     "consider-using-any-or-all",
-    "unnecessary-default-type-args"
+    "unnecessary-default-type-args",
+    "too-many-instance-attributes"
 ]
 
 # Enable the message, report, category or checker with the given id(s). You can

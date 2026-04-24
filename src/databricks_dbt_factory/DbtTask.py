@@ -1,5 +1,14 @@
+import json
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
+
+
+class TaskType(Enum):
+    """Supported task types for generated Databricks tasks."""
+
+    DBT = "dbt"
+    NOTEBOOK = "notebook"
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,35 @@ class DbtTaskOptions:
     dbt_tasks_deps: list[str] = field(default_factory=list)
     """Optional comma separated list of tasks that requires dbt debs. Only in effect if dbt_deps_enabled is enabled."""
 
+    task_type: TaskType = TaskType.DBT
+    """Task type to generate: `TaskType.DBT` for native dbt_task, `TaskType.NOTEBOOK` for notebook_task
+    wrapper. Strings are accepted and coerced — any value outside the enum raises `ValueError`.
+    Notebook mode enables base environment support and environment variables on serverless."""
+
+    notebook_path: str | None = None
+    """Path to the dbt runner notebook. Required when task_type is `TaskType.NOTEBOOK`."""
+
+    job_cluster_key: str | None = None
+    """Job cluster key for running tasks on job compute instead of serverless."""
+
+    def __post_init__(self):
+        if not isinstance(self.task_type, TaskType):
+            object.__setattr__(self, 'task_type', TaskType(self.task_type))
+        if self.task_type is TaskType.NOTEBOOK:
+            unsupported = []
+            for name, value in (
+                ('warehouse_id', self.warehouse_id),
+                ('schema', self.schema),
+                ('catalog', self.catalog),
+            ):
+                if value:
+                    unsupported.append(name)
+            if unsupported:
+                raise ValueError(
+                    f"{', '.join(unsupported)} cannot be set with task_type=NOTEBOOK; "
+                    "notebook tasks connect via profiles.yml."
+                )
+
 
 @dataclass(frozen=True)
 class DbtTask:
@@ -56,31 +94,57 @@ class DbtTask:
 
     def to_dict(self) -> dict:
         """Converts the Task to a dictionary suitable for the job definition."""
+        if self.options.task_type is TaskType.NOTEBOOK:
+            return self._to_notebook_dict()
+        return self._to_dbt_dict()
+
+    def _base_spec(self) -> dict[str, Any]:
         spec: dict[str, Any] = {
             'task_key': self.task_key,
-            'dbt_task': {
-                'commands': self.commands,
-            },
-            'environment_key': self.options.environment_key,
             'depends_on': [{'task_key': dep} for dep in (self.depends_on or [])],
         }
+        if self.options.job_cluster_key:
+            spec['job_cluster_key'] = self.options.job_cluster_key
+        else:
+            spec['environment_key'] = self.options.environment_key
+        return spec
+
+    def _to_dbt_dict(self) -> dict[str, Any]:
+        spec = self._base_spec()
+        dbt_task: dict[str, Any] = {'commands': self.commands}
 
         if self.options.source:
-            spec['dbt_task']['source'] = self.options.source
-
+            dbt_task['source'] = self.options.source
         if self.options.project_directory:
-            spec['dbt_task']['project_directory'] = self.options.project_directory
-
+            dbt_task['project_directory'] = self.options.project_directory
         if self.options.schema:
-            spec['dbt_task']['schema'] = self.options.schema
+            dbt_task['schema'] = self.options.schema
+        if self.options.warehouse_id:
+            dbt_task['warehouse_id'] = self.options.warehouse_id
+        if self.options.catalog:
+            dbt_task['catalog'] = self.options.catalog
+        if self.options.profiles_directory:
+            dbt_task['profiles_directory'] = self.options.profiles_directory
 
-        if self.options.warehouse_id:  # not required if using "None (Manual) / Serverless"
-            spec['dbt_task']['warehouse_id'] = self.options.warehouse_id
+        spec['dbt_task'] = dbt_task
+        return spec
 
-        if self.options.catalog:  # catalog can only be specified if warehouse_id is specified
-            spec['dbt_task']['catalog'] = self.options.catalog
+    def _to_notebook_dict(self) -> dict[str, Any]:
+        base_parameters: dict[str, str] = {
+            'dbt_commands': json.dumps(self.commands),
+        }
+        if self.options.project_directory:
+            base_parameters['project_directory'] = self.options.project_directory
+        if self.options.profiles_directory:
+            base_parameters['profiles_directory'] = self.options.profiles_directory
 
-        if self.options.profiles_directory:  # only if no warehouse_id is specified
-            spec['dbt_task']['profiles_directory'] = self.options.profiles_directory
+        notebook_task: dict[str, Any] = {
+            'notebook_path': self.options.notebook_path,
+            'base_parameters': base_parameters,
+        }
+        if self.options.source:
+            notebook_task['source'] = self.options.source
 
+        spec = self._base_spec()
+        spec['notebook_task'] = notebook_task
         return spec

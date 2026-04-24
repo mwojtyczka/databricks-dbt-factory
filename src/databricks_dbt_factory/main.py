@@ -1,4 +1,5 @@
 import argparse
+import os
 import shutil
 from importlib import resources
 from pathlib import Path
@@ -29,8 +30,17 @@ def main():
     )
 
     notebook_path = args.notebook_path
+    effective_project_directory = args.project_directory
     if args.task_type == "notebook" and notebook_path is None:
-        notebook_path = _copy_runner_notebook_next_to(args.target_job_spec_path)
+        notebook_path, notebook_at_project_root = _copy_runner_notebook(
+            args.target_job_spec_path, args.project_directory
+        )
+        # If the runner landed at the project root, CWD at task runtime already equals the
+        # project root. Pass `.` explicitly so the generated spec is self-documenting (and
+        # immune to any future change in dbt's default); the user's original `../` would
+        # resolve one level too high and is no longer correct.
+        if notebook_at_project_root:
+            effective_project_directory = "."
 
     task_options = DbtTaskOptions(
         environment_key=args.environment_key if args.environment_key is not None else "Default",
@@ -38,7 +48,7 @@ def main():
         catalog=args.catalog,
         schema=args.schema,
         profiles_directory=args.profiles_directory,
-        project_directory=args.project_directory,
+        project_directory=effective_project_directory,
         source=args.source,
         dbt_deps_enabled=args.enable_dbt_deps,
         dbt_tasks_deps=dbt_tasks_deps,
@@ -61,21 +71,46 @@ def main():
     )
 
 
-def _copy_runner_notebook_next_to(target_job_spec_path: str) -> str:
+def _copy_runner_notebook(target_job_spec_path: str, project_directory: str | None) -> tuple[str, bool]:
     """
-    Copies the packaged dbt runner notebook next to the generated job spec so it gets
-    uploaded by `databricks bundle deploy` without a separate manual step.
+    Copies the packaged dbt runner notebook into the bundle so `databricks bundle deploy`
+    uploads it automatically.
 
-    Returns the relative path used in `notebook_path` (the same directory as the spec).
+    When `project_directory` is a relative path (the common case, e.g. `../` when the spec
+    lives in a subdirectory), the notebook is placed at the computed project root. This way
+    the notebook sits next to `dbt_project.yml` / `profiles.yml`, and at task runtime CWD =
+    project root — dbt finds everything without any path gymnastics in the runner.
+
+    When `project_directory` is absolute (typical for `--source WORKSPACE` with a pinned
+    workspace path we can't write to from local CLI) or missing, falls back to copying the
+    notebook next to the generated job spec.
+
+    Returns `(notebook_path, notebook_at_project_root)`:
+    - `notebook_path`: relative path from the spec's directory to the copied notebook,
+      which DAB resolves at deploy time.
+    - `notebook_at_project_root`: True when the runner landed at the computed project root
+      (so the caller knows CWD = project root at runtime and can drop `--project-dir`).
+
     Overwrites any existing file at the destination.
     """
     source = resources.files("databricks_dbt_factory") / "notebook" / _RUNNER_NOTEBOOK_FILENAME
-    dest_dir = Path(target_job_spec_path).resolve().parent
+    spec_dir = Path(target_job_spec_path).resolve().parent
+
+    if project_directory and not Path(project_directory).is_absolute():
+        notebook_at_project_root = True
+        dest_dir = (spec_dir / project_directory).resolve()
+    else:
+        notebook_at_project_root = False
+        dest_dir = spec_dir
+
     dest = dest_dir / _RUNNER_NOTEBOOK_FILENAME
     dest_dir.mkdir(parents=True, exist_ok=True)
     with resources.as_file(source) as src_path:
         shutil.copyfile(src_path, dest)
-    return f"./{_RUNNER_NOTEBOOK_FILENAME}"
+
+    relative = Path(os.path.relpath(dest, start=spec_dir)).as_posix()
+    notebook_path = relative if relative.startswith("..") else f"./{relative}"
+    return notebook_path, notebook_at_project_root
 
 
 def build_dbt_options(args):

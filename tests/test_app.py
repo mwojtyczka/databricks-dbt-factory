@@ -46,9 +46,9 @@ def test_main_given_default_args(monkeypatch):
             os.remove(target_job_spec_path)
 
 
-def test_main_notebook_mode_auto_copies_runner_notebook(monkeypatch, tmp_path):
-    """When --notebook-path is omitted, the factory copies the packaged runner notebook
-    next to the generated job spec and references it relatively."""
+def test_main_notebook_mode_auto_copies_runner_notebook_next_to_spec(monkeypatch, tmp_path):
+    """Without --project-directory, the factory copies the runner notebook next to the
+    generated job spec and emits `notebook_path: ./run_dbt_command.py`."""
     target_job_spec_path = tmp_path / "job_definition.yaml"
 
     monkeypatch.setattr(
@@ -78,6 +78,48 @@ def test_main_notebook_mode_auto_copies_runner_notebook(monkeypatch, tmp_path):
     tasks = job_definition["resources"]["jobs"]["dbt_sql_job"]["tasks"]
     for task in tasks:
         assert task["notebook_task"]["notebook_path"] == "./run_dbt_command.py"
+
+
+def test_main_notebook_mode_auto_copies_runner_notebook_to_project_root(monkeypatch, tmp_path):
+    """With a relative --project-directory (e.g. `../`), the factory copies the runner to
+    the computed project root and emits a matching relative notebook_path from the spec."""
+    spec_dir = tmp_path / "resources"
+    spec_dir.mkdir()
+    target_job_spec_path = spec_dir / "job_definition.yaml"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target_job_spec_path),
+            "--task-type",
+            "notebook",
+            "--project-directory",
+            "../",
+        ],
+    )
+
+    main()
+
+    copied_notebook = tmp_path / "run_dbt_command.py"
+    assert copied_notebook.exists(), "runner should have been copied to the project root (one level up from the spec)"
+    assert not (spec_dir / "run_dbt_command.py").exists(), "runner should NOT be copied next to the spec in this case"
+
+    with open(target_job_spec_path, "r", encoding="utf-8") as file:
+        job_definition = yaml.safe_load(file)
+
+    tasks = job_definition["resources"]["jobs"]["dbt_sql_job"]["tasks"]
+    for task in tasks:
+        assert task["notebook_task"]["notebook_path"] == "../run_dbt_command.py"
+        # With the runner at project root, CWD at runtime = project root. We explicitly
+        # pin project_directory to "." so the spec is self-documenting (the user's original
+        # "../" would resolve one level too high and has been rewritten).
+        assert task["notebook_task"]["base_parameters"]["project_directory"] == "."
 
 
 def test_main_notebook_mode(monkeypatch):

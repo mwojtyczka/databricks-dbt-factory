@@ -21,10 +21,9 @@ if not dbt_commands:
 
 # COMMAND ----------
 
-# Inject the on-behalf-of-user token via env vars
 ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-os.environ["DATABRICKS_TOKEN"] = ctx.apiToken().get()
-os.environ["DATABRICKS_HOST"] = ctx.apiUrl().get()
+os.environ["DBT_ACCESS_TOKEN"] = ctx.apiToken().get()
+os.environ["DBT_HOST"] = ctx.apiUrl().get()
 
 try:
     runner = dbtRunner()
@@ -56,5 +55,5 @@ try:
 
         print(f"Completed successfully: dbt {' '.join(args)}")
 finally:
-    os.environ.pop("DATABRICKS_TOKEN", None)
-    os.environ.pop("DATABRICKS_HOST", None)
+    os.environ.pop("DBT_ACCESS_TOKEN", None)
+    os.environ.pop("DBT_HOST", None)

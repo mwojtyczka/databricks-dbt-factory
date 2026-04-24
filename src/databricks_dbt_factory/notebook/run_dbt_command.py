@@ -25,6 +25,26 @@ ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
 os.environ["DBT_ACCESS_TOKEN"] = ctx.apiToken().get()
 os.environ["DBT_HOST"] = ctx.apiUrl().get()
 
+# chdir to the dbt project so dbt runs from inside it. Relative `project_directory` is
+# resolved against this notebook's own workspace location — the same anchor native
+# `dbt_task` uses. Auto-copy mode sends `.` (resolves to the notebook's dir, which is
+# project root by construction); user-pinned `--notebook-path` with relative
+# `--project-directory` resolves against wherever the user placed the notebook; absolute
+# `project_directory` is used as-is.
+if project_directory:
+    notebook_dir = os.path.dirname("/Workspace" + ctx.notebookPath().get())
+    target_dir = (
+        project_directory
+        if os.path.isabs(project_directory)
+        else os.path.normpath(os.path.join(notebook_dir, project_directory))
+    )
+    os.chdir(target_dir)
+
+# dbt writes `logs/dbt.log` and `target/` inside CWD on every run. DAB sync only uploads
+# files, not empty directories — pre-create them (idempotent).
+os.makedirs("logs", exist_ok=True)
+os.makedirs("target", exist_ok=True)
+
 try:
     runner = dbtRunner()
 
@@ -37,9 +57,6 @@ try:
             command_str = command_str[4:]
 
         args = shlex.split(command_str)
-
-        if project_directory:
-            args.extend(["--project-dir", project_directory])
 
         if profiles_directory:
             args.extend(["--profiles-dir", profiles_directory])

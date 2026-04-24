@@ -129,6 +129,9 @@ The packaged runner notebook (`run_dbt_command.py`) is copied next to the genera
 automatically. The `databricks bundle deploy` DAB command uploads it to the workspace along with the job.
 Pass `--notebook-path <path>` if you want to pin the notebook elsewhere and manage it yourself.
 
+> **When pinning `--notebook-path`, always provide `--project-directory` as an absolute workspace path to make sure the dbt project directory is resolved correctly.**
+> In auto-copy mode the factory places the runner at the project root and rewrites paths accordingly. When you pin the notebook somewhere else, the factory can't know where your project lives relative to it — only an absolute `--project-directory` (e.g. `/Workspace/Users/you@example.com/my_dbt_project`) is guaranteed to work at runtime.
+
 If your dbt project lives in the workspace instead of git (`--source WORKSPACE`), also pass `--project-directory` and `--profiles-directory` pointing at the absolute workspace paths of the uploaded project, e.g.:
 
 ```shell
@@ -179,7 +182,7 @@ databricks_dbt_factory  \
 - `--target` (type: str, optional): dbt target to use. If not provided, the default target from the dbt profile will be used.
 - `--source` (type: str, optional, default: None): Project source (`GIT` or `WORKSPACE`). If not provided, `WORKSPACE` will be used.
 - `--task-type` (type: str, optional, default: "dbt"): Task type to generate — `dbt` for native dbt_task, `notebook` for notebook_task wrapper.
-- `--notebook-path` (type: str, optional): Path to the dbt runner notebook used when `--task-type notebook`. If omitted, the packaged runner notebook is copied next to the generated job spec and referenced relatively, so `databricks bundle deploy` uploads it automatically.
+- `--notebook-path` (type: str, optional): Path to the dbt runner notebook used when `--task-type notebook`. If omitted, the packaged runner notebook is copied next to the generated job spec and referenced relatively, so `databricks bundle deploy` uploads it automatically. **When provided, also pass `--project-directory` as an absolute workspace path** — see the note in [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
 - `--warehouse_id` (type: str, optional): SQL Warehouse ID. Only used with native dbt_task.
 - `--schema` (type: str, optional): Metastore schema. Only used with native dbt_task.
 - `--catalog` (type: str, optional): Metastore catalog. Only used with native dbt_task.

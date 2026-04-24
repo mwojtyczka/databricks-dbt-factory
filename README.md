@@ -1,10 +1,10 @@
 Databricks dbt factory
 ===
 
-Databricks dbt Factory is a lightweight library that generates a Databricks Workflow task for each dbt model, based on your dbt manifest.
-It creates a DAG of tasks that run each dbt model, test, seed, and snapshot as a separate task in Databricks Workflows.
+Databricks dbt Factory is a lightweight library that generates a Databricks Workflow from a dbt project. 
+It creates individual Databricks Workflow tasks based on your dbt manifest for each dbt object type, covering dbt models, tests, seeds, and snapshots. 
 
-The tool can create or update tasks directly within an existing job specification such as Databricks Assets Bundle (DAB).
+The tool creates a new job specification, such as Databricks Assets Bundle (DAB), or can update an existing one.
 
 [![PyPI - Version](https://img.shields.io/pypi/v/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
@@ -31,7 +31,9 @@ Databricks dbt Factory changes that by updating Databricks Workflow specs to run
 
 ### Benefits
 
-✅ Simplified troubleshooting — Quickly pinpoint and fix issues at the model level.
+✅ Faster execution - speed up dbt projects exeuction on Databricks
+
+✅ Visibility & Simplified troubleshooting — Quickly pinpoint and fix issues at the model level.
 
 ✅ Enhanced logging & notifications — Gain detailed logs and precise error alerts for faster debugging.
 
@@ -87,7 +89,7 @@ notebook tasks on serverless — requires Databricks CLI >= 0.292.0):
 
 Note: `client` and `base_environment` are mutually exclusive — use one or the other.
 
-## Generating native dbt tasks
+## Generating native dbt tasks within Databricks Workflows
 
 ```shell
 databricks_dbt_factory  \
@@ -102,11 +104,16 @@ This generates `dbt_task` entries — the native Databricks dbt task type.
 
 Note that `--input-job-spec-path` and `--target-job-spec-path` can be the same file, in which case the job spec is updated in place.
 
-## Generating notebook tasks (recommended for Serverless)
+## Generating notebook tasks within Databricks Workflows (recommended for best performance)
 
-Native `dbt_task` on Serverless does not support base environments or environment variables.
-To work around this, the factory can generate `notebook_task` entries instead, using a
-reusable runner notebook that invokes dbt via the Python `dbtRunner` API.
+This is the recommended way to run dbt on Databricks. It gives much faster start time. 
+It uses a pre-cached base environment where `dbt-databricks` is already installed and ready on each new task which saves roughly 30 seconds of pip-install time per task. Native `dbt_task` on Serverless has to install dbt fresh every time.
+
+**How it works.** A small runner notebook (shipped with this package) triggers dbt for each
+task. dbt is lightweight — it parses your project, figures out what SQL to run, and sends that
+SQL to your **SQL warehouse**. The actual model transformation runs in the warehouse, not in
+the notebook. The notebook (and whatever compute runs it, serverless or a cluster) is just the
+trigger — it doesn't crunch any data itself.
 
 ```shell
 databricks_dbt_factory  \
@@ -121,15 +128,15 @@ databricks_dbt_factory  \
 ```
 
 The packaged runner notebook (`run_dbt_command.py`) is copied next to the generated job spec
-automatically — `databricks bundle deploy` uploads it to the workspace along with the job.
-No manual `databricks workspace import` step needed. Pass `--notebook-path <path>` only if
-you want to pin the notebook elsewhere and manage it yourself.
+automatically. The `databricks bundle deploy` DAB command uploads it to the workspace along with the job.
+Pass `--notebook-path <path>` if you want to pin the notebook elsewhere and manage it yourself.
 
-To run the dbt process on a job cluster instead of serverless, use `--job-cluster-key`
-and define the cluster in your job template. Note that `--job-cluster-key` controls where
-the dbt Python process runs (parsing, compiling, orchestrating). SQL execution still goes
-to the SQL warehouse configured in your `profiles.yml` — this is a `dbt-databricks`
-limitation.
+### Providing your own cluster (non-serverless mode)
+
+To trigger tasks from a dedicated job cluster instead of serverless, use `--job-cluster-key`
+and define the cluster in your job template. The cluster only runs dbt's lightweight
+orchestration step (parse, compile, dispatch) — the actual SQL still executes on the SQL
+warehouse configured in your `profiles.yml`. Small cluster is enough.
 
 ```yaml
 resources:
@@ -157,13 +164,8 @@ databricks_dbt_factory  \
   --target dev
 ```
 
-The notebook:
-- Accepts `dbt_commands`, `project_directory`, and `profiles_directory` as parameters
-- Injects `DATABRICKS_TOKEN` and `DATABRICKS_HOST` from the runtime context (same as native dbt_task)
-- Invokes dbt commands via `dbtRunner().invoke()` — no subprocess needed
-- Works with existing `profiles.yml` that use `{{ env_var('DATABRICKS_TOKEN') }}`
+## Arguments
 
-**Arguments:**
 - `--new-job-name` (type: str, optional, default: None): Optional job name. If provided, the existing job name in the job spec is updated.
 - `--dbt-manifest-path` (type: str, required): Path to the dbt manifest file.
 - `--input-job-spec-path` (type: str, required): Path to the input job spec file (the job template).
@@ -253,7 +255,7 @@ The factory supports two task types, controlled by `--task-type`:
 Generates native Databricks `dbt_task` entries. This is the standard approach that
 uses Databricks' built-in dbt integration. Works with both classic compute and serverless.
 
-**Limitations on Serverless:** Native dbt tasks do not support workspace base environments
+**Limitations on Serverless:** Native dbt tasks do not support workspace base environments (requiring installing dependencies on every task)
 or environment variables. If you need either of these, use the `notebook` task type instead.
 
 ### `notebook`
@@ -262,10 +264,9 @@ Generates `notebook_task` entries that wrap dbt execution via the `dbtRunner` Py
 Each task calls a shared runner notebook (`run_dbt_command.py`) with parameterized dbt commands.
 
 **Advantages over native dbt_task:**
-- Supports workspace base environments (admin-managed, pre-cached dependencies) — use `base_environment` in the job template instead of `client` + `dependencies` (see [Job template](#job-template))
-- Supports environment variables
+- Faster execution by avoiding cold start problem - all dependencies can be pre pre-cached inside  `base_environment`
 - Supports running the dbt process on job compute via `--job-cluster-key` (SQL execution still uses the warehouse in `profiles.yml`)
-- Uses the same runtime authentication as native dbt_task (`DATABRICKS_TOKEN` injected from notebook context)
+- More flexibility - The runner notebook is editable. Want to load secrets from a scope before dbt runs? Run dbt, then call a Python API with the result? Emit a Slack message on failure? Tag the run with Git SHA? Add a few lines to the runner notebook.
 
 # Contribution
 

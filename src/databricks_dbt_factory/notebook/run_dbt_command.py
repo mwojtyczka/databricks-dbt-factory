@@ -3,6 +3,7 @@
 import json
 import os
 import shlex
+import tempfile
 
 from dbt.cli.main import dbtRunner
 
@@ -45,8 +46,23 @@ if project_directory:
 os.makedirs("logs", exist_ok=True)
 os.makedirs("target", exist_ok=True)
 
+manifest = None
+prebuilt_manifest_path = os.path.join("target", "partial_parse.msgpack")
+if os.path.exists(prebuilt_manifest_path):
+    try:
+        from dbt.contracts.graph.manifest import Manifest
+
+        with open(prebuilt_manifest_path, "rb") as f:
+            manifest = Manifest.from_msgpack(f.read())
+        manifest.build_flat_graph()
+        local_dir = tempfile.mkdtemp(prefix="dbt_local_")
+        os.environ["DBT_TARGET_PATH"] = local_dir
+        os.environ["DBT_LOG_PATH"] = local_dir
+    except Exception:
+        manifest = None
+
 try:
-    runner = dbtRunner()
+    runner = dbtRunner(manifest=manifest)
 
     for command_str in json.loads(dbt_commands):
         command_str = command_str.strip()
@@ -74,3 +90,5 @@ try:
 finally:
     os.environ.pop("DBT_ACCESS_TOKEN", None)
     os.environ.pop("DBT_HOST", None)
+    os.environ.pop("DBT_TARGET_PATH", None)
+    os.environ.pop("DBT_LOG_PATH", None)

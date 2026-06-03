@@ -288,6 +288,30 @@ Each task calls a shared runner notebook (`run_dbt_command.py`) with parameteriz
 - Supports running the dbt process on job compute via `--job-cluster-key` (SQL execution still uses the warehouse in `profiles.yml`)
 - More flexibility - The runner notebook is editable. Want to load secrets from a scope before dbt runs? Run dbt, then call a Python API with the result? Emit a Slack message on failure? Tag the run with Git SHA? Add a few lines to the runner notebook.
 
+#### Faster parsing on large projects (pre-built manifest)
+
+On large projects with many parallel tasks, most of each task's time is dbt **parsing** (re-reading
+and content-hashing every project file and rebuilding the DAG), paid by every task and amplified by
+contention on the shared workspace filesystem. The notebook runner skips this when a pre-built
+manifest is present: if `target/partial_parse.msgpack` sits next to the project, it is injected into
+`dbtRunner` so dbt skips parsing, and each task writes its artifacts to a private local dir instead
+of the shared project `target/`.
+
+**Which file, when.** `manifest.json` and `partial_parse.msgpack` are both produced by a single local
+`dbt parse` (or `dbt compile`), but they are consumed at different stages — and **only the msgpack is
+needed at runtime**:
+
+| File | Stage | Role |
+|---|---|---|
+| `target/manifest.json` | Job generation (local) | **Read** by the factory (`--dbt-manifest-path`) to build the task DAG. Never used at runtime. |
+| `target/partial_parse.msgpack` | Task runtime | **Read** by every task and injected into `dbtRunner` to skip parsing. **The only file you sync to the workspace**; tasks never rewrite it. |
+| per-task local `target/` | Task runtime | **Written** by dbt (compiled SQL, etc.) to a private local dir, off the shared project `target/`. |
+
+Build the msgpack with the **same dbt version your tasks run** — a mismatch makes the runner fall back
+to a normal parse (so it is always safe to leave enabled). Optionally add `--extra-dbt-command-options
+"--no-write-json --no-populate-cache"` to also skip JSON artifact writes and the warehouse
+relation-cache scan.
+
 
 ## End-to-end example
 

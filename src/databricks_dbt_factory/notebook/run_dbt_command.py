@@ -58,7 +58,9 @@ if os.path.exists(prebuilt_manifest_path):
         local_dir = tempfile.mkdtemp(prefix="dbt_local_")
         os.environ["DBT_TARGET_PATH"] = local_dir
         os.environ["DBT_LOG_PATH"] = local_dir
-    except Exception:
+        print(f"[dbt-factory] injecting pre-built manifest from {prebuilt_manifest_path} (skipping dbt parse)")
+    except Exception as e:
+        print(f"[dbt-factory] manifest injection unavailable, falling back to dbt parse: {e}")
         manifest = None
 
 try:

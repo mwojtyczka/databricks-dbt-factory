@@ -309,6 +309,12 @@ Build the msgpack with the **same dbt version your tasks run**. Optionally add `
 "--no-write-json --no-populate-cache"` to also skip JSON artifact writes and the warehouse
 relation-cache scan.
 
+> **Note:** In this mode a task's run artifacts (`run_results.json`, compiled SQL, etc.) are written to
+> a private local dir and are **not** synced back to the shared workspace `target/`. The local dir is
+> deleted when the task ends, so don't rely on inspecting workspace `target/` artifacts after a run. If
+> a task fails, the failure detail is still surfaced in the task log. Leave the msgpack absent to fall
+> back to the default behavior (parse per task, artifacts in the shared `target/`).
+
 
 ## End-to-end example
 

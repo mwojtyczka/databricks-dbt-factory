@@ -288,6 +288,33 @@ Each task calls a shared runner notebook (`run_dbt_command.py`) with parameteriz
 - Supports running the dbt process on job compute via `--job-cluster-key` (SQL execution still uses the warehouse in `profiles.yml`)
 - More flexibility - The runner notebook is editable. Want to load secrets from a scope before dbt runs? Run dbt, then call a Python API with the result? Emit a Slack message on failure? Tag the run with Git SHA? Add a few lines to the runner notebook.
 
+#### Faster parsing on large projects (pre-built msgpack)
+
+On large projects with many parallel tasks, most of each task's time is dbt **parsing** (re-reading
+and content-hashing every project file and rebuilding the DAG), paid by every task and amplified by
+contention on the shared workspace filesystem. The notebook runner skips parsing when a pre-built
+msgpack sits next to the project: it loads `target/partial_parse.msgpack` into a manifest and injects
+that into `dbtRunner`, and each task writes its artifacts to a private local dir instead of the shared
+project `target/`.
+
+**Which file, when.** A single local `dbt parse` produces both files:
+
+| File | Stage | Role |
+|---|---|---|
+| `target/manifest.json` | Job generation (local) | **Read** by the factory (`--dbt-manifest-path`) to build the task DAG. Never used at runtime. |
+| `target/partial_parse.msgpack` | Task runtime | **Read** by every task and injected into `dbtRunner` to skip parsing. **The only file you sync to the workspace**; tasks never rewrite it. |
+| per-task local `target/` | Task runtime | **Written** by dbt (compiled SQL, etc.) to a private local dir, off the shared project `target/`. |
+
+Build the msgpack with the **same dbt version your tasks run**. Optionally add `--extra-dbt-command-options
+"--no-write-json --no-populate-cache"` to also skip JSON artifact writes and the warehouse
+relation-cache scan.
+
+> **Note:** In this mode a task's run artifacts (`run_results.json`, compiled SQL, etc.) are written to
+> a private local dir and are **not** synced back to the shared workspace `target/`. The local dir is
+> deleted when the task ends, so don't rely on inspecting workspace `target/` artifacts after a run. If
+> a task fails, the failure detail is still surfaced in the task log. Leave the msgpack absent to fall
+> back to the default behavior (parse per task, artifacts in the shared `target/`).
+
 
 ## End-to-end example
 

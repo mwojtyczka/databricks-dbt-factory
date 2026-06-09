@@ -3,6 +3,8 @@
 import json
 import os
 import shlex
+import shutil
+import tempfile
 
 from dbt.cli.main import dbtRunner
 
@@ -45,8 +47,30 @@ if project_directory:
 os.makedirs("logs", exist_ok=True)
 os.makedirs("target", exist_ok=True)
 
+# If a pre-built msgpack sits next to the project, deserialize it into a manifest and inject it into
+# dbtRunner to skip dbt's parse phase (re-reading/hashing every file + DAG rebuild) on each task. Each
+# task then writes artifacts to a private local dir (DBT_TARGET_PATH/DBT_LOG_PATH) to avoid contention
+# on the shared workspace `target/`. Falls back to a normal parse if the msgpack is absent or unusable.
+manifest = None
+local_dir = None
+prebuilt_manifest_path = os.path.join("target", "partial_parse.msgpack")
+if os.path.exists(prebuilt_manifest_path):
+    try:
+        from dbt.contracts.graph.manifest import Manifest
+
+        with open(prebuilt_manifest_path, "rb") as f:
+            manifest = Manifest.from_msgpack(f.read())
+        manifest.build_flat_graph()
+        local_dir = tempfile.mkdtemp(prefix="dbt_local_")
+        os.environ["DBT_TARGET_PATH"] = local_dir
+        os.environ["DBT_LOG_PATH"] = local_dir
+        print(f"[dbt-factory] injecting pre-built manifest from {prebuilt_manifest_path} (skipping dbt parse)")
+    except Exception as e:
+        print(f"[dbt-factory] manifest injection unavailable, falling back to dbt parse: {e}")
+        manifest = None
+
 try:
-    runner = dbtRunner()
+    runner = dbtRunner(manifest=manifest)
 
     for command_str in json.loads(dbt_commands):
         command_str = command_str.strip()
@@ -74,3 +98,9 @@ try:
 finally:
     os.environ.pop("DBT_ACCESS_TOKEN", None)
     os.environ.pop("DBT_HOST", None)
+    os.environ.pop("DBT_TARGET_PATH", None)
+    os.environ.pop("DBT_LOG_PATH", None)
+    # Remove the private per-task target/log dir; on reused (all-purpose) clusters these
+    # would otherwise accumulate under the system temp dir for the life of the cluster.
+    if local_dir:
+        shutil.rmtree(local_dir, ignore_errors=True)

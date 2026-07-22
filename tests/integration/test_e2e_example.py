@@ -69,7 +69,12 @@ def test_end_to_end_generates_valid_bundle(extra_args, description, bundle_valid
 
     Uses the same invocation documented in the README "End-to-end example" (step 5).
     """
-    target = tmp_path / "dbt_sql_job_explicit_tasks.yml"
+    # Place the spec under a `resources/` subdirectory, mirroring the demo project layout.
+    # This also keeps the notebook-mode runner copy — written relative to `--project-directory
+    # ../` — inside `tmp_path` rather than escaping to pytest's shared base temp dir.
+    resources_dir = tmp_path / "resources"
+    resources_dir.mkdir()
+    target = resources_dir / "dbt_sql_job_explicit_tasks.yml"
 
     _run_factory(target, *extra_args)
 
@@ -79,6 +84,13 @@ def test_end_to_end_generates_valid_bundle(extra_args, description, bundle_valid
 
     # The generated job is renamed via --new-job-name; confirm the CLI honoured it.
     assert "dbt_sql_job_explicit_tasks" in spec["resources"]["jobs"], "expected the renamed job in the generated spec"
+
+    # In notebook mode the packaged runner is copied to the computed project root
+    # (`../` from the spec, i.e. tmp_path) so `databricks bundle deploy` uploads it.
+    if "notebook" in extra_args:
+        runner = tmp_path / "run_dbt_command.py"
+        assert runner.exists(), "notebook mode should copy the runner notebook to the project root"
+        assert "dbtRunner" in runner.read_text(encoding="utf-8"), "copied file should be the packaged runner"
 
     errors = sorted(bundle_validator.iter_errors(spec), key=lambda e: list(e.path))
     assert not errors, "generated spec ({}) is not a valid DAB:\n{}".format(

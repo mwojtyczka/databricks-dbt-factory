@@ -1,0 +1,20 @@
+name: nightly
+
+on:
+  workflow_dispatch:  # allow manual triggering
+  schedule:
+    - cron: '0 4 * * *'  # runs automatically at 4:00 AM UTC every day
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false  # let a running nightly finish rather than cancelling it
+
+jobs:
+  build:
+    uses: ./.github/workflows/push.yml
+
+  integration:
+    uses: ./.github/workflows/integration.yml

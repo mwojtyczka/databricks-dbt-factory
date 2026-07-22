@@ -1,6 +1,7 @@
 name: integration
 
 on:
+  workflow_call:  # allow other workflows (e.g. nightly) to reuse this pipeline
   pull_request:
     types: [opened, synchronize]
   merge_group:

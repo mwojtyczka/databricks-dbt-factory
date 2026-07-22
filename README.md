@@ -30,7 +30,36 @@ By default, dbt's integration with Databricks Workflows treats an entire dbt pro
 
 Databricks dbt Factory changes that by updating Databricks Workflow specs to run dbt objects (models, tests, seeds, snapshots) as individual tasks.
 
-![before](docs/dbt-factory.png?)
+```mermaid
+flowchart LR
+    subgraph before["Before: one opaque task"]
+        dbt["dbt task<br/>(4 dbt commands)"]
+    end
+
+    factory(["Databricks dbt Factory"])
+
+    subgraph after["After: one task per dbt object"]
+        direction TB
+        seed["seed: country_codes"] --> m1["model: country"]
+        m1 --> snap["snapshot: country_snapshot"]
+        snap --> m2["model: changed_country"]
+        m3["model: first_dbt_model"] --> m4["model: second_dbt_model"]
+        m3 --> t1["test: not_null_first_dbt_model"]
+        m4 --> t2["test: unique_second_dbt_model"]
+    end
+
+    before --> factory --> after
+
+    classDef seed fill:#fde68a,stroke:#d97706,color:#000
+    classDef model fill:#fdba74,stroke:#ea580c,color:#000
+    classDef test fill:#bbf7d0,stroke:#16a34a,color:#000
+    classDef snapshot fill:#c7d2fe,stroke:#4f46e5,color:#000
+
+    class seed seed
+    class m1,m2,m3,m4 model
+    class t1,t2 test
+    class snap snapshot
+```
 
 ### Benefits
 
@@ -46,7 +75,39 @@ Databricks dbt Factory changes that by updating Databricks Workflow specs to run
 
 # How it works
 
-![after](docs/arch.png?)
+```mermaid
+flowchart TB
+    manifest["dbt project<br/>manifest file"]
+    jobdef["Job definition file<br/>(e.g. DAB spec)"]
+    factory(["Databricks dbt Factory"])
+    updated["Updated job definition file<br/>(e.g. DAB spec)"]
+
+    manifest --> factory
+    jobdef --> factory
+    factory --> updated
+    updated -- "Runs" --> workflow
+
+    subgraph workflow["Generated Databricks Workflow"]
+        direction LR
+        seed1["dbt seed --select seed1"] --> model1["dbt model --select model1"]
+        seed2["dbt seed --select seed2"] --> model1
+        model1 --> test1["dbt test --select test1"]
+        model1 --> test2["dbt test --select test2"]
+        model1 --> snap1["dbt snapshot --select snapshot1"]
+        snap1 --> model3["dbt deps<br/>dbt model --select model3"]
+        model2["dbt model --select model2"] --> test3["dbt test --select test3"]
+    end
+
+    classDef seed fill:#fde68a,stroke:#d97706,color:#000
+    classDef model fill:#fdba74,stroke:#ea580c,color:#000
+    classDef test fill:#bbf7d0,stroke:#16a34a,color:#000
+    classDef snapshot fill:#c7d2fe,stroke:#4f46e5,color:#000
+
+    class seed1,seed2 seed
+    class model1,model2,model3 model
+    class test1,test2,test3 test
+    class snap1 snapshot
+```
 
 The tool reads the dbt manifest file and the existing DAB workflow definition, and generates a new definition.
 

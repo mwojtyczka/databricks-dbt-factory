@@ -27,18 +27,31 @@ import yaml
 
 TEST_DATA = Path(__file__).resolve().parent.parent / "test_data"
 
-_DATABRICKS_CLI = shutil.which("databricks")
 
-# In CI the Databricks CLI must be present (the workflow installs it), so a missing CLI is
-# a hard failure that surfaces a broken pipeline. Locally, where contributors may not have
-# the CLI, we skip with a clear reason instead of forcing everyone to install it.
-if _DATABRICKS_CLI is None:
+def _require_databricks_cli() -> str:
+    """Resolve the Databricks CLI, deciding fail-vs-skip based on the environment.
+
+    In CI the CLI must be present (the integration workflow installs it via
+    databricks/setup-cli), so a missing CLI is a hard failure that surfaces a broken
+    pipeline rather than a silent skip. Locally, where contributors may not have the CLI,
+    the tests skip with a clear reason instead of forcing everyone to install it.
+
+    This runs inside a fixture (not at import time) so that merely importing the module —
+    e.g. pylint's pytest plugin enumerating fixtures, or pytest collection in the build
+    workflow, which does not install the CLI — never trips the requirement.
+    """
+    cli = shutil.which("databricks")
+    if cli is not None:
+        return cli
+    message = (
+        "the 'databricks' CLI is required to generate the bundle schema but was not found "
+        "on PATH. The CI workflow must install it (databricks/setup-cli)."
+    )
+    # pytest.fail/skip raise, so this never falls through; the explicit raise keeps the
+    # control flow unambiguous for static analysis.
     if os.environ.get("CI"):
-        raise RuntimeError(
-            "the 'databricks' CLI is required to generate the bundle schema but was not "
-            "found on PATH. The CI workflow must install it (databricks/setup-cli)."
-        )
-    pytestmark = pytest.mark.skip(reason="databricks CLI not installed; skipping bundle schema validation locally")
+        raise pytest.fail.Exception(message)
+    raise pytest.skip.Exception(message)
 
 
 def _job_spec_fixtures() -> list[Path]:
@@ -104,9 +117,9 @@ def _translate_pattern(value):
 @pytest.fixture(scope="module")
 def bundle_validator() -> jsonschema.protocols.Validator:
     """Generate the DAB JSON schema via the Databricks CLI and build a validator."""
-    assert _DATABRICKS_CLI is not None  # guaranteed: CI raises above, local skips
+    cli = _require_databricks_cli()
     result = subprocess.run(  # noqa: S603
-        [_DATABRICKS_CLI, "bundle", "schema"],
+        [cli, "bundle", "schema"],
         capture_output=True,
         text=True,
         check=False,

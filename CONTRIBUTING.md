@@ -33,8 +33,10 @@ make integration
 `make integration` builds the package and drives the installed `databricks_dbt_factory` CLI as a
 real subprocess against the fixtures in `tests/test_data`, comparing the generated job spec to the
 committed golden files. It also validates every fixture against the Databricks Asset Bundle schema
-(generated on the fly with `databricks bundle schema`) to ensure the generated specs are valid DABs.
-It requires no Databricks workspace and runs in CI alongside the unit tests.
+(generated on the fly with `databricks bundle schema`) to ensure the generated specs are valid DABs,
+and runs the [end-to-end example](README.md#end-to-end-example) offline — invoking the CLI with the
+documented arguments against the committed manifest and validating the freshly generated spec. It
+requires no Databricks workspace and runs in CI alongside the unit tests.
 
 The bundle-schema validation needs the [Databricks CLI](https://docs.databricks.com/dev-tools/cli/)
 on your `PATH`. If it is not installed those tests are skipped locally (but they are required and

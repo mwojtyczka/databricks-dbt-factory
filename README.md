@@ -1,10 +1,9 @@
 Databricks dbt factory
 ===
 
-Databricks dbt-factory is a lightweight library and CLI that generates a Databricks Workflow from a dbt project. 
-It creates individual Databricks Workflow tasks based on your dbt manifest for each dbt object type, covering dbt models, tests, seeds, and snapshots. 
+Databricks dbt-factory is a lightweight library and CLI that turns a dbt project into a granular Databricks Workflow — one task per dbt object (models, tests, seeds, and snapshots) instead of a single opaque dbt task.
 
-The tool creates a new job specification, such as Databricks Assets Bundle (DAB), or can update an existing one.
+It reads your dbt manifest and generates a new job specification — a Databricks Asset Bundle (DAB) or plain job YAML — or updates an existing one in place.
 
 [![build](https://github.com/mwojtyczka/databricks-dbt-factory/actions/workflows/push.yml/badge.svg)](https://github.com/mwojtyczka/databricks-dbt-factory/actions/workflows/push.yml)
 [![PyPI - Version](https://img.shields.io/pypi/v/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
@@ -17,10 +16,12 @@ The tool creates a new job specification, such as Databricks Assets Bundle (DAB)
 **Table of Contents**
 
 - [Motivation](#motivation)
-- [How it works](#benefits)
+- [How it works](#how-it-works)
 - [Installation](#installation)
 - [Usage](#usage)
+- [DBT Tests handling](#dbt-tests-handling)
 - [Task types](#task-types)
+- [End-to-end example](#end-to-end-example)
 - [Contribution](#contribution)
 - [License](#license)
 
@@ -63,7 +64,7 @@ flowchart LR
 
 ### Benefits
 
-✅ Faster execution - speed up dbt projects exeuction on Databricks
+✅ Faster execution — run dbt objects in parallel across Databricks tasks instead of one sequential run.
 
 ✅ Visibility & Simplified troubleshooting — Quickly pinpoint and fix issues at the model level.
 
@@ -117,7 +118,7 @@ flowchart LR
 ## Notebook runner tasks (recommended for best performance)
 
 With `--task-type notebook`, each task instead runs the packaged runner notebook
-(`run_dbt_command.py`), which triggers the same dbt command. This gives much faster task
+(`run_dbt_command.py`), which triggers the dbt commands programmatically using dbt core package. This gives much faster task
 start times — see [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
 
 ```mermaid
@@ -291,7 +292,7 @@ databricks_dbt_factory  \
 - `--job-cluster-key` (type: str, optional): Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with `--environment-key`.
 - `--extra-dbt-command-options` (type: str, optional, default: ""): Additional dbt command options to include.
 - `--no-run-tests` (flag, default: tests enabled): Skip generating dbt test tasks. Tests are included by default.
-- `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle single-model tests per resource into one `dbt test --select <resource>` task. Fewer Databricks tasks means fewer task startups, fewer dbt cold starts, and noticeably faster end-to-end runtime for projects with many tests. Downstream models/seeds/snapshots gate on the upstream's `tests_<resource>` task so failing tests still halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Test handling](#test-handling).
+- `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle single-model tests per resource into one `dbt test --select <resource>` task. Fewer Databricks tasks means fewer task startups, fewer dbt cold starts, and noticeably faster end-to-end runtime for projects with many tests. Downstream models/seeds/snapshots gate on the upstream's `tests_<resource>` task so failing tests still halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [DBT Tests handling](#dbt-tests-handling).
 - `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
 - `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
@@ -383,7 +384,7 @@ Generates `notebook_task` entries that wrap dbt execution via the `dbtRunner` Py
 Each task calls a shared runner notebook (`run_dbt_command.py`) with parameterized dbt commands.
 
 **Advantages over native dbt_task:**
-- Faster execution by avoiding cold start problem - all dependencies can be pre pre-cached inside  `base_environment`
+- Faster execution by avoiding the cold-start problem — all dependencies can be pre-cached inside `base_environment`
 - Supports running the dbt process on job compute via `--job-cluster-key` (SQL execution still uses the warehouse in `profiles.yml`)
 - More flexibility - The runner notebook is editable. Want to load secrets from a scope before dbt runs? Run dbt, then call a Python API with the result? Emit a Slack message on failure? Tag the run with Git SHA? Add a few lines to the runner notebook.
 

@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import warnings
 from pathlib import Path
 
 import jsonschema
@@ -56,22 +57,22 @@ def _job_spec_fixtures() -> list[Path]:
 
 
 def _neutralize_unsupported_regex(node):
-    """Recursively replace ``pattern`` regexes that Python's ``re`` cannot compile.
+    """Recursively rewrite ``pattern`` regexes that Python's ``re`` cannot compile.
 
-    Newer Databricks CLIs emit ECMA-262 patterns (e.g. ``\\p{...}``) that Python's ``re``
-    module rejects with ``bad escape``, which crashes jsonschema when a matching string
-    field is validated. We validate structure (unknown fields, types, required, enums)
-    rather than string patterns, so an unparseable ``pattern`` is replaced with a permissive
-    ``".*"`` instead of being deleted.
+    The Databricks CLI emits ECMA-262 patterns using Unicode property escapes such as
+    ``\\p{L}`` (letters) and ``\\p{N}`` (numbers) — e.g. the ``${var.name}`` interpolation
+    pattern — which Python's ``re`` module rejects with ``bad escape``, crashing jsonschema
+    when a matching string field is validated. We translate those escapes to their Python
+    equivalents so the pattern still means the same thing.
 
-    We replace rather than delete because ``pattern`` discriminates ``oneOf`` branches in
-    the bundle schema (e.g. ``git_provider`` has a patterned-string branch and an enum
-    branch); deleting it would collapse the two into identical ``{"type": "string"}``
-    schemas and cause spurious ``oneOf`` failures.
+    We translate rather than delete or blanket-replace with ``.*`` because ``pattern``
+    discriminates ``oneOf`` branches (e.g. ``git_provider`` is *either* a known-provider
+    enum *or* a ``${var...}`` reference). Collapsing the pattern to ``.*`` would make a
+    literal like ``gitHub`` match both branches and cause a spurious ``oneOf`` failure.
     """
     if isinstance(node, dict):
         return {
-            key: (_neutralized_pattern(value) if key == "pattern" else _neutralize_unsupported_regex(value))
+            key: (_translate_pattern(value) if key == "pattern" else _neutralize_unsupported_regex(value))
             for key, value in node.items()
         }
     if isinstance(node, list):
@@ -79,15 +80,25 @@ def _neutralize_unsupported_regex(node):
     return node
 
 
-def _neutralized_pattern(value):
-    """Return the pattern unchanged if Python's ``re`` can compile it, else a permissive ``.*``."""
+def _translate_pattern(value):
+    """Translate ECMA Unicode property escapes to Python-compatible character classes.
+
+    ``\\p{L}`` -> ``[^\\W\\d_]`` (any letter) and ``\\p{N}`` -> ``\\d`` (any digit). Falls
+    back to a permissive ``.*`` only if the result still cannot compile, so a genuinely
+    exotic future pattern degrades gracefully instead of crashing the suite.
+    """
     if not isinstance(value, str):
         return value
+    translated = value.replace(r"\p{L}", r"[^\W\d_]").replace(r"\p{N}", r"\d")
     try:
-        re.compile(value)
+        with warnings.catch_warnings():
+            # Translating `[\p{L}\p{N}]` yields a nested set `[[^\W\d_]\d]`, which Python
+            # accepts but warns about; the pattern still means "letters or digits".
+            warnings.simplefilter("ignore", FutureWarning)
+            re.compile(translated)
     except re.error:
         return ".*"
-    return value
+    return translated
 
 
 @pytest.fixture(scope="module")

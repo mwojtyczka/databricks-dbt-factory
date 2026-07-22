@@ -7,7 +7,7 @@ name = "databricks-dbt-factory"
 dynamic = ["version"]
 description = 'Databricks dbt factory library for creating Databricks Job definition where individual models are run as separate tasks.'
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = "MIT"
 keywords = ["Databricks", "dbt"]
 authors = [
@@ -65,7 +65,7 @@ dependencies = [
   "types-requests~=2.31.0",
 ]
 
-python="3.10"
+python="3.12"
 
 # store virtual env as the child of this folder. Helps VSCode (and PyCharm) to run better
 path = ".venv"

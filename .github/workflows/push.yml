@@ -1,0 +1,64 @@
+name: build
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  merge_group:
+    types: [checks_requested]
+  push:
+    # Always run on push to main. The build cache can only be reused
+    # if it was saved by a run from the repository's default branch.
+    # The run result will be identical to that from the merge queue
+    # because the commit is identical, yet we need to perform it to
+    # seed the build cache.
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pyVersion: ['3.10', '3.11', '3.12']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          cache: 'pip'
+          cache-dependency-path: '**/pyproject.toml'
+          python-version: ${{ matrix.pyVersion }}
+
+      - name: Install Hatch
+        run: pip install hatch==1.14.0
+
+      - name: Build
+        run: make build
+
+      - name: Lint
+        run: make lint
+
+      - name: Unit tests
+        run: make test
+
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Format all files
+        run: make dev fmt
+
+      - name: Fail on differences
+        run: git diff --exit-code

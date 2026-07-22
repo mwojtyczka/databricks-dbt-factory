@@ -28,7 +28,7 @@ It reads your dbt manifest and generates a new job specification — a Databrick
 
 By default, running a dbt project in Databricks Workflows treats an entire dbt project as a single execution unit — a black box.
 
-Databricks dbt-factory changes that by updating Databricks Workflow specs to run dbt objects (models, tests, seeds, snapshots) as individual tasks.
+Databricks dbt-factory changes that by updating Databricks Workflow specs to run dbt objects (models, tests, seeds, snapshots) as individual tasks. The diagram below shows an example dbt project structure to illustrate the idea — the actual task graph is derived from your dbt manifest.
 
 ```mermaid
 flowchart LR
@@ -84,7 +84,10 @@ flowchart LR
     factory --> updated["Updated job definition file<br/>(e.g. DAB spec)"]
 ```
 
-The generated tasks can be one of two types (see [Usage](#usage) for how to choose):
+The generated tasks can be one of two types (see [Usage](#usage) for how to choose). The
+workflow diagrams below use an example dbt project structure (a few seeds, models, snapshots,
+and tests) to illustrate the generated task graph — your actual graph is derived from your own
+dbt manifest and its dependencies.
 
 ## dbt tasks
 

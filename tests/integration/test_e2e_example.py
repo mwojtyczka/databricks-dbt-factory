@@ -64,8 +64,11 @@ def _run_factory(target_path: Path, *extra_args: str) -> None:
         pytest.param(("--task-type", "notebook"), "notebook task type", id="notebook-task"),
     ],
 )
-def test_readme_example_generates_valid_bundle(extra_args, description, bundle_validator, tmp_path):
-    """The documented end-to-end command produces a spec that is a valid Databricks bundle."""
+def test_end_to_end_generates_valid_bundle(extra_args, description, bundle_validator, tmp_path):
+    """The end-to-end command produces a spec that is a valid Databricks bundle.
+
+    Uses the same invocation documented in the README "End-to-end example" (step 5).
+    """
     target = tmp_path / "dbt_sql_job_explicit_tasks.yml"
 
     _run_factory(target, *extra_args)

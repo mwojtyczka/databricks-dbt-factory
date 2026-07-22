@@ -43,5 +43,9 @@ jobs:
       - name: Install Hatch
         run: pip install hatch==1.17.1
 
+      - name: Install Databricks CLI
+        # Required to generate the DAB schema for tests/integration/test_bundle_schema.py.
+        uses: databricks/setup-cli@dd60b7b133203edca3e8f08b1e053c43a979296e # v1.8.0
+
       - name: Integration tests
         run: make integration

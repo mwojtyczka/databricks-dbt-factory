@@ -26,26 +26,26 @@ The tool creates a new job specification, such as Databricks Assets Bundle (DAB)
 
 # Motivation
 
-By default, dbt's integration with Databricks Workflows treats an entire dbt project as a single execution unit — a black box.
+By default, running a dbt project in Databricks Workflows treats an entire dbt project as a single execution unit — a black box.
 
 Databricks dbt Factory changes that by updating Databricks Workflow specs to run dbt objects (models, tests, seeds, snapshots) as individual tasks.
 
 ```mermaid
 flowchart LR
     subgraph before["Before: one opaque task"]
-        dbt["dbt task<br/>(4 dbt commands)"]
+        dbt["dbt task<br/>(dbt commands)"]
     end
 
-    factory(["Databricks dbt Factory"])
+    factory(["Databricks dbt-factory"])
 
     subgraph after["After: one task per dbt object"]
         direction TB
-        seed["seed: country_codes"] --> m1["model: country"]
-        m1 --> snap["snapshot: country_snapshot"]
-        snap --> m2["model: changed_country"]
-        m3["model: first_dbt_model"] --> m4["model: second_dbt_model"]
-        m3 --> t1["test: not_null_first_dbt_model"]
-        m4 --> t2["test: unique_second_dbt_model"]
+        seed1["seed: seed1"] --> model1["model: model1"]
+        model1 --> snap1["snapshot: snapshot1"]
+        snap1 --> model2["model: model2"]
+        model3["model: model3"] --> model4["model: model4"]
+        model3 --> test1["test: test1"]
+        model4 --> test2["test: test2"]
     end
 
     before --> factory --> after
@@ -55,10 +55,10 @@ flowchart LR
     classDef test fill:#bbf7d0,stroke:#16a34a,color:#000
     classDef snapshot fill:#c7d2fe,stroke:#4f46e5,color:#000
 
-    class seed seed
-    class m1,m2,m3,m4 model
-    class t1,t2 test
-    class snap snapshot
+    class seed1 seed
+    class model1,model2,model3,model4 model
+    class test1,test2 test
+    class snap1 snapshot
 ```
 
 ### Benefits

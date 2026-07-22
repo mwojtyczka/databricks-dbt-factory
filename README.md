@@ -1,7 +1,7 @@
 Databricks dbt factory
 ===
 
-Databricks dbt-factory is a lightweight library that generates a Databricks Workflow from a dbt project. 
+Databricks dbt-factory is a lightweight library and CLI that generates a Databricks Workflow from a dbt project. 
 It creates individual Databricks Workflow tasks based on your dbt manifest for each dbt object type, covering dbt models, tests, seeds, and snapshots. 
 
 The tool creates a new job specification, such as Databricks Assets Bundle (DAB), or can update an existing one.
@@ -149,6 +149,8 @@ flowchart LR
 ```shell
 pip install databricks-dbt-factory
 ```
+
+> **For production, pin the version** to get reproducible builds and avoid unexpected changes from new releases, e.g. `pip install databricks-dbt-factory==0.2.1`.
 
 # Usage
 

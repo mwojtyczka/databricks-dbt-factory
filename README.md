@@ -6,8 +6,11 @@ It creates individual Databricks Workflow tasks based on your dbt manifest for e
 
 The tool creates a new job specification, such as Databricks Assets Bundle (DAB), or can update an existing one.
 
+[![build](https://github.com/mwojtyczka/databricks-dbt-factory/actions/workflows/push.yml/badge.svg)](https://github.com/mwojtyczka/databricks-dbt-factory/actions/workflows/push.yml)
 [![PyPI - Version](https://img.shields.io/pypi/v/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
+![linesofcode](https://aschey.tech/tokei/github/mwojtyczka/databricks-dbt-factory?category=code)
+![PyPI Downloads](https://static.pepy.tech/personalized-badge/databricks-dbt-factory?period=month&units=international_system&left_color=grey&right_color=orange&left_text=PyPI%20downloads&cacheSeconds=3600)
 
 -----
 

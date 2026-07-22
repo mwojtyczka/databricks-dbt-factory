@@ -15,6 +15,7 @@ duplicated, drift-prone copy — CI installs the Databricks CLI and generates it
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -54,6 +55,41 @@ def _job_spec_fixtures() -> list[Path]:
     return fixtures
 
 
+def _neutralize_unsupported_regex(node):
+    """Recursively replace ``pattern`` regexes that Python's ``re`` cannot compile.
+
+    Newer Databricks CLIs emit ECMA-262 patterns (e.g. ``\\p{...}``) that Python's ``re``
+    module rejects with ``bad escape``, which crashes jsonschema when a matching string
+    field is validated. We validate structure (unknown fields, types, required, enums)
+    rather than string patterns, so an unparseable ``pattern`` is replaced with a permissive
+    ``".*"`` instead of being deleted.
+
+    We replace rather than delete because ``pattern`` discriminates ``oneOf`` branches in
+    the bundle schema (e.g. ``git_provider`` has a patterned-string branch and an enum
+    branch); deleting it would collapse the two into identical ``{"type": "string"}``
+    schemas and cause spurious ``oneOf`` failures.
+    """
+    if isinstance(node, dict):
+        return {
+            key: (_neutralized_pattern(value) if key == "pattern" else _neutralize_unsupported_regex(value))
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_neutralize_unsupported_regex(item) for item in node]
+    return node
+
+
+def _neutralized_pattern(value):
+    """Return the pattern unchanged if Python's ``re`` can compile it, else a permissive ``.*``."""
+    if not isinstance(value, str):
+        return value
+    try:
+        re.compile(value)
+    except re.error:
+        return ".*"
+    return value
+
+
 @pytest.fixture(scope="module")
 def bundle_validator() -> jsonschema.protocols.Validator:
     """Generate the DAB JSON schema via the Databricks CLI and build a validator."""
@@ -65,10 +101,11 @@ def bundle_validator() -> jsonschema.protocols.Validator:
         check=False,
     )
     assert result.returncode == 0, f"`databricks bundle schema` failed:\n{result.stderr}"
-    schema = json.loads(result.stdout)
-    validator_cls = jsonschema.validators.validator_for(schema)
-    validator_cls.check_schema(schema)
-    return validator_cls(schema)
+    schema = _neutralize_unsupported_regex(json.loads(result.stdout))
+    # The bundle schema declares no `$schema`. Draft 2020-12, which `validator_for` would
+    # pick by default, reports spurious `oneOf` failures on this schema; Draft 7 still
+    # resolves the nested `$ref`s and catches real errors (unknown fields, wrong types).
+    return jsonschema.Draft7Validator(schema)
 
 
 def test_test_data_fixtures_exist():

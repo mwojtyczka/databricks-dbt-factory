@@ -1,7 +1,7 @@
 Databricks dbt factory
 ===
 
-Databricks dbt Factory is a lightweight library that generates a Databricks Workflow from a dbt project. 
+Databricks dbt-factory is a lightweight library that generates a Databricks Workflow from a dbt project. 
 It creates individual Databricks Workflow tasks based on your dbt manifest for each dbt object type, covering dbt models, tests, seeds, and snapshots. 
 
 The tool creates a new job specification, such as Databricks Assets Bundle (DAB), or can update an existing one.
@@ -28,7 +28,7 @@ The tool creates a new job specification, such as Databricks Assets Bundle (DAB)
 
 By default, running a dbt project in Databricks Workflows treats an entire dbt project as a single execution unit — a black box.
 
-Databricks dbt Factory changes that by updating Databricks Workflow specs to run dbt objects (models, tests, seeds, snapshots) as individual tasks.
+Databricks dbt-factory changes that by updating Databricks Workflow specs to run dbt objects (models, tests, seeds, snapshots) as individual tasks.
 
 ```mermaid
 flowchart LR
@@ -38,7 +38,7 @@ flowchart LR
 
     factory(["Databricks dbt-factory"])
 
-    subgraph after["After: one task per dbt object"]
+    subgraph after["After: one Databricks job task per dbt object"]
         direction TB
         seed1["seed: seed1"] --> model1["model: model1"]
         model1 --> snap1["snapshot: snapshot1"]
@@ -75,19 +75,24 @@ flowchart LR
 
 # How it works
 
+The tool reads the dbt manifest file and the existing DAB workflow definition, and generates a new definition.
+
 ```mermaid
-flowchart TB
-    manifest["dbt project<br/>manifest file"]
-    jobdef["Job definition file<br/>(e.g. DAB spec)"]
-    factory(["Databricks dbt Factory"])
-    updated["Updated job definition file<br/>(e.g. DAB spec)"]
+flowchart LR
+    manifest["dbt project<br/>manifest file"] --> factory(["Databricks dbt-factory"])
+    jobdef["Job definition file<br/>(e.g. DAB spec)"] --> factory
+    factory --> updated["Updated job definition file<br/>(e.g. DAB spec)"]
+```
 
-    manifest --> factory
-    jobdef --> factory
-    factory --> updated
-    updated -- "Runs" --> workflow
+The generated tasks can be one of two types (see [Usage](#usage) for how to choose):
 
-    subgraph workflow["Generated Databricks Workflow"]
+## dbt tasks
+
+With the default task type, each dbt object becomes a native Databricks `dbt_task`:
+
+```mermaid
+flowchart LR
+    subgraph workflow["Generated Databricks Workflow — native dbt tasks"]
         direction LR
         seed1["dbt seed --select seed1"] --> model1["dbt model --select model1"]
         seed2["dbt seed --select seed2"] --> model1
@@ -109,7 +114,35 @@ flowchart TB
     class snap1 snapshot
 ```
 
-The tool reads the dbt manifest file and the existing DAB workflow definition, and generates a new definition.
+## Notebook runner tasks (recommended for best performance)
+
+With `--task-type notebook`, each task instead runs the packaged runner notebook
+(`run_dbt_command.py`), which triggers the same dbt command. This gives much faster task
+start times — see [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
+
+```mermaid
+flowchart LR
+    subgraph workflow["Generated Databricks Workflow — notebook runner tasks"]
+        direction LR
+        seed1["run_dbt_command.py<br/>dbt seed --select seed1"] --> model1["run_dbt_command.py<br/>dbt model --select model1"]
+        seed2["run_dbt_command.py<br/>dbt seed --select seed2"] --> model1
+        model1 --> test1["run_dbt_command.py<br/>dbt test --select test1"]
+        model1 --> test2["run_dbt_command.py<br/>dbt test --select test2"]
+        model1 --> snap1["run_dbt_command.py<br/>dbt snapshot --select snapshot1"]
+        snap1 --> model3["run_dbt_command.py<br/>dbt deps + dbt model --select model3"]
+        model2["run_dbt_command.py<br/>dbt model --select model2"] --> test3["run_dbt_command.py<br/>dbt test --select test3"]
+    end
+
+    classDef seed fill:#fde68a,stroke:#d97706,color:#000
+    classDef model fill:#fdba74,stroke:#ea580c,color:#000
+    classDef test fill:#bbf7d0,stroke:#16a34a,color:#000
+    classDef snapshot fill:#c7d2fe,stroke:#4f46e5,color:#000
+
+    class seed1,seed2 seed
+    class model1,model2,model3 model
+    class test1,test2,test3 test
+    class snap1 snapshot
+```
 
 # Installation
 

@@ -21,12 +21,18 @@ Before every commit, apply the consistent formatting of the code, as we want our
 make fmt
 ```
 
-Before every commit, run automated bug detector (`make lint`) and unit tests (`make test`) to ensure that automated
-pull request checks do pass, before your code is reviewed by others: 
+Before every commit, run automated bug detector (`make lint`), unit tests (`make test`), and
+integration tests (`make integration`) to ensure that automated pull request checks do pass,
+before your code is reviewed by others:
 ```shell
 make lint
 make test
+make integration
 ```
+
+`make integration` builds the package and drives the installed `databricks_dbt_factory` CLI as a
+real subprocess against the fixtures in `tests/test_data`, comparing the generated job spec to the
+committed golden files. It requires no Databricks workspace and runs in CI alongside the unit tests.
 ## Local installation and execution
 
 ```shell
@@ -65,19 +71,23 @@ Here are the example steps to submit your first contribution:
 9. .. fix if any
 10. `make test`
 11. .. fix if any
-12. `git commit -a`. Make sure to enter meaningful commit message title.
-13. `git push origin FEATURENAME`
-14. Go to GitHub UI and create PR. Alternatively, `gh pr create` (if you have [GitHub CLI](https://cli.github.com/) installed). 
+12. `make integration`
+13. .. fix if any
+14. `git commit -a`. Make sure to enter meaningful commit message title.
+15. `git push origin FEATURENAME`
+16. Go to GitHub UI and create PR. Alternatively, `gh pr create` (if you have [GitHub CLI](https://cli.github.com/) installed). 
     Use a meaningful pull request title because it'll appear in the release notes. Use `Resolves #NUMBER` in pull
     request description to [automatically link it](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/using-keywords-in-issues-and-pull-requests#linking-a-pull-request-to-an-issue)
     to an existing issue. 
-15. announce PR for the review
+17. announce PR for the review
 
 ## End-to-end testing on Databricks
 
-Unit tests (`make test`) cover factory logic in isolation. For changes that affect how generated
-tasks run on Databricks (task type, cluster/environment config, command shape, the notebook
-runner, etc.), verify end-to-end against a real workspace.
+Unit tests (`make test`) cover factory logic in isolation and integration tests (`make integration`)
+exercise the installed CLI against the test fixtures — both run in CI without a workspace. For
+changes that affect how generated tasks actually *run* on Databricks (task type, cluster/environment
+config, command shape, the notebook runner, etc.), additionally verify end-to-end against a real
+workspace as described below.
 
 The flow is: **generate** a job definition from a manifest → **deploy** it as a Databricks Asset
 Bundle (DAB) → **run** it and confirm the tasks execute correctly.

@@ -40,7 +40,7 @@ jobs:
           python-version: ${{ matrix.pyVersion }}
 
       - name: Install Hatch
-        run: pip install hatch==1.14.0 "virtualenv<21"
+        run: pip install hatch==1.16.5
 
       - name: Build
         run: make build
@@ -65,7 +65,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Hatch
-        run: pip install hatch==1.14.0 "virtualenv<21"
+        run: pip install hatch==1.16.5
 
       - name: Format all files
         run: make fmt

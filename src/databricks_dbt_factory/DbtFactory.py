@@ -119,7 +119,7 @@ class DbtFactory:
             tasks.extend(self._build_bundled_test_tasks(dbt_nodes, dbt_sources, single_model_tested))
             tasks.extend(self._build_standalone_test_tasks(standalone_tests))
         elif 'test' in self.task_factories:
-            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests))
+            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, dbt_nodes))
 
         return tasks
 
@@ -164,10 +164,9 @@ class DbtFactory:
         Databricks task would succeed and downstream would run; keeping warn tests out of the
         dep graph just avoids the extra DAG clutter.
 
-        Unit tests are indexed too. A unit test references exactly its own model and has no
-        severity — it always fails the run — so it always gates. Since its only ref is its own
-        model, `_extend_deps_with_upstream_tests`'s cycle check is trivially satisfied for any
-        downstream node and never introduces a cycle.
+        Unit tests are indexed too. A unit test has no severity — it always fails the run — so it
+        always gates. Its refs are the models/seeds/snapshots it depends on (dbt lists only the
+        tested model there), so `_extend_deps_with_upstream_tests`'s cycle check applies uniformly.
 
         The refs set is carried alongside each test so `_extend_deps_with_upstream_tests` can
         avoid cycles: a test with refs that aren't all ancestors of a candidate node would
@@ -179,23 +178,32 @@ class DbtFactory:
                 continue
             if self._test_severity(node_info) != 'error':
                 continue
-            test_task_key = generate_task_key(node_full_name)
-            refs: set[str] = set()
-            for dep in node_info.get('depends_on', {}).get('nodes', []):
-                if dep.startswith(self._DBT_TEST_TARGET_PREFIXES) and (dep in dbt_nodes or dep in dbt_sources):
-                    refs.add(dep)
-            frozen_refs = frozenset(refs)
-            for resource_full in refs:
-                index.setdefault(resource_full, []).append((test_task_key, frozen_refs))
+            self._index_test(index, generate_task_key(node_full_name), node_info, dbt_nodes, dbt_sources)
 
         for unit_test_full_name, unit_test_info in dbt_unit_tests.items():
-            model_full_name = self._unit_test_model(unit_test_info)
-            if model_full_name is None or model_full_name not in dbt_nodes:
-                continue
-            unit_test_task_key = generate_task_key(unit_test_full_name)
-            frozen_refs = frozenset({model_full_name})
-            index.setdefault(model_full_name, []).append((unit_test_task_key, frozen_refs))
+            self._index_test(index, generate_task_key(unit_test_full_name), unit_test_info, dbt_nodes, dbt_sources)
         return index
+
+    def _index_test(
+        self,
+        index: dict[str, list[tuple[str, frozenset[str]]]],
+        test_task_key: str,
+        test_info: dict,
+        dbt_nodes: dict,
+        dbt_sources: dict,
+    ) -> None:
+        """Indexes a test (data or unit) under each resource it references, carrying its ref set."""
+        refs = self._testable_refs(test_info, dbt_nodes, dbt_sources)
+        for resource_full in refs:
+            index.setdefault(resource_full, []).append((test_task_key, refs))
+
+    def _testable_refs(self, test_info: dict, dbt_nodes: dict, dbt_sources: dict) -> frozenset[str]:
+        """Returns the models/seeds/snapshots/sources a test references, as present in the manifest."""
+        refs: set[str] = set()
+        for dep in test_info.get('depends_on', {}).get('nodes', []):
+            if dep.startswith(self._DBT_TEST_TARGET_PREFIXES) and (dep in dbt_nodes or dep in dbt_sources):
+                refs.add(dep)
+        return frozenset(refs)
 
     @staticmethod
     def _test_severity(test_node_info: dict) -> str:
@@ -271,12 +279,9 @@ class DbtFactory:
         for node_full_name, node_info in dbt_nodes.items():
             if node_info['resource_type'] != 'test':
                 continue
-            testable_deps: list[str] = []
-            for dep in node_info.get('depends_on', {}).get('nodes', []):
-                if dep.startswith(self._DBT_TEST_TARGET_PREFIXES) and (dep in dbt_nodes or dep in dbt_sources):
-                    testable_deps.append(dep)
+            testable_deps = self._testable_refs(node_info, dbt_nodes, dbt_sources)
             if len(testable_deps) == 1:
-                single_model_tested.add(testable_deps[0])
+                single_model_tested.add(next(iter(testable_deps)))
             else:
                 standalone_tests.append((node_full_name, node_info))
 
@@ -374,15 +379,19 @@ class DbtFactory:
             )
         return tasks
 
-    def _build_unit_test_tasks(self, dbt_unit_tests: dict) -> list[DbtTask]:
+    def _build_unit_test_tasks(self, dbt_unit_tests: dict, dbt_nodes: dict) -> list[DbtTask]:
         """
         Emits one task per unit test, selected by its full FQN and gated on the model it tests.
-        Used in per-test mode; in bundled mode a model's `tests_<model>` task covers its unit
-        tests via `--indirect-selection cautious`.
+        Unit tests whose model is absent from the manifest are skipped (their task would gate on a
+        model task that is never emitted). Used in per-test mode; in bundled mode a model's
+        `tests_<model>` task covers its unit tests via `--indirect-selection cautious`.
         """
         test_factory = self.task_factories['test']
         tasks: list[DbtTask] = []
         for unit_test_full_name, unit_test_info in sorted(dbt_unit_tests.items()):
+            model_full_name = self._unit_test_model(unit_test_info)
+            if model_full_name is None or model_full_name not in dbt_nodes:
+                continue
             tasks.append(
                 test_factory.create_task(
                     self._fqn_select(unit_test_info),

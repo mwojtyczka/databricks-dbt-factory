@@ -472,6 +472,18 @@ def test_bundled_mode_model_with_only_unit_test_emits_bundled_task(dbt_factory_b
     assert 'unit_test_pkg_orders_test_totals' not in by_key
 
 
+def test_flat_mode_unit_test_on_absent_model_is_skipped(dbt_factory):
+    # A unit test whose target model is not in the manifest is skipped rather than emitting a
+    # task that gates on a model task that never exists.
+    unit_tests = dict([_unit_test('pkg', 'missing', 'test_totals')])
+
+    tasks = dbt_factory.create_tasks({'nodes': {}, 'unit_tests': unit_tests})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'unit_test_pkg_missing_test_totals' not in by_key
+    assert by_key == {}
+
+
 def test_create_job_spec_and_update(dbt_factory):
     run_job_spec_test(
         dbt_factory,

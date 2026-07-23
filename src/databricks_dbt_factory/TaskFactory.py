@@ -52,12 +52,14 @@ class TaskFactory(ABC):
         self.dbt_options = dbt_options
 
     @abstractmethod
-    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
         """
         Abstract method to create a task.
 
         Args:
-            dbt_node_name (str): Name of the DBT node.
+            select (str): dbt `--select` argument identifying the node (its full dot-joined FQN).
+            deps_command_name (str): Bare node name used by `get_dbt_deps_command` to decide whether
+                to prepend `dbt deps` (matched against `--dbt-tasks-deps`).
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
 
@@ -82,12 +84,13 @@ class TaskFactory(ABC):
 class ModelTaskFactory(TaskFactory):
     """Factory for creating model tasks."""
 
-    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
         """
         Creates a model task.
 
         Args:
-            dbt_node_name (str): Name of the DBT node.
+            select (str): dbt `--select` argument identifying the node (its full dot-joined FQN).
+            deps_command_name (str): Bare node name used to decide whether to prepend `dbt deps`.
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
 
@@ -102,9 +105,9 @@ class ModelTaskFactory(TaskFactory):
         ]
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
 
-        dbt_deps = self.get_dbt_deps_command(dbt_node_name)
+        dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt run --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+        commands.append(f"dbt run --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -112,12 +115,13 @@ class ModelTaskFactory(TaskFactory):
 class SnapshotTaskFactory(TaskFactory):
     """Factory for creating snapshot tasks."""
 
-    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
         """
         Creates a snapshot task.
 
         Args:
-            dbt_node_name (str): Name of the DBT node.
+            select (str): dbt `--select` argument identifying the node (its full dot-joined FQN).
+            deps_command_name (str): Bare node name used to decide whether to prepend `dbt deps`.
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
 
@@ -127,9 +131,9 @@ class SnapshotTaskFactory(TaskFactory):
         valid_dbt_deps_types: list[str] = [DbtNodeTypes.MODEL.value]
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
 
-        dbt_deps = self.get_dbt_deps_command(dbt_node_name)
+        dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt snapshot --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+        commands.append(f"dbt snapshot --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -137,12 +141,13 @@ class SnapshotTaskFactory(TaskFactory):
 class SeedTaskFactory(TaskFactory):
     """Factory for creating seed tasks."""
 
-    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
         """
         Creates a seed task.
 
         Args:
-            dbt_node_name (str): Name of the DBT node.
+            select (str): dbt `--select` argument identifying the node (its full dot-joined FQN).
+            deps_command_name (str): Bare node name used to decide whether to prepend `dbt deps`.
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
 
@@ -153,9 +158,9 @@ class SeedTaskFactory(TaskFactory):
 
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
 
-        dbt_deps = self.get_dbt_deps_command(dbt_node_name)
+        dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt seed --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+        commands.append(f"dbt seed --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -163,12 +168,13 @@ class SeedTaskFactory(TaskFactory):
 class TestTaskFactory(TaskFactory):
     """Factory for creating test tasks."""
 
-    def create_task(self, dbt_node_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
         """
         Creates a test task for a single dbt test node.
 
         Args:
-            dbt_node_name (str): Name of the DBT node.
+            select (str): dbt `--select` argument identifying the node (its full dot-joined FQN).
+            deps_command_name (str): Bare node name used to decide whether to prepend `dbt deps`.
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
 
@@ -183,9 +189,9 @@ class TestTaskFactory(TaskFactory):
 
         depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
 
-        dbt_deps = self.get_dbt_deps_command(dbt_node_name)
+        dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt test --select {dbt_node_name}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+        commands.append(f"dbt test --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -198,8 +204,8 @@ class TestTaskFactory(TaskFactory):
 
         Args:
             task_key (str): Key for the bundled task.
-            select (str): Pre-computed dbt `--select` argument (qualified model name, or
-                `source:<pkg>.<src>.<tbl>` for sources).
+            select (str): Pre-computed dbt `--select` argument (the resource's full dot-joined
+                FQN, or `source:<pkg>.<src>.<tbl>` for sources).
             deps_command_name (str): Name used by `get_dbt_deps_command` to decide whether to prepend `dbt deps`.
             depends_on (list[str]): Upstream task keys this bundled task should gate on.
 

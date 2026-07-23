@@ -303,12 +303,14 @@ You can also check all input arguments by running `databricks_dbt_factory --help
 
 ## dbt test handling
 
-The factory produces tasks for dbt tests from the manifest by default (pass `--no-run-tests`
-to skip them). Two modes are available, controlled by `--bundle-tests`:
+The factory produces tasks for dbt tests (both data tests and unit tests) from the manifest by
+default (pass `--no-run-tests` to skip them). Selectors use each node's full dot-separated FQN
+(e.g. `my_project.staging.stg_orders`) so they are unambiguous across packages and match models
+in subdirectories. Two modes are available, controlled by `--bundle-tests`:
 
 ### Per-test (default)
 
-One Databricks task per dbt test node, running `dbt test --select <test_name>`. Each test task's
+One Databricks task per dbt test node, running `dbt test --select <fqn>`. Each test task's
 `depends_on` includes every model/seed/snapshot the test references, so multi-model tests
 (e.g. `relationships`) only run after all their endpoints are built. **Downstream models are
 gated only on error-severity tests**: every model/seed/snapshot task depends on the
@@ -316,6 +318,10 @@ gated only on error-severity tests**: every model/seed/snapshot task depends on 
 the downstream task. This matches `dbt build` semantics. **`severity: warn` tests still run as their own tasks but are
 kept out of downstream `depends_on`** — they surface findings without cluttering the DAG or
 blocking anything.
+
+Unit tests get one task each, selected by the unit test's full FQN and gated on the model under
+test. They have no severity and always fail the run when they fail, so they gate downstream
+models like error-severity data tests.
 
 - **Pros:** per-test failures are individually visible in the Databricks UI; downstream
   execution halts on error-severity test failure just like `dbt build`; cross-model tests wait
@@ -349,6 +355,10 @@ The factory classifies each dbt test node into one of two buckets based on its `
   emitted as their own tasks, one per test node, with deps on **every** resource the test
   references. These run in parallel with the bundled tasks; they don't fit inside a bundle
   because their correctness requires all their endpoints to be built first.
+
+A resource's `tests_<resource>` task selects the resource by its full FQN with
+`--indirect-selection cautious`, which also runs the resource's unit tests. A model whose only
+test is a unit test still gets a `tests_<resource>` task so its unit test is not dropped.
 
 Downstream models/seeds/snapshots that depend on a tested resource are rewired to depend on
 the upstream's `tests_<resource>` task, so data only flows downstream after its upstream

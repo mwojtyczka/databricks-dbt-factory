@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 from enum import Enum
 
 from databricks_dbt_factory.DbtTask import DbtTask, DbtTaskOptions
-from databricks_dbt_factory.Utils import generate_task_key
 
 
 class DbtNodeTypes(Enum):
@@ -16,22 +15,24 @@ class DbtNodeTypes(Enum):
 
 class DbtDependencyResolver:
     @staticmethod
-    def resolve(node_info: dict, valid_deps_types: list[str]) -> list[str]:
+    def resolve(node_info: dict, valid_deps_types: list[str], task_keys: dict[str, str]) -> list[str]:
         """
-        Resolves dependencies for a given DBT node.
+        Resolves a dbt node's upstream dependencies to Databricks task keys, keeping only the
+        dependency types relevant for the node being built.
 
         Args:
-            node_info (dict): Information about the DBT node.
-            valid_deps_types (list[str]): List of valid DBT dependency types for the node.
+            node_info (dict): The dbt manifest entry for the node.
+            valid_deps_types (list[str]): dbt node types that should become task dependencies.
+            task_keys (dict[str, str]): Task key per dbt node, from `build_task_key_maps`.
 
         Returns:
-            list[str]: List of resolved dependencies.
+            list[str]: Resolved upstream task keys.
         """
-        deps = node_info.get('depends_on', {}).get('nodes', [])
+        deps = node_info.get("depends_on", {}).get("nodes", [])
         resolved_deps = []
         for node_full_name in deps:
             if any(node_full_name.startswith(dbt_type + ".") for dbt_type in valid_deps_types):
-                resolved_deps.append(generate_task_key(node_full_name))
+                resolved_deps.append(task_keys[node_full_name])
         return resolved_deps
 
 
@@ -52,7 +53,9 @@ class TaskFactory(ABC):
         self.dbt_options = dbt_options
 
     @abstractmethod
-    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(
+        self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str, task_keys: dict[str, str]
+    ) -> DbtTask:
         """
         Abstract method to create a task.
 
@@ -62,6 +65,7 @@ class TaskFactory(ABC):
                 to prepend `dbt deps` (matched against `--dbt-tasks-deps`).
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
+            task_keys (dict[str, str]): Task key per dbt node, for resolving dependencies.
 
         Returns:
             DbtTask: An instance of Task.
@@ -84,7 +88,9 @@ class TaskFactory(ABC):
 class ModelTaskFactory(TaskFactory):
     """Factory for creating model tasks."""
 
-    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(
+        self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str, task_keys: dict[str, str]
+    ) -> DbtTask:
         """
         Creates a model task.
 
@@ -93,6 +99,7 @@ class ModelTaskFactory(TaskFactory):
             deps_command_name (str): Bare node name used to decide whether to prepend `dbt deps`.
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
+            task_keys (dict[str, str]): Task key per dbt node, for resolving dependencies.
 
         Returns:
             DbtTask: An instance of Task.
@@ -103,7 +110,7 @@ class ModelTaskFactory(TaskFactory):
             DbtNodeTypes.SNAPSHOT.value,
             DbtNodeTypes.TEST.value,
         ]
-        depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
+        depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types, task_keys)
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
@@ -115,7 +122,9 @@ class ModelTaskFactory(TaskFactory):
 class SnapshotTaskFactory(TaskFactory):
     """Factory for creating snapshot tasks."""
 
-    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(
+        self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str, task_keys: dict[str, str]
+    ) -> DbtTask:
         """
         Creates a snapshot task.
 
@@ -124,12 +133,13 @@ class SnapshotTaskFactory(TaskFactory):
             deps_command_name (str): Bare node name used to decide whether to prepend `dbt deps`.
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
+            task_keys (dict[str, str]): Task key per dbt node, for resolving dependencies.
 
         Returns:
             DbtTask: An instance of Task.
         """
         valid_dbt_deps_types: list[str] = [DbtNodeTypes.MODEL.value]
-        depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
+        depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types, task_keys)
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
@@ -141,7 +151,9 @@ class SnapshotTaskFactory(TaskFactory):
 class SeedTaskFactory(TaskFactory):
     """Factory for creating seed tasks."""
 
-    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(
+        self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str, task_keys: dict[str, str]
+    ) -> DbtTask:
         """
         Creates a seed task.
 
@@ -150,13 +162,14 @@ class SeedTaskFactory(TaskFactory):
             deps_command_name (str): Bare node name used to decide whether to prepend `dbt deps`.
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
+            task_keys (dict[str, str]): Task key per dbt node, for resolving dependencies.
 
         Returns:
             DbtTask: An instance of Task.
         """
         valid_dbt_deps_types: list[str] = []  # Seeds don't have dependencies
 
-        depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
+        depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types, task_keys)
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
@@ -168,7 +181,9 @@ class SeedTaskFactory(TaskFactory):
 class TestTaskFactory(TaskFactory):
     """Factory for creating test tasks."""
 
-    def create_task(self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str) -> DbtTask:
+    def create_task(
+        self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str, task_keys: dict[str, str]
+    ) -> DbtTask:
         """
         Creates a test task for a single dbt test node.
 
@@ -177,6 +192,7 @@ class TestTaskFactory(TaskFactory):
             deps_command_name (str): Bare node name used to decide whether to prepend `dbt deps`.
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
+            task_keys (dict[str, str]): Task key per dbt node, for resolving dependencies.
 
         Returns:
             DbtTask: An instance of Task.
@@ -187,7 +203,7 @@ class TestTaskFactory(TaskFactory):
             DbtNodeTypes.SNAPSHOT.value,
         ]
 
-        depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types)
+        depends_on = self.resolver.resolve(dbt_node_info, valid_dbt_deps_types, task_keys)
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []

@@ -547,3 +547,11 @@ def test_generate(databricks_dbt_factory):
     databricks_dbt_factory.create_tasks_and_update_job_spec(
         dbt_manifest_path, job_definition_path, destination_job_definition_path, "new_job_name"
     )
+
+
+def test_resolver_uses_task_keys_map():
+    from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
+
+    node = {"depends_on": {"nodes": ["model.a.orders"]}}
+    task_keys = {"model.a.orders": "a_orders_run"}  # disambiguated
+    assert DbtDependencyResolver.resolve(node, ["model"], task_keys) == ["a_orders_run"]

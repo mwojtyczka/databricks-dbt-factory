@@ -194,12 +194,13 @@ def parse_args():
         action="store_true",
         help=(
             "Bundle single-model tests for a given resource into one "
-            "`dbt test --select <pkg>.<resource> --indirect-selection cautious` task (default: "
-            "one task per test node). Cross-model tests (e.g. `relationships`) are detected "
-            "from the manifest and emitted as their own tasks gated on every referenced "
-            "resource, so no tests are silently dropped. Trade-off: fewer tasks and a smaller "
-            "DAG, but per-test failures show up as a single red `<resource>_tests` task — drill "
-            "into the logs to see which assertion failed."
+            "`dbt test --select <resource_fqn> --indirect-selection cautious` task (default: "
+            "one task per test node). The cautious selector also sweeps in the resource's unit "
+            "tests. Cross-model tests (e.g. `relationships`) are detected from the manifest and "
+            "emitted as their own tasks gated on every referenced resource, so no tests are "
+            "silently dropped. Trade-off: fewer tasks and a smaller DAG, but per-test failures "
+            "show up as a single red `<resource>_tests` task — drill into the logs to see which "
+            "assertion failed."
         ),
     )
     parser.add_argument(

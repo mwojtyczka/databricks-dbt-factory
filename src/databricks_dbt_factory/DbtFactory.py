@@ -119,12 +119,14 @@ class DbtFactory:
 
         # In bundle mode, single-model tests fold into their resource's bundled task, so only
         # standalone tests get their own key.
-        task_ids = [
-            full_name
-            for full_name, info in dbt_nodes.items()
-            if info['resource_type'] in self.task_factories
-            and (not bundle or info['resource_type'] != 'test' or full_name in standalone_test_ids)
-        ] + unit_test_ids
+        task_ids = []
+        for full_name, info in dbt_nodes.items():
+            if info['resource_type'] not in self.task_factories:
+                continue
+            if bundle and info['resource_type'] == 'test' and full_name not in standalone_test_ids:
+                continue
+            task_ids.append(full_name)
+        task_ids += unit_test_ids
         task_keys, bundled_test_keys = build_task_key_maps(task_ids, sorted(single_model_tested))
 
         tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]] = {}

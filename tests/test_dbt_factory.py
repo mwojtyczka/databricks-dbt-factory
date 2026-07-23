@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
+
 
 BASE_PATH = str(Path(__file__).resolve().parent)
 
@@ -548,8 +550,6 @@ def test_generate(databricks_dbt_factory):
 
 
 def test_resolver_uses_task_keys_map():
-    from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
-
     node = {"depends_on": {"nodes": ["model.a.orders"]}}
     task_keys = {"model.a.orders": "a_orders_run"}  # disambiguated
     assert DbtDependencyResolver.resolve(node, ["model"], task_keys) == ["a_orders_run"]

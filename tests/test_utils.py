@@ -68,9 +68,9 @@ def test_build_task_key_maps_non_colliding_bundled_test_stays_plain():
 
 
 def test_read_dbt_manifest_roundtrip(tmp_path):
-    p = tmp_path / 'manifest.json'
-    p.write_text('{"nodes": {}}', encoding='utf-8')
-    assert read_dbt_manifest(str(p)) == {'nodes': {}}
+    manifest_path = tmp_path / 'manifest.json'
+    manifest_path.write_text('{"nodes": {}}', encoding='utf-8')
+    assert read_dbt_manifest(str(manifest_path)) == {'nodes': {}}
 
 
 def test_read_dbt_manifest_missing_file_raises():
@@ -79,7 +79,7 @@ def test_read_dbt_manifest_missing_file_raises():
 
 
 def test_read_dbt_manifest_invalid_json_raises(tmp_path):
-    p = tmp_path / 'manifest.json'
-    p.write_text('{not json', encoding='utf-8')
+    manifest_path = tmp_path / 'manifest.json'
+    manifest_path.write_text('{not json', encoding='utf-8')
     with pytest.raises(ValueError):
-        read_dbt_manifest(str(p))
+        read_dbt_manifest(str(manifest_path))

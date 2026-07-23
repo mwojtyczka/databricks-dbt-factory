@@ -39,6 +39,7 @@ def generate_task_key(unique_id: str) -> str:
     resource_type = parts[0]
 
     if resource_type in _RUN_SUFFIX:
+        # Only auto-generated test names approach MAX_TASK_KEY_LENGTH, so length-bounding applies to test keys only.
         return f'{_resource_name(unique_id)}_{_RUN_SUFFIX[resource_type]}'
 
     if resource_type == 'source':

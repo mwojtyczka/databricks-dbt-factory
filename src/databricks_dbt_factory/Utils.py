@@ -1,3 +1,4 @@
+import hashlib
 import json
 from collections.abc import Iterable
 
@@ -39,7 +40,6 @@ def generate_task_key(unique_id: str) -> str:
     resource_type = parts[0]
 
     if resource_type in _RUN_SUFFIX:
-        # Only auto-generated test names approach MAX_TASK_KEY_LENGTH, so length-bounding applies to test keys only.
         return f'{_resource_name(unique_id)}_{_RUN_SUFFIX[resource_type]}'
 
     if resource_type == 'source':
@@ -77,8 +77,10 @@ def build_task_key_maps(
     bundled mode (keys from `bundled_test_key`). Plain keys are kept untouched unless
     several nodes claim the same key; each claimant of a contested key then gets a
     disambiguated key with dbt's test hash (or the package name, when there is no hash) folded
-    in, falling back to the sanitized `unique_id`. The returned keys are therefore always
-    unique, so a valid dbt project cannot fail deployment with a duplicate task key.
+    in, falling back to the sanitized `unique_id`. Every assigned key is passed through
+    `_reserve`, which enforces both uniqueness and the `MAX_TASK_KEY_LENGTH` limit, so the
+    returned keys are always unique and within length — a valid dbt project cannot fail
+    deployment with a duplicate or over-long task key.
 
     Returns `(task_keys, bundled_test_keys)`, both keyed by `unique_id`.
     """
@@ -90,23 +92,52 @@ def build_task_key_maps(
 
     task_keys: dict[str, str] = {}
     bundled_test_keys: dict[str, str] = {}
-    taken = {key for key, claimants in claims.items() if len(claimants) == 1}
+    taken: set[str] = set()
+    # Assign uncontested keys first so a contested claimant's fallback never steals a plain key.
     for key, claimants in claims.items():
         if len(claimants) == 1:
             uid, is_bundled = claimants[0]
-            (bundled_test_keys if is_bundled else task_keys)[uid] = key
+            (bundled_test_keys if is_bundled else task_keys)[uid] = _reserve(key, taken)
+    for key, claimants in claims.items():
+        if len(claimants) == 1:
             continue
         for uid, is_bundled in claimants:
-            unique = _disambiguated_bundled_test_key(uid) if is_bundled else _disambiguated_task_key(uid)
-            if unique in taken:
-                unique = uid.replace('.', '_') + ('_test' if is_bundled else '')
-            base, counter = unique, 2
-            while unique in taken:
-                unique = f'{base}_{counter}'
-                counter += 1
-            taken.add(unique)
-            (bundled_test_keys if is_bundled else task_keys)[uid] = unique
+            candidate = _disambiguated_bundled_test_key(uid) if is_bundled else _disambiguated_task_key(uid)
+            (bundled_test_keys if is_bundled else task_keys)[uid] = _reserve(candidate, taken)
     return task_keys, bundled_test_keys
+
+
+def _reserve(candidate: str, taken: set[str]) -> str:
+    """
+    Returns a unique task key at most `MAX_TASK_KEY_LENGTH` characters long, records it in
+    `taken`, and never returns the same key twice.
+
+    `candidate` is first bounded to the length limit (its tail replaced by a short hash of the
+    full candidate so distinct over-long keys stay distinct). If the bounded key is already
+    taken, a numeric suffix is appended and the result re-bounded, until an unused key is found.
+    """
+    key = _bounded(candidate)
+    if key not in taken:
+        taken.add(key)
+        return key
+    counter = 2
+    while True:
+        key = _bounded(f'{candidate}_{counter}')
+        if key not in taken:
+            taken.add(key)
+            return key
+        counter += 1
+
+
+def _bounded(key: str) -> str:
+    """
+    Returns `key` unchanged if within `MAX_TASK_KEY_LENGTH`, otherwise truncates it and appends
+    a short hash of the full key so distinct over-long keys map to distinct bounded keys.
+    """
+    if len(key) <= MAX_TASK_KEY_LENGTH:
+        return key
+    digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:8]
+    return f'{key[: MAX_TASK_KEY_LENGTH - len(digest) - 1]}_{digest}'
 
 
 def _disambiguated_task_key(unique_id: str) -> str:

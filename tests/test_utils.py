@@ -1,6 +1,7 @@
 import pytest
 
 from databricks_dbt_factory.Utils import (
+    MAX_TASK_KEY_LENGTH,
     generate_task_key,
     bundled_test_key,
     build_task_key_maps,
@@ -65,6 +66,36 @@ def test_build_task_key_maps_disambiguates_bundled_test_collisions():
 def test_build_task_key_maps_non_colliding_bundled_test_stays_plain():
     _, bundled_test_keys = build_task_key_maps([], bundled_test_ids=['model.shop.orders'])
     assert bundled_test_keys == {'model.shop.orders': 'orders_test'}
+
+
+def test_build_task_key_maps_bounds_over_long_model_keys():
+    # Model/seed/snapshot keys were previously unbounded; a very long model name must now be
+    # truncated to the limit and stay distinct from a near-identical over-long sibling.
+    long_a = 'model.shop.' + 'a' * 130
+    long_b = 'model.shop.' + 'a' * 129 + 'b'
+    task_keys, _ = build_task_key_maps([long_a, long_b])
+    assert len(task_keys[long_a]) <= MAX_TASK_KEY_LENGTH
+    assert len(task_keys[long_b]) <= MAX_TASK_KEY_LENGTH
+    assert task_keys[long_a] != task_keys[long_b]
+
+
+def test_build_task_key_maps_bounds_over_long_collision_fallback():
+    # Two same-named models in different packages collide; the disambiguated fallback is itself
+    # over-long, so it must be bounded while remaining unique.
+    model_a = 'model.' + 'p' * 60 + '.' + 'm' * 60
+    model_b = 'model.' + 'q' * 60 + '.' + 'm' * 60
+    task_keys, _ = build_task_key_maps([model_a, model_b])
+    assert len(task_keys[model_a]) <= MAX_TASK_KEY_LENGTH
+    assert len(task_keys[model_b]) <= MAX_TASK_KEY_LENGTH
+    assert task_keys[model_a] != task_keys[model_b]
+
+
+def test_build_task_key_maps_bounds_over_long_bundled_key():
+    long_model = 'model.shop.' + 'z' * 130
+    task_keys, bundled_test_keys = build_task_key_maps([long_model], bundled_test_ids=[long_model])
+    assert len(task_keys[long_model]) <= MAX_TASK_KEY_LENGTH
+    assert len(bundled_test_keys[long_model]) <= MAX_TASK_KEY_LENGTH
+    assert task_keys[long_model] != bundled_test_keys[long_model]
 
 
 def test_read_dbt_manifest_roundtrip(tmp_path):

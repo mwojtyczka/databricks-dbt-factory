@@ -294,12 +294,31 @@ databricks_dbt_factory  \
 - `--job-cluster-key` (type: str, optional): Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with `--environment-key`.
 - `--extra-dbt-command-options` (type: str, optional, default: ""): Additional dbt command options to include.
 - `--no-run-tests` (flag, default: tests enabled): Skip generating dbt test tasks. Tests are included by default.
-- `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle single-model tests per resource into one `dbt test --select <resource>` task. Fewer Databricks tasks means fewer task startups, fewer dbt cold starts, and noticeably faster end-to-end runtime for projects with many tests. Downstream models/seeds/snapshots gate on the upstream's `tests_<resource>` task so failing tests still halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [dbt test handling](#dbt-test-handling).
+- `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle single-model tests per resource into one `dbt test --select <resource>` task. Fewer Databricks tasks means fewer task startups, fewer dbt cold starts, and noticeably faster end-to-end runtime for projects with many tests. Downstream models/seeds/snapshots gate on the upstream's `<resource>_test` task so failing tests still halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [dbt test handling](#dbt-test-handling).
 - `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
 - `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
 
 You can also check all input arguments by running `databricks_dbt_factory --help`.
+
+## Task keys
+
+Each generated Databricks task gets a readable key derived from the dbt resource name plus a
+verb suffix:
+
+| dbt node | task key |
+| --- | --- |
+| `model.my_project.customers` | `customers_run` |
+| `seed.my_project.country_codes` | `country_codes_seed` |
+| `snapshot.my_project.orders_snap` | `orders_snap_snapshot` |
+| `test.my_project.unique_customers_id` | `unique_customers_id_test` |
+| `source.my_project.raw.customers` | `raw_customers_test` |
+
+When two nodes would produce the same key — a model name reused across packages, or the same
+custom test name on two models — the colliding keys are disambiguated with the package name or
+dbt's test hash (e.g. `pkg_a_customers_run` / `pkg_b_customers_run`). Keys are therefore always
+unique, so a valid dbt project can never fail to deploy on a duplicate task key. Keys are also
+bounded to Databricks' 100-character limit (long test names are truncated with a hash suffix).
 
 ## dbt test handling
 
@@ -348,7 +367,7 @@ The factory classifies each dbt test node into one of two buckets based on its `
 
 - **Single-model tests** (most tests: `unique`, `not_null`, `accepted_values`, column-level
   checks, …) — collapsed into one Databricks task per tested resource, with task key
-  `tests_<resource_task_key>` (e.g. `tests_model_my_project_customers`) that runs all the
+  `<resource_name>_test` (e.g. `customers_test`) that runs all the
   resource's single-model tests together.
 
 - **Cross-model tests** (e.g. `relationships`, custom tests that reference multiple models) —
@@ -356,25 +375,25 @@ The factory classifies each dbt test node into one of two buckets based on its `
   references. These run in parallel with the bundled tasks; they don't fit inside a bundle
   because their correctness requires all their endpoints to be built first.
 
-A resource's `tests_<resource>` task selects the resource by its full FQN with
+A resource's `<resource>_test` task selects the resource by its full FQN with
 `--indirect-selection cautious`, which also runs the resource's unit tests. A model whose only
-test is a unit test still gets a `tests_<resource>` task so its unit test is not dropped.
+test is a unit test still gets a `<resource>_test` task so its unit test is not dropped.
 
 Downstream models/seeds/snapshots that depend on a tested resource are rewired to depend on
-the upstream's `tests_<resource>` task, so data only flows downstream after its upstream
+the upstream's `<resource>_test` task, so data only flows downstream after its upstream
 single-model tests pass. Cross-model test tasks don't gate downstream execution — they run
 as leaf assertions.
 
-Severity handling: warn-severity test failures exit 0 in dbt, so the bundled `tests_<resource>`
+Severity handling: warn-severity test failures exit 0 in dbt, so the bundled `<resource>_test`
 task is green and downstream still runs. Error-severity failures exit non-zero, the
-`tests_<resource>` task goes red, and downstream is skipped. Same end result as per-test mode
+`<resource>_test` task goes red, and downstream is skipped. Same end result as per-test mode
 (warn ≠ blocking, error = blocking), just via dbt's exit code rather than our dep-graph
 filtering.
 
 - **Pros:** **faster** — fewer task startups and fewer dbt invocations translate directly into
   shorter end-to-end run times; smaller, cleaner DAG in the UI.
 - **Cons:** per-test failure visibility is lost inside a bundle — a failure shows up as one red
-  `tests_<resource>` task rather than a specific red `<test_name>` task in the UI; drill into
+  `<resource>_test` task rather than a specific red `<test_name>` task in the UI; drill into
   the task logs to see which individual test(s) failed. (Cross-model test tasks retain their
   per-test visibility because they aren't bundled.)
 

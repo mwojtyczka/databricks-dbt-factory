@@ -279,6 +279,7 @@ databricks_dbt_factory  \
 
 - `--new-job-name` (type: str, optional, default: None): Optional job name. If provided, the existing job name in the job spec is updated.
 - `--dbt-manifest-path` (type: str, required): Path to the dbt manifest file.
+- `--select` (type: str, optional, default: None): dbt-style selector to scope the generated tasks to a subset of the manifest — useful for monorepo projects that generate one job per domain without pre-filtering the manifest. Supports a space-separated union of `tag:<tag>`, `path:<dir>`, `fqn:<a.b.c>`, and bare name/fqn selectors, each optionally wrapped in the `+`/`@` graph operators (e.g. `--select "tag:daily"`, `--select "+my_model"`, `--select "staging.orders+"`). Resolved from the manifest alone with no dbt invocation, so the full dbt selector grammar (set intersections, `state:`, `config:`, …) is **not** supported. Deselected upstream models are pruned from `depends_on`, mirroring `dbt build --select`.
 - `--input-job-spec-path` (type: str, required): Path to the input job spec file (the job template).
 - `--target-job-spec-path` (type: str, required): Path to the target job spec file.
 - `--target` (type: str, optional): dbt target to use. If not provided, the default target from the dbt profile will be used.

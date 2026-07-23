@@ -285,6 +285,18 @@ def test_boolean_flags_default(monkeypatch):
     assert args.dry_run is False
 
 
+def test_select_defaults_to_none(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS])
+    args = parse_args()
+    assert args.select is None
+
+
+def test_select_parses(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS, "--select", "tag:daily +orders"])
+    args = parse_args()
+    assert args.select == "tag:daily +orders"
+
+
 def test_boolean_flags_toggled(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",

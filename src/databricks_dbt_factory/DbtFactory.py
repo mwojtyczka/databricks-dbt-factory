@@ -3,6 +3,7 @@ from dataclasses import replace
 from databricks_dbt_factory import TaskFactory
 from databricks_dbt_factory.SpecsHandler import SpecsHandler
 from databricks_dbt_factory.DbtTask import DbtTask
+from databricks_dbt_factory.ManifestFilter import ManifestFilter
 from databricks_dbt_factory.Utils import generate_task_key
 
 
@@ -39,6 +40,7 @@ class DbtFactory:
         target_job_spec_path: str,
         new_job_name: str | None = None,
         dry_run: bool = False,
+        select: str | None = None,
     ):
         """
         Generates tasks from a dbt manifest and writes them into a Databricks job spec.
@@ -50,8 +52,12 @@ class DbtFactory:
             new_job_name (str | None): Optional replacement job name. If provided, overrides the
                 name in the input spec.
             dry_run (bool): When True, print the generated tasks instead of writing to disk.
+            select (str | None): Optional dbt-style selector to scope the generated tasks to a
+                subset of the manifest (e.g. `tag:daily`, `+my_model`). See `ManifestFilter`.
         """
         manifest = self.file_handler.read_dbt_manifest(dbt_manifest_path)
+        if select:
+            manifest = ManifestFilter(select).apply(manifest)
         tasks = self.create_tasks(manifest)
         if dry_run:
             print(tasks)

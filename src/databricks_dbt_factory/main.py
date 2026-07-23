@@ -66,7 +66,12 @@ def main():
 
     factory = DbtFactory(file_handler, task_factories, bundle_tests=args.bundle_tests)
     factory.create_tasks_and_update_job_spec(
-        args.dbt_manifest_path, args.input_job_spec_path, args.target_job_spec_path, args.new_job_name, args.dry_run
+        args.dbt_manifest_path,
+        args.input_job_spec_path,
+        args.target_job_spec_path,
+        args.new_job_name,
+        args.dry_run,
+        args.select,
     )
 
 
@@ -135,6 +140,20 @@ def parse_args():
         default=None,
     )
     parser.add_argument("--dbt-manifest-path", type=str, help="Path to the manifest file", required=True)
+    parser.add_argument(
+        "--select",
+        type=str,
+        required=False,
+        default=None,
+        help=(
+            "Optional dbt-style selector to scope the generated tasks to a subset of the manifest, "
+            "so a monorepo project can produce one job per domain without pre-filtering the manifest. "
+            "Supports space-separated union of `tag:<tag>`, `path:<dir>`, `fqn:<a.b.c>` and bare "
+            "name/fqn selectors, each optionally wrapped in the `+`/`@` graph operators (e.g. "
+            "`+my_model`, `tag:daily+`). Resolved from the manifest alone (no dbt invocation); the "
+            "full dbt selector grammar (set intersections, `state:`, `config:`, …) is not supported."
+        ),
+    )
     parser.add_argument("--input-job-spec-path", type=str, help="Path to the input job spec file", required=True)
     parser.add_argument(
         "--target-job-spec-path",

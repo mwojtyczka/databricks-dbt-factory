@@ -484,6 +484,36 @@ def test_flat_mode_unit_test_on_absent_model_is_skipped(dbt_factory):
     assert by_key == {}
 
 
+def test_select_scopes_generated_tasks_from_real_manifest(dbt_factory):
+    # `--select dbt_demo.sql_model2` scopes generation to the sql_model2 subtree. Only its two
+    # models (and their attached tests) are emitted; sql_model1 / dbt_util models are excluded.
+    manifest_path = BASE_PATH + "/test_data/manifest.json"
+    input_spec = BASE_PATH + "/test_data/job_definition_template.yaml"
+
+    with NamedTemporaryFile(suffix=".yaml", delete=False) as temp_file:
+        out_path = temp_file.name
+
+    try:
+        dbt_factory.create_tasks_and_update_job_spec(manifest_path, input_spec, out_path, select="dbt_demo.sql_model2")
+        with open(out_path, "r", encoding="utf-8") as file:
+            spec = yaml.safe_load(file)
+    finally:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
+    tasks = spec["resources"]["jobs"]["dbt_sql_job"]["tasks"]
+    model_task_keys = {t["task_key"] for t in tasks if t["task_key"].startswith("model_")}
+    assert model_task_keys == {"model_dbt_demo_first_dbt_model", "model_dbt_demo_second_dbt_model"}
+    # a sql_model1 model must not be generated
+    assert "model_dbt_demo_diamonds_prices" not in {t["task_key"] for t in tasks}
+    # second_dbt_model depends on first_dbt_model (both selected) and its tests; the surviving
+    # depends_on must only reference generated tasks (no dangling deps on dropped nodes).
+    all_keys = {t["task_key"] for t in tasks}
+    for task in tasks:
+        for dep in task.get("depends_on", []):
+            assert dep["task_key"] in all_keys, f"dangling dep {dep['task_key']} in {task['task_key']}"
+
+
 def test_create_job_spec_and_update(dbt_factory):
     run_job_spec_test(
         dbt_factory,

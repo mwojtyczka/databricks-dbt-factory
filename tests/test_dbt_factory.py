@@ -96,20 +96,20 @@ def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(db
     tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert 'tests_model_pkg_a_customers' in by_key
-    assert 'tests_model_pkg_b_customers' in by_key
-    assert by_key['tests_model_pkg_a_customers']['dbt_task']['commands'] == [
+    assert 'pkg_a_customers_test' in by_key
+    assert 'pkg_b_customers_test' in by_key
+    assert by_key['pkg_a_customers_test']['dbt_task']['commands'] == [
         'dbt test --select pkg_a.customers --indirect-selection cautious --target dev'
     ]
-    assert by_key['tests_model_pkg_b_customers']['dbt_task']['commands'] == [
+    assert by_key['pkg_b_customers_test']['dbt_task']['commands'] == [
         'dbt test --select pkg_b.customers --indirect-selection cautious --target dev'
     ]
-    assert by_key['tests_model_pkg_a_customers']['depends_on'] == [{'task_key': 'model_pkg_a_customers'}]
-    assert by_key['tests_model_pkg_b_customers']['depends_on'] == [{'task_key': 'model_pkg_b_customers'}]
+    assert by_key['pkg_a_customers_test']['depends_on'] == [{'task_key': 'pkg_a_customers_run'}]
+    assert by_key['pkg_b_customers_test']['depends_on'] == [{'task_key': 'pkg_b_customers_run'}]
 
-    assert {dep['task_key'] for dep in by_key['model_pkg_a_orders']['depends_on']} == {
-        'tests_model_pkg_a_customers',
-        'tests_model_pkg_b_customers',
+    assert {dep['task_key'] for dep in by_key['orders_run']['depends_on']} == {
+        'pkg_a_customers_test',
+        'pkg_b_customers_test',
     }
 
 
@@ -125,12 +125,12 @@ def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory_bundled):
     tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert 'tests_seed_pkg_countries' in by_key
-    assert by_key['tests_seed_pkg_countries']['dbt_task']['commands'] == [
+    assert 'countries_test' in by_key
+    assert by_key['countries_test']['dbt_task']['commands'] == [
         'dbt test --select pkg.countries --indirect-selection cautious --target dev'
     ]
-    assert by_key['tests_seed_pkg_countries']['depends_on'] == [{'task_key': 'seed_pkg_countries'}]
-    assert by_key['model_pkg_enriched']['depends_on'] == [{'task_key': 'tests_seed_pkg_countries'}]
+    assert by_key['countries_test']['depends_on'] == [{'task_key': 'countries_seed'}]
+    assert by_key['enriched_run']['depends_on'] == [{'task_key': 'countries_test'}]
 
 
 def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory_bundled):
@@ -145,12 +145,12 @@ def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory_bundled)
     tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert 'tests_snapshot_pkg_orders_snap' in by_key
-    assert by_key['tests_snapshot_pkg_orders_snap']['dbt_task']['commands'] == [
+    assert 'orders_snap_test' in by_key
+    assert by_key['orders_snap_test']['dbt_task']['commands'] == [
         'dbt test --select pkg.orders_snap --indirect-selection cautious --target dev'
     ]
-    assert by_key['tests_snapshot_pkg_orders_snap']['depends_on'] == [{'task_key': 'snapshot_pkg_orders_snap'}]
-    assert by_key['model_pkg_orders_history']['depends_on'] == [{'task_key': 'tests_snapshot_pkg_orders_snap'}]
+    assert by_key['orders_snap_test']['depends_on'] == [{'task_key': 'orders_snap_snapshot'}]
+    assert by_key['orders_history_run']['depends_on'] == [{'task_key': 'orders_snap_test'}]
 
 
 def test_tests_on_source_produce_standalone_task(dbt_factory_bundled):
@@ -164,11 +164,11 @@ def test_tests_on_source_produce_standalone_task(dbt_factory_bundled):
     tasks = dbt_factory_bundled.create_tasks({'nodes': nodes, 'sources': sources})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert 'tests_source_pkg_raw_customers' in by_key
-    assert by_key['tests_source_pkg_raw_customers']['dbt_task']['commands'] == [
+    assert 'raw_customers_test' in by_key
+    assert by_key['raw_customers_test']['dbt_task']['commands'] == [
         'dbt test --select source:pkg.raw.customers --indirect-selection cautious --target dev'
     ]
-    assert by_key['tests_source_pkg_raw_customers']['depends_on'] == []
+    assert by_key['raw_customers_test']['depends_on'] == []
 
 
 def test_flat_mode_emits_one_task_per_test_node_and_gates_downstream(dbt_factory):
@@ -186,19 +186,19 @@ def test_flat_mode_emits_one_task_per_test_node_and_gates_downstream(dbt_factory
     tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert 'test_pkg_unique_customers_id' in by_key
-    assert 'test_pkg_not_null_customers_id' in by_key
-    assert 'tests_model_pkg_customers' not in by_key
+    assert 'unique_customers_id_test' in by_key
+    assert 'not_null_customers_id_test' in by_key
+    assert 'customers_test' not in by_key
 
-    assert by_key['test_pkg_unique_customers_id']['dbt_task']['commands'] == [
+    assert by_key['unique_customers_id_test']['dbt_task']['commands'] == [
         'dbt test --select pkg.unique_customers_id --target dev'
     ]
-    assert by_key['test_pkg_unique_customers_id']['depends_on'] == [{'task_key': 'model_pkg_customers'}]
+    assert by_key['unique_customers_id_test']['depends_on'] == [{'task_key': 'customers_run'}]
     # orders depends on customers AND every test attached to customers
-    assert {dep['task_key'] for dep in by_key['model_pkg_orders']['depends_on']} == {
-        'model_pkg_customers',
-        'test_pkg_unique_customers_id',
-        'test_pkg_not_null_customers_id',
+    assert {dep['task_key'] for dep in by_key['orders_run']['depends_on']} == {
+        'customers_run',
+        'unique_customers_id_test',
+        'not_null_customers_id_test',
     }
 
 
@@ -225,16 +225,16 @@ def test_flat_mode_cross_model_test_does_not_create_cycle(dbt_factory):
 
     # orders depends on customers + unique_customers_id, but NOT on the relationship test
     # (that test references orders itself — including it would cycle)
-    assert {dep['task_key'] for dep in by_key['model_pkg_orders']['depends_on']} == {
-        'model_pkg_customers',
-        'test_pkg_unique_customers_id',
+    assert {dep['task_key'] for dep in by_key['orders_run']['depends_on']} == {
+        'customers_run',
+        'unique_customers_id_test',
     }
 
     # payments (downstream of orders) picks up the relationship test — safe, payments
     # transitively depends on both orders and customers (the test's refs)
-    payments_deps = {dep['task_key'] for dep in by_key['model_pkg_payments']['depends_on']}
-    assert 'model_pkg_orders' in payments_deps
-    assert 'test_pkg_relationships_orders_customer_id__ref_customers' in payments_deps
+    payments_deps = {dep['task_key'] for dep in by_key['payments_run']['depends_on']}
+    assert 'orders_run' in payments_deps
+    assert 'relationships_orders_customer_id__ref_customers_test' in payments_deps
 
 
 def test_flat_mode_transitive_cross_model_test_does_not_create_cycle(dbt_factory):
@@ -256,12 +256,12 @@ def test_flat_mode_transitive_cross_model_test_does_not_create_cycle(dbt_factory
     by_key = {t['task_key']: t for t in tasks}
 
     # B's ancestors = {A}. Test T refs = {A, C}. C ∉ ancestors(B) → skip T.
-    assert by_key['model_pkg_b']['depends_on'] == [{'task_key': 'model_pkg_a'}]
+    assert by_key['b_run']['depends_on'] == [{'task_key': 'a_run'}]
     # C's ancestors = {A, B}. C IS in T.refs → skip T (direct self-reference).
-    assert by_key['model_pkg_c']['depends_on'] == [{'task_key': 'model_pkg_b'}]
+    assert by_key['c_run']['depends_on'] == [{'task_key': 'b_run'}]
     # D's ancestors = {A, B, C}. T.refs = {A, C} ⊆ ancestors(D) → add T.
-    d_deps = {dep['task_key'] for dep in by_key['model_pkg_d']['depends_on']}
-    assert d_deps == {'model_pkg_c', 'test_pkg_relationship_a_c'}
+    d_deps = {dep['task_key'] for dep in by_key['d_run']['depends_on']}
+    assert d_deps == {'c_run', 'relationship_a_c_test'}
 
 
 def test_flat_mode_warn_severity_tests_do_not_gate_downstream(dbt_factory):
@@ -280,13 +280,13 @@ def test_flat_mode_warn_severity_tests_do_not_gate_downstream(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     # Both test tasks still exist (warn tests still run — they just don't gate anything)
-    assert 'test_pkg_unique_customers_id' in by_key
-    assert 'test_pkg_not_null_customers_id' in by_key
+    assert 'unique_customers_id_test' in by_key
+    assert 'not_null_customers_id_test' in by_key
 
     # orders gates on customers + the error-severity test, but NOT the warn-severity one
-    assert {dep['task_key'] for dep in by_key['model_pkg_orders']['depends_on']} == {
-        'model_pkg_customers',
-        'test_pkg_not_null_customers_id',
+    assert {dep['task_key'] for dep in by_key['orders_run']['depends_on']} == {
+        'customers_run',
+        'not_null_customers_id_test',
     }
 
 
@@ -301,20 +301,20 @@ def test_flat_mode_test_on_seed_gates_on_seed(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert by_key['test_pkg_unique_countries_code']['depends_on'] == [{'task_key': 'seed_pkg_countries'}]
+    assert by_key['unique_countries_code_test']['depends_on'] == [{'task_key': 'countries_seed'}]
 
 
 def test_bundled_task_factory_assembles_commands(dbt_factory_bundled):
     test_factory = dbt_factory_bundled.task_factories['test']
     task = test_factory.create_bundled_task(
-        task_key='tests_model_pkg_customers',
+        task_key='customers_test',
         select='pkg.customers',
         deps_command_name='customers',
-        depends_on=['model_pkg_customers'],
+        depends_on=['customers_run'],
     )
-    assert task.task_key == 'tests_model_pkg_customers'
+    assert task.task_key == 'customers_test'
     assert task.commands == ['dbt test --select pkg.customers --indirect-selection cautious --target dev']
-    assert task.depends_on == ['model_pkg_customers']
+    assert task.depends_on == ['customers_run']
 
 
 def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_factory_bundled):
@@ -338,24 +338,24 @@ def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_fact
     by_key = {t['task_key']: t for t in tasks}
 
     # Single-model test → bundled with cautious selection (relationship test is excluded by dbt)
-    assert 'tests_model_pkg_team_cities' in by_key
-    assert by_key['tests_model_pkg_team_cities']['dbt_task']['commands'] == [
+    assert 'team_cities_test' in by_key
+    assert by_key['team_cities_test']['dbt_task']['commands'] == [
         'dbt test --select pkg.team_cities --indirect-selection cautious --target dev'
     ]
 
     # Cross-model test → its own task, gated on BOTH referenced models
-    cross_test_key = 'test_pkg_relationships_game_details_winner__team_city__ref_team_cities_'
+    cross_test_key = 'relationships_game_details_winner__team_city__ref_team_cities__test'
     assert cross_test_key in by_key
     assert by_key[cross_test_key]['dbt_task']['commands'] == [
         'dbt test --select pkg.relationships_game_details_winner__team_city__ref_team_cities_ --target dev'
     ]
     assert {dep['task_key'] for dep in by_key[cross_test_key]['depends_on']} == {
-        'model_pkg_team_cities',
-        'model_pkg_game_details',
+        'team_cities_run',
+        'game_details_run',
     }
 
     # `game_details` has no single-model tests, so no bundled `game_details_tests` exists
-    assert 'tests_model_pkg_game_details' not in by_key
+    assert 'game_details_test' not in by_key
 
 
 def test_single_package_bundled_test_uses_qualified_select(dbt_factory_bundled):
@@ -370,11 +370,11 @@ def test_single_package_bundled_test_uses_qualified_select(dbt_factory_bundled):
     tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert 'tests_model_pkg_a_customers' in by_key
-    assert by_key['tests_model_pkg_a_customers']['dbt_task']['commands'] == [
+    assert 'customers_test' in by_key
+    assert by_key['customers_test']['dbt_task']['commands'] == [
         'dbt test --select pkg_a.customers --indirect-selection cautious --target dev'
     ]
-    assert by_key['model_pkg_a_orders']['depends_on'] == [{'task_key': 'tests_model_pkg_a_customers'}]
+    assert by_key['orders_run']['depends_on'] == [{'task_key': 'customers_test'}]
 
 
 def test_duplicate_model_name_across_packages_selects_by_distinct_fqn(dbt_factory):
@@ -391,8 +391,8 @@ def test_duplicate_model_name_across_packages_selects_by_distinct_fqn(dbt_factor
     tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert by_key['model_pkg_a_customers']['dbt_task']['commands'] == ['dbt run --select pkg_a.customers --target dev']
-    assert by_key['model_pkg_b_customers']['dbt_task']['commands'] == ['dbt run --select pkg_b.customers --target dev']
+    assert by_key['pkg_a_customers_run']['dbt_task']['commands'] == ['dbt run --select pkg_a.customers --target dev']
+    assert by_key['pkg_b_customers_run']['dbt_task']['commands'] == ['dbt run --select pkg_b.customers --target dev']
 
 
 def test_model_in_subdirectory_selects_by_full_fqn_flat_mode(dbt_factory):
@@ -403,9 +403,7 @@ def test_model_in_subdirectory_selects_by_full_fqn_flat_mode(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert by_key['model_pkg_stg_orders']['dbt_task']['commands'] == [
-        'dbt run --select pkg.staging.stg_orders --target dev'
-    ]
+    assert by_key['stg_orders_run']['dbt_task']['commands'] == ['dbt run --select pkg.staging.stg_orders --target dev']
 
 
 def test_model_in_subdirectory_bundled_test_selects_by_full_fqn(dbt_factory_bundled):
@@ -422,7 +420,7 @@ def test_model_in_subdirectory_bundled_test_selects_by_full_fqn(dbt_factory_bund
     tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert by_key['tests_model_pkg_stg_orders']['dbt_task']['commands'] == [
+    assert by_key['stg_orders_test']['dbt_task']['commands'] == [
         'dbt test --select pkg.staging.stg_orders --indirect-selection cautious --target dev'
     ]
 
@@ -445,10 +443,10 @@ def test_flat_mode_unit_test_emits_task_and_gates_downstream(dbt_factory):
     assert by_key[unit_test_key]['dbt_task']['commands'] == [
         'dbt test --select pkg.staging.orders.test_totals --target dev'
     ]
-    assert by_key[unit_test_key]['depends_on'] == [{'task_key': 'model_pkg_orders'}]
+    assert by_key[unit_test_key]['depends_on'] == [{'task_key': 'orders_run'}]
     # summary (downstream of orders) gates on the unit test as well as the model
-    assert {dep['task_key'] for dep in by_key['model_pkg_summary']['depends_on']} == {
-        'model_pkg_orders',
+    assert {dep['task_key'] for dep in by_key['summary_run']['depends_on']} == {
+        'orders_run',
         unit_test_key,
     }
 
@@ -463,11 +461,11 @@ def test_bundled_mode_model_with_only_unit_test_emits_bundled_task(dbt_factory_b
     tasks = dbt_factory_bundled.create_tasks({'nodes': nodes, 'unit_tests': unit_tests})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert 'tests_model_pkg_orders' in by_key
-    assert by_key['tests_model_pkg_orders']['dbt_task']['commands'] == [
+    assert 'orders_test' in by_key
+    assert by_key['orders_test']['dbt_task']['commands'] == [
         'dbt test --select pkg.staging.orders --indirect-selection cautious --target dev'
     ]
-    assert by_key['tests_model_pkg_orders']['depends_on'] == [{'task_key': 'model_pkg_orders'}]
+    assert by_key['orders_test']['depends_on'] == [{'task_key': 'orders_run'}]
     # No standalone unit-test task in bundled mode — the bundled task covers it.
     assert 'unit_test_pkg_orders_test_totals' not in by_key
 

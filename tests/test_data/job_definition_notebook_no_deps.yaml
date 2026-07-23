@@ -340,3 +340,12 @@ resources:
           base_parameters:
             dbt_commands: '["dbt test --select dbt_demo.models.sql_model1.not_null_zzz_win_loss_records_losses --target dev"]'
           source: GIT
+      - task_key: unit_test_dbt_demo_diamonds_list_colors_test_get_distinct_colors
+        depends_on:
+        - task_key: model_dbt_demo_diamonds_list_colors
+        environment_key: Default
+        notebook_task:
+          notebook_path: ./notebooks/dbt_runner.py
+          base_parameters:
+            dbt_commands: '["dbt test --select dbt_demo.models.sql_model1.diamonds_list_colors.test_get_distinct_colors --target dev"]'
+          source: GIT

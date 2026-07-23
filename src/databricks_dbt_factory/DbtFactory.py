@@ -99,6 +99,7 @@ class DbtFactory:
         """
         dbt_nodes = dbt_manifest.get('nodes', {})
         dbt_sources = dbt_manifest.get('sources', {})
+        dbt_unit_tests = dbt_manifest.get('unit_tests', {})
 
         bundle = 'test' in self.task_factories and self.bundle_tests
         single_model_tested: set[str] = set()
@@ -106,9 +107,9 @@ class DbtFactory:
         tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]] = {}
         ancestors: dict[str, set[str]] = {}
         if bundle:
-            single_model_tested, standalone_tests = self._classify_tests(dbt_nodes, dbt_sources)
+            single_model_tested, standalone_tests = self._classify_tests(dbt_nodes, dbt_sources, dbt_unit_tests)
         elif 'test' in self.task_factories:
-            tests_by_resource = self._index_tests_by_resource(dbt_nodes, dbt_sources)
+            tests_by_resource = self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests)
             ancestors = self._compute_ancestors(dbt_nodes, dbt_sources)
         task_keys_with_tests = {generate_task_key(fn) for fn in single_model_tested}
 
@@ -117,6 +118,8 @@ class DbtFactory:
         if bundle:
             tasks.extend(self._build_bundled_test_tasks(dbt_nodes, dbt_sources, single_model_tested))
             tasks.extend(self._build_standalone_test_tasks(standalone_tests))
+        elif 'test' in self.task_factories:
+            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests))
 
         return tasks
 
@@ -150,7 +153,7 @@ class DbtFactory:
         return ancestors
 
     def _index_tests_by_resource(
-        self, dbt_nodes: dict, dbt_sources: dict
+        self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict
     ) -> dict[str, list[tuple[str, frozenset[str]]]]:
         """
         Maps each testable resource's full name to a list of (test_task_key, test_refs) pairs
@@ -160,6 +163,11 @@ class DbtFactory:
         dbt itself exits 0 on warn-severity failures, so even if we did gate on them the
         Databricks task would succeed and downstream would run; keeping warn tests out of the
         dep graph just avoids the extra DAG clutter.
+
+        Unit tests are indexed too. A unit test references exactly its own model and has no
+        severity — it always fails the run — so it always gates. Since its only ref is its own
+        model, `_extend_deps_with_upstream_tests`'s cycle check is trivially satisfied for any
+        downstream node and never introduces a cycle.
 
         The refs set is carried alongside each test so `_extend_deps_with_upstream_tests` can
         avoid cycles: a test with refs that aren't all ancestors of a candidate node would
@@ -179,6 +187,14 @@ class DbtFactory:
             frozen_refs = frozenset(refs)
             for resource_full in refs:
                 index.setdefault(resource_full, []).append((test_task_key, frozen_refs))
+
+        for unit_test_full_name, unit_test_info in dbt_unit_tests.items():
+            model_full_name = self._unit_test_model(unit_test_info)
+            if model_full_name is None or model_full_name not in dbt_nodes:
+                continue
+            unit_test_task_key = generate_task_key(unit_test_full_name)
+            frozen_refs = frozenset({model_full_name})
+            index.setdefault(model_full_name, []).append((unit_test_task_key, frozen_refs))
         return index
 
     @staticmethod
@@ -189,6 +205,15 @@ class DbtFactory:
         if isinstance(severity, str):
             return severity.lower()
         return 'error'
+
+    @staticmethod
+    def _unit_test_model(unit_test_info: dict) -> str | None:
+        """Returns the full name of the model a unit test targets, or None if it can't be resolved."""
+        model = unit_test_info.get('model')
+        package = unit_test_info.get('package_name')
+        if model and package:
+            return f"model.{package}.{model}"
+        return None
 
     @staticmethod
     def _extend_deps_with_upstream_tests(
@@ -216,7 +241,9 @@ class DbtFactory:
                     seen.add(test_key)
         return extended
 
-    def _classify_tests(self, dbt_nodes: dict, dbt_sources: dict) -> tuple[set[str], list[tuple[str, dict]]]:
+    def _classify_tests(
+        self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict
+    ) -> tuple[set[str], list[tuple[str, dict]]]:
         """
         Classifies test nodes for bundled mode so that no test is silently dropped.
 
@@ -226,6 +253,11 @@ class DbtFactory:
           tasks with multi-resource deps — `cautious` filters them out of bundles.
         - Tests with 0 testable deps (singular/custom tests that don't `ref()` or `source()`
           any resource): also emitted as their own tasks, since no bundle would pick them up.
+
+        A model's bundled `tests_<model>` task selects the model with `--indirect-selection
+        cautious`, which sweeps in the model's unit tests as well. Models that already have a
+        single-model data test therefore cover their unit tests for free. A model with *only*
+        unit tests is added to `single_model_tested` here so it still gets a bundled task.
 
         Returns:
             (single_model_tested, standalone_tests):
@@ -247,6 +279,11 @@ class DbtFactory:
                 single_model_tested.add(testable_deps[0])
             else:
                 standalone_tests.append((node_full_name, node_info))
+
+        for unit_test_info in dbt_unit_tests.values():
+            model_full_name = self._unit_test_model(unit_test_info)
+            if model_full_name is not None and model_full_name in dbt_nodes:
+                single_model_tested.add(model_full_name)
         return single_model_tested, standalone_tests
 
     def _build_resource_tasks(
@@ -334,5 +371,24 @@ class DbtFactory:
             test_task_key = generate_task_key(test_full_name)
             tasks.append(
                 test_factory.create_task(self._fqn_select(test_info), test_info['name'], test_info, test_task_key)
+            )
+        return tasks
+
+    def _build_unit_test_tasks(self, dbt_unit_tests: dict) -> list[DbtTask]:
+        """
+        Emits one task per unit test, selected by its full FQN and gated on the model it tests.
+        Used in per-test mode; in bundled mode a model's `tests_<model>` task covers its unit
+        tests via `--indirect-selection cautious`.
+        """
+        test_factory = self.task_factories['test']
+        tasks: list[DbtTask] = []
+        for unit_test_full_name, unit_test_info in sorted(dbt_unit_tests.items()):
+            tasks.append(
+                test_factory.create_task(
+                    self._fqn_select(unit_test_info),
+                    unit_test_info['name'],
+                    unit_test_info,
+                    generate_task_key(unit_test_full_name),
+                )
             )
         return tasks

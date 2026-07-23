@@ -427,6 +427,51 @@ def test_model_in_subdirectory_bundled_test_selects_by_full_fqn(dbt_factory_bund
     ]
 
 
+def test_flat_mode_unit_test_emits_task_and_gates_downstream(dbt_factory):
+    # Unit tests live under the manifest `unit_tests` key. In per-test mode each becomes its own
+    # task selected by its full fqn, gated on the model it tests, and downstream models gate on it.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'staging', 'orders']),
+            _model('pkg', 'summary', depends_on=['model.pkg.orders'], fqn=['pkg', 'marts', 'summary']),
+        ]
+    )
+    unit_tests = dict([_unit_test('pkg', 'orders', 'test_totals', fqn=['pkg', 'staging', 'orders', 'test_totals'])])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes, 'unit_tests': unit_tests})
+    by_key = {t['task_key']: t for t in tasks}
+
+    unit_test_key = 'unit_test_pkg_orders_test_totals'
+    assert by_key[unit_test_key]['dbt_task']['commands'] == [
+        'dbt test --select pkg.staging.orders.test_totals --target dev'
+    ]
+    assert by_key[unit_test_key]['depends_on'] == [{'task_key': 'model_pkg_orders'}]
+    # summary (downstream of orders) gates on the unit test as well as the model
+    assert {dep['task_key'] for dep in by_key['model_pkg_summary']['depends_on']} == {
+        'model_pkg_orders',
+        unit_test_key,
+    }
+
+
+def test_bundled_mode_model_with_only_unit_test_emits_bundled_task(dbt_factory_bundled):
+    # A model whose only test is a unit test (no data test) must still get a bundled
+    # `tests_<model>` task. `dbt test --select <model_fqn> --indirect-selection cautious` sweeps
+    # in the unit test, so it is not silently dropped.
+    nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'staging', 'orders'])])
+    unit_tests = dict([_unit_test('pkg', 'orders', 'test_totals', fqn=['pkg', 'staging', 'orders', 'test_totals'])])
+
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes, 'unit_tests': unit_tests})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'tests_model_pkg_orders' in by_key
+    assert by_key['tests_model_pkg_orders']['dbt_task']['commands'] == [
+        'dbt test --select pkg.staging.orders --indirect-selection cautious --target dev'
+    ]
+    assert by_key['tests_model_pkg_orders']['depends_on'] == [{'task_key': 'model_pkg_orders'}]
+    # No standalone unit-test task in bundled mode — the bundled task covers it.
+    assert 'unit_test_pkg_orders_test_totals' not in by_key
+
+
 def test_create_job_spec_and_update(dbt_factory):
     run_job_spec_test(
         dbt_factory,

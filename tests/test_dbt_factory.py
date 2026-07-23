@@ -409,7 +409,7 @@ def test_model_in_subdirectory_selects_by_full_fqn_flat_mode(dbt_factory):
 
 
 def test_model_in_subdirectory_bundled_test_selects_by_full_fqn(dbt_factory_bundled):
-    # In bundled mode the `tests_<model>` select must be the model's full fqn so
+    # In bundled mode the `<model>_test` task's select must be the model's full fqn so
     # `dbt test --select ... --indirect-selection cautious` actually matches the subdirectory
     # model. `pkg.stg_orders` would match no nodes and silently run zero tests.
     nodes = dict(
@@ -455,7 +455,7 @@ def test_flat_mode_unit_test_emits_task_and_gates_downstream(dbt_factory):
 
 def test_bundled_mode_model_with_only_unit_test_emits_bundled_task(dbt_factory_bundled):
     # A model whose only test is a unit test (no data test) must still get a bundled
-    # `tests_<model>` task. `dbt test --select <model_fqn> --indirect-selection cautious` sweeps
+    # `<model>_test` task. `dbt test --select <model_fqn> --indirect-selection cautious` sweeps
     # in the unit test, so it is not silently dropped.
     nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'staging', 'orders'])])
     unit_tests = dict([_unit_test('pkg', 'orders', 'test_totals', fqn=['pkg', 'staging', 'orders', 'test_totals'])])

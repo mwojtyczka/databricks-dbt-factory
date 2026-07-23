@@ -1,5 +1,6 @@
-import json
 import yaml
+
+from databricks_dbt_factory.Utils import read_dbt_manifest
 
 
 class SpecsHandler:
@@ -20,13 +21,7 @@ class SpecsHandler:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is not a valid manifest file.
         """
-        try:
-            with open(path, 'r', encoding="utf-8") as file:
-                return json.load(file)
-        except FileNotFoundError as e:
-            raise FileNotFoundError(f"Manifest file not found: {path}. Details: {e}") from e
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Error parsing JSON from manifest file: {path}. Details: {e}") from e
+        return read_dbt_manifest(path)
 
     @staticmethod
     def replace_tasks_in_job_spec(

@@ -3,7 +3,7 @@ from dataclasses import replace
 from databricks_dbt_factory import TaskFactory
 from databricks_dbt_factory.SpecsHandler import SpecsHandler
 from databricks_dbt_factory.DbtTask import DbtTask
-from databricks_dbt_factory.Utils import generate_task_key
+from databricks_dbt_factory.Utils import build_task_key_maps
 
 
 class DbtFactory:
@@ -23,10 +23,10 @@ class DbtFactory:
             task_factories (dict[str, TaskFactory]): Maps dbt resource types (`model`, `seed`,
                 `snapshot`, `test`) to their respective `TaskFactory` instances. Omitting `test`
                 disables test-task generation entirely.
-            bundle_tests (bool): When True, emit one `tests_<resource>` task per tested resource
-                and rewire downstream models/seeds/snapshots to depend on the upstream's
-                `tests_<resource>` task so failing tests halt the DAG. When False, emit one task
-                per dbt test node.
+            bundle_tests (bool): When True, emit one bundled `<resource>_test` task per tested
+                resource and rewire downstream models/seeds/snapshots to depend on the upstream's
+                bundled test task so failing tests halt the DAG. When False, emit one task per
+                dbt test node.
         """
         self.file_handler = file_handler
         self.task_factories = task_factories
@@ -104,24 +104,62 @@ class DbtFactory:
         bundle = 'test' in self.task_factories and self.bundle_tests
         single_model_tested: set[str] = set()
         standalone_tests: list[tuple[str, dict]] = []
-        tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]] = {}
-        ancestors: dict[str, set[str]] = {}
         if bundle:
             single_model_tested, standalone_tests = self._classify_tests(dbt_nodes, dbt_sources, dbt_unit_tests)
-        elif 'test' in self.task_factories:
-            tests_by_resource = self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests)
-            ancestors = self._compute_ancestors(dbt_nodes, dbt_sources)
-        task_keys_with_tests = {generate_task_key(fn) for fn in single_model_tested}
+        standalone_test_ids = {full_name for full_name, _ in standalone_tests}
 
-        tasks = self._build_resource_tasks(dbt_nodes, bundle, task_keys_with_tests, tests_by_resource, ancestors)
+        # Unit tests live under the manifest `unit_tests` key, not `nodes`. In per-test mode each
+        # gets its own task (those whose target model is absent are skipped), so include their ids
+        # here to receive a task key from `build_task_key_maps`.
+        unit_test_ids = (
+            self._emitted_unit_test_ids(dbt_unit_tests, dbt_nodes)
+            if not bundle and 'test' in self.task_factories
+            else []
+        )
+
+        task_ids = [
+            full_name
+            for full_name, info in dbt_nodes.items()
+            if info['resource_type'] in self.task_factories
+            and (not bundle or info['resource_type'] != 'test' or full_name in standalone_test_ids)
+        ] + unit_test_ids
+        task_keys, bundled_test_keys = build_task_key_maps(task_ids, sorted(single_model_tested))
+
+        tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]] = {}
+        ancestors: dict[str, set[str]] = {}
+        if not bundle and 'test' in self.task_factories:
+            tests_by_resource = self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests, task_keys)
+            ancestors = self._compute_ancestors(dbt_nodes, dbt_sources)
+        test_key_by_resource = {task_keys[fn]: bundled_test_keys[fn] for fn in single_model_tested if fn in task_keys}
+
+        tasks = self._build_resource_tasks(
+            dbt_nodes, bundle, task_keys, test_key_by_resource, tests_by_resource, ancestors
+        )
 
         if bundle:
-            tasks.extend(self._build_bundled_test_tasks(dbt_nodes, dbt_sources, single_model_tested))
-            tasks.extend(self._build_standalone_test_tasks(standalone_tests))
+            tasks.extend(
+                self._build_bundled_test_tasks(
+                    dbt_nodes, dbt_sources, single_model_tested, task_keys, bundled_test_keys
+                )
+            )
+            tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys))
         elif 'test' in self.task_factories:
-            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, dbt_nodes))
+            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, dbt_nodes, task_keys))
 
         return tasks
+
+    def _emitted_unit_test_ids(self, dbt_unit_tests: dict, dbt_nodes: dict) -> list[str]:
+        """
+        Full names of the unit tests that will become their own task in per-test mode: those whose
+        target model resolves and is present in the manifest. Must stay in lockstep with the same
+        guard in `_build_unit_test_tasks` so every emitted unit-test task has a key.
+        """
+        ids: list[str] = []
+        for unit_test_full_name, unit_test_info in dbt_unit_tests.items():
+            model_full_name = self._unit_test_model(unit_test_info)
+            if model_full_name is not None and model_full_name in dbt_nodes:
+                ids.append(unit_test_full_name)
+        return ids
 
     def _compute_ancestors(self, dbt_nodes: dict, dbt_sources: dict) -> dict[str, set[str]]:
         """
@@ -153,7 +191,7 @@ class DbtFactory:
         return ancestors
 
     def _index_tests_by_resource(
-        self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict
+        self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict, task_keys: dict[str, str]
     ) -> dict[str, list[tuple[str, frozenset[str]]]]:
         """
         Maps each testable resource's full name to a list of (test_task_key, test_refs) pairs
@@ -165,8 +203,8 @@ class DbtFactory:
         dep graph just avoids the extra DAG clutter.
 
         Unit tests are indexed too. A unit test has no severity — it always fails the run — so it
-        always gates. Its refs are the models/seeds/snapshots it depends on (dbt lists only the
-        tested model there), so `_extend_deps_with_upstream_tests`'s cycle check applies uniformly.
+        always gates. Only unit tests that were emitted as tasks (present in `task_keys`) are
+        indexed, so a downstream node never gates on a unit-test task that was skipped.
 
         The refs set is carried alongside each test so `_extend_deps_with_upstream_tests` can
         avoid cycles: a test with refs that aren't all ancestors of a candidate node would
@@ -178,10 +216,11 @@ class DbtFactory:
                 continue
             if self._test_severity(node_info) != 'error':
                 continue
-            self._index_test(index, generate_task_key(node_full_name), node_info, dbt_nodes, dbt_sources)
+            self._index_test(index, task_keys[node_full_name], node_info, dbt_nodes, dbt_sources)
 
         for unit_test_full_name, unit_test_info in dbt_unit_tests.items():
-            self._index_test(index, generate_task_key(unit_test_full_name), unit_test_info, dbt_nodes, dbt_sources)
+            if unit_test_full_name in task_keys:
+                self._index_test(index, task_keys[unit_test_full_name], unit_test_info, dbt_nodes, dbt_sources)
         return index
 
     def _index_test(
@@ -220,7 +259,7 @@ class DbtFactory:
         model = unit_test_info.get('model')
         package = unit_test_info.get('package_name')
         if model and package:
-            return f"model.{package}.{model}"
+            return f'model.{package}.{model}'
         return None
 
     @staticmethod
@@ -256,21 +295,21 @@ class DbtFactory:
         Classifies test nodes for bundled mode so that no test is silently dropped.
 
         - Tests with exactly 1 testable dep: will be covered by their resource's bundled
-          `tests_<resource>` task under `--indirect-selection cautious`.
+          `<resource>_test` task under `--indirect-selection cautious`.
         - Tests with >1 testable deps (cross-model, e.g. `relationships`): emitted as their own
           tasks with multi-resource deps — `cautious` filters them out of bundles.
         - Tests with 0 testable deps (singular/custom tests that don't `ref()` or `source()`
           any resource): also emitted as their own tasks, since no bundle would pick them up.
 
-        A model's bundled `tests_<model>` task selects the model with `--indirect-selection
-        cautious`, which sweeps in the model's unit tests as well. Models that already have a
-        single-model data test therefore cover their unit tests for free. A model with *only*
-        unit tests is added to `single_model_tested` here so it still gets a bundled task.
+        A model's bundled test task selects the model with `--indirect-selection cautious`, which
+        sweeps in the model's unit tests as well. Models that already have a single-model data
+        test therefore cover their unit tests for free. A model with *only* unit tests is added to
+        `single_model_tested` here so it still gets a bundled task.
 
         Returns:
             (single_model_tested, standalone_tests):
                 - `single_model_tested`: full names of resources with at least one single-model
-                  test — these become `tests_<resource>` bundled tasks.
+                  test — these become bundled test tasks.
                 - `standalone_tests`: list of `(test_full_name, test_node_info)` for tests
                   that must run as individual tasks (cross-model or zero-dep).
         """
@@ -295,7 +334,8 @@ class DbtFactory:
         self,
         dbt_nodes: dict,
         bundle: bool,
-        task_keys_with_tests: set[str],
+        task_keys: dict[str, str],
+        test_key_by_resource: dict[str, str],
         tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
         ancestors_by_node: dict[str, set[str]],
     ) -> list[DbtTask]:
@@ -308,13 +348,13 @@ class DbtFactory:
             if bundle and resource_type == 'test':
                 continue
 
-            task_key = generate_task_key(node_full_name)
+            task_key = task_keys[node_full_name]
             factory = self.task_factories[resource_type]
-            task = factory.create_task(self._fqn_select(node_info), node_info['name'], node_info, task_key)
+            task = factory.create_task(self._fqn_select(node_info), node_info['name'], node_info, task_key, task_keys)
 
             if resource_type in self._GATEABLE_TYPES:
                 if bundle:
-                    task = replace(task, depends_on=self._rewire_deps(task.depends_on, task_keys_with_tests))
+                    task = replace(task, depends_on=self._rewire_deps(task.depends_on, test_key_by_resource))
                 elif tests_by_resource:
                     task = replace(
                         task,
@@ -327,26 +367,24 @@ class DbtFactory:
         return tasks
 
     @staticmethod
-    def _rewire_deps(deps: list[str] | None, task_keys_with_tests: set[str]) -> list[str]:
-        """Rewrites dependencies that point at a tested resource to its `tests_<resource>` gating task."""
-        rewired: list[str] = []
-        for dep_key in deps or []:
-            rewired.append(f"tests_{dep_key}" if dep_key in task_keys_with_tests else dep_key)
-        return rewired
+    def _rewire_deps(deps: list[str] | None, test_key_by_resource: dict[str, str]) -> list[str]:
+        """Rewrites a dependency on a tested resource to that resource's gating bundled test task."""
+        return [test_key_by_resource.get(dep_key, dep_key) for dep_key in (deps or [])]
 
     def _build_bundled_test_tasks(
         self,
         dbt_nodes: dict,
         dbt_sources: dict,
         nodes_with_tests: set[str],
+        task_keys: dict[str, str],
+        bundled_test_keys: dict[str, str],
     ) -> list[DbtTask]:
-        """Emits one `tests_<resource>` task per tested resource using `TestTaskFactory.create_bundled_task`."""
+        """Emits one bundled `<resource>_test` task per tested resource via `TestTaskFactory.create_bundled_task`."""
         test_factory = self.task_factories['test']
         tasks: list[DbtTask] = []
         for full_name in sorted(nodes_with_tests):
             is_source = full_name.startswith('source.')
             info = dbt_sources[full_name] if is_source else dbt_nodes[full_name]
-            resource_task_key = generate_task_key(full_name)
             bare_name = info['name']
             if is_source:
                 select = f"source:{info['package_name']}.{info['source_name']}.{bare_name}"
@@ -354,10 +392,10 @@ class DbtFactory:
                 select = self._fqn_select(info)
             tasks.append(
                 test_factory.create_bundled_task(
-                    task_key=f"tests_{resource_task_key}",
+                    task_key=bundled_test_keys[full_name],
                     select=select,
                     deps_command_name=bare_name,
-                    depends_on=[] if is_source else [resource_task_key],
+                    depends_on=[] if is_source else [task_keys[full_name]],
                 )
             )
         return tasks
@@ -365,6 +403,7 @@ class DbtFactory:
     def _build_standalone_test_tasks(
         self,
         standalone_tests: list[tuple[str, dict]],
+        task_keys: dict[str, str],
     ) -> list[DbtTask]:
         """
         Emits one task per standalone test — cross-model tests (e.g. `relationships`) gated on
@@ -373,18 +412,20 @@ class DbtFactory:
         test_factory = self.task_factories['test']
         tasks: list[DbtTask] = []
         for test_full_name, test_info in sorted(standalone_tests, key=lambda item: item[0]):
-            test_task_key = generate_task_key(test_full_name)
+            test_task_key = task_keys[test_full_name]
             tasks.append(
-                test_factory.create_task(self._fqn_select(test_info), test_info['name'], test_info, test_task_key)
+                test_factory.create_task(
+                    self._fqn_select(test_info), test_info['name'], test_info, test_task_key, task_keys
+                )
             )
         return tasks
 
-    def _build_unit_test_tasks(self, dbt_unit_tests: dict, dbt_nodes: dict) -> list[DbtTask]:
+    def _build_unit_test_tasks(self, dbt_unit_tests: dict, dbt_nodes: dict, task_keys: dict[str, str]) -> list[DbtTask]:
         """
         Emits one task per unit test, selected by its full FQN and gated on the model it tests.
         Unit tests whose model is absent from the manifest are skipped (their task would gate on a
-        model task that is never emitted). Used in per-test mode; in bundled mode a model's
-        `tests_<model>` task covers its unit tests via `--indirect-selection cautious`.
+        model task that is never emitted). Used in per-test mode; in bundled mode a model's bundled
+        test task covers its unit tests via `--indirect-selection cautious`.
         """
         test_factory = self.task_factories['test']
         tasks: list[DbtTask] = []
@@ -397,7 +438,8 @@ class DbtFactory:
                     self._fqn_select(unit_test_info),
                     unit_test_info['name'],
                     unit_test_info,
-                    generate_task_key(unit_test_full_name),
+                    task_keys[unit_test_full_name],
+                    task_keys,
                 )
             )
         return tasks

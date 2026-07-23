@@ -117,6 +117,8 @@ class DbtFactory:
             else []
         )
 
+        # In bundle mode, single-model tests fold into their resource's bundled task, so only
+        # standalone tests get their own key.
         task_ids = [
             full_name
             for full_name, info in dbt_nodes.items()
@@ -130,10 +132,12 @@ class DbtFactory:
         if not bundle and 'test' in self.task_factories:
             tests_by_resource = self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests, task_keys)
             ancestors = self._compute_ancestors(dbt_nodes, dbt_sources)
-        test_key_by_resource = {task_keys[fn]: bundled_test_keys[fn] for fn in single_model_tested if fn in task_keys}
+        bundled_test_key_by_task_key = {
+            task_keys[fn]: bundled_test_keys[fn] for fn in single_model_tested if fn in task_keys
+        }
 
         tasks = self._build_resource_tasks(
-            dbt_nodes, bundle, task_keys, test_key_by_resource, tests_by_resource, ancestors
+            dbt_nodes, bundle, task_keys, bundled_test_key_by_task_key, tests_by_resource, ancestors
         )
 
         if bundle:
@@ -144,15 +148,16 @@ class DbtFactory:
             )
             tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys))
         elif 'test' in self.task_factories:
-            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, dbt_nodes, task_keys))
+            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys))
 
         return tasks
 
     def _emitted_unit_test_ids(self, dbt_unit_tests: dict, dbt_nodes: dict) -> list[str]:
         """
-        Full names of the unit tests that will become their own task in per-test mode: those whose
-        target model resolves and is present in the manifest. Must stay in lockstep with the same
-        guard in `_build_unit_test_tasks` so every emitted unit-test task has a key.
+        Full names of the unit tests that become their own task in per-test mode: those whose
+        target model resolves and is present in the manifest. This is the emission decision for
+        unit tests — the returned ids enter `task_ids`, so a unit test's presence in `task_keys`
+        is how every consumer knows it was emitted.
         """
         ids: list[str] = []
         for unit_test_full_name, unit_test_info in dbt_unit_tests.items():
@@ -335,7 +340,7 @@ class DbtFactory:
         dbt_nodes: dict,
         bundle: bool,
         task_keys: dict[str, str],
-        test_key_by_resource: dict[str, str],
+        bundled_test_key_by_task_key: dict[str, str],
         tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
         ancestors_by_node: dict[str, set[str]],
     ) -> list[DbtTask]:
@@ -354,7 +359,7 @@ class DbtFactory:
 
             if resource_type in self._GATEABLE_TYPES:
                 if bundle:
-                    task = replace(task, depends_on=self._rewire_deps(task.depends_on, test_key_by_resource))
+                    task = replace(task, depends_on=self._rewire_deps(task.depends_on, bundled_test_key_by_task_key))
                 elif tests_by_resource:
                     task = replace(
                         task,
@@ -367,9 +372,9 @@ class DbtFactory:
         return tasks
 
     @staticmethod
-    def _rewire_deps(deps: list[str] | None, test_key_by_resource: dict[str, str]) -> list[str]:
+    def _rewire_deps(deps: list[str] | None, bundled_test_key_by_task_key: dict[str, str]) -> list[str]:
         """Rewrites a dependency on a tested resource to that resource's gating bundled test task."""
-        return [test_key_by_resource.get(dep_key, dep_key) for dep_key in (deps or [])]
+        return [bundled_test_key_by_task_key.get(dep_key, dep_key) for dep_key in (deps or [])]
 
     def _build_bundled_test_tasks(
         self,
@@ -420,18 +425,18 @@ class DbtFactory:
             )
         return tasks
 
-    def _build_unit_test_tasks(self, dbt_unit_tests: dict, dbt_nodes: dict, task_keys: dict[str, str]) -> list[DbtTask]:
+    def _build_unit_test_tasks(self, dbt_unit_tests: dict, task_keys: dict[str, str]) -> list[DbtTask]:
         """
         Emits one task per unit test, selected by its full FQN and gated on the model it tests.
-        Unit tests whose model is absent from the manifest are skipped (their task would gate on a
-        model task that is never emitted). Used in per-test mode; in bundled mode a model's bundled
-        test task covers its unit tests via `--indirect-selection cautious`.
+        Only unit tests that received a task key (see `_emitted_unit_test_ids`) are emitted; unit
+        tests whose target model is absent from the manifest were never keyed and are skipped, so
+        their task can't gate on a model task that is never created. Used in per-test mode; in
+        bundled mode a model's bundled test task covers its unit tests via `--indirect-selection cautious`.
         """
         test_factory = self.task_factories['test']
         tasks: list[DbtTask] = []
         for unit_test_full_name, unit_test_info in sorted(dbt_unit_tests.items()):
-            model_full_name = self._unit_test_model(unit_test_info)
-            if model_full_name is None or model_full_name not in dbt_nodes:
+            if unit_test_full_name not in task_keys:
                 continue
             tasks.append(
                 test_factory.create_task(

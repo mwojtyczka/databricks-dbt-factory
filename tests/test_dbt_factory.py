@@ -8,43 +8,53 @@ import yaml
 BASE_PATH = str(Path(__file__).resolve().parent)
 
 
-def _model(package: str, name: str, depends_on: list[str] | None = None) -> tuple[str, dict]:
+def _model(
+    package: str, name: str, depends_on: list[str] | None = None, fqn: list[str] | None = None
+) -> tuple[str, dict]:
     full_name = f"model.{package}.{name}"
     return full_name, {
         'resource_type': 'model',
         'name': name,
         'package_name': package,
+        'fqn': fqn or [package, name],
         'depends_on': {'nodes': depends_on or []},
     }
 
 
-def _test(package: str, name: str, depends_on: list[str], severity: str = 'error') -> tuple[str, dict]:
+def _test(
+    package: str, name: str, depends_on: list[str], severity: str = 'error', fqn: list[str] | None = None
+) -> tuple[str, dict]:
     full_name = f"test.{package}.{name}"
     return full_name, {
         'resource_type': 'test',
         'name': name,
         'package_name': package,
+        'fqn': fqn or [package, name],
         'depends_on': {'nodes': depends_on},
         'config': {'severity': severity},
     }
 
 
-def _seed(package: str, name: str) -> tuple[str, dict]:
+def _seed(package: str, name: str, fqn: list[str] | None = None) -> tuple[str, dict]:
     full_name = f"seed.{package}.{name}"
     return full_name, {
         'resource_type': 'seed',
         'name': name,
         'package_name': package,
+        'fqn': fqn or [package, name],
         'depends_on': {'nodes': []},
     }
 
 
-def _snapshot(package: str, name: str, depends_on: list[str] | None = None) -> tuple[str, dict]:
+def _snapshot(
+    package: str, name: str, depends_on: list[str] | None = None, fqn: list[str] | None = None
+) -> tuple[str, dict]:
     full_name = f"snapshot.{package}.{name}"
     return full_name, {
         'resource_type': 'snapshot',
         'name': name,
         'package_name': package,
+        'fqn': fqn or [package, name],
         'depends_on': {'nodes': depends_on or []},
     }
 
@@ -56,6 +66,19 @@ def _source(package: str, source_name: str, table: str) -> tuple[str, dict]:
         'name': table,
         'source_name': source_name,
         'package_name': package,
+        'fqn': [package, source_name, table],
+    }
+
+
+def _unit_test(package: str, model: str, name: str, fqn: list[str] | None = None) -> tuple[str, dict]:
+    full_name = f"unit_test.{package}.{model}.{name}"
+    return full_name, {
+        'resource_type': 'unit_test',
+        'name': name,
+        'model': model,
+        'package_name': package,
+        'fqn': fqn or [package, model, name],
+        'depends_on': {'nodes': [f"model.{package}.{model}"]},
     }
 
 
@@ -168,7 +191,7 @@ def test_flat_mode_emits_one_task_per_test_node_and_gates_downstream(dbt_factory
     assert 'tests_model_pkg_customers' not in by_key
 
     assert by_key['test_pkg_unique_customers_id']['dbt_task']['commands'] == [
-        'dbt test --select unique_customers_id --target dev'
+        'dbt test --select pkg.unique_customers_id --target dev'
     ]
     assert by_key['test_pkg_unique_customers_id']['depends_on'] == [{'task_key': 'model_pkg_customers'}]
     # orders depends on customers AND every test attached to customers
@@ -324,7 +347,7 @@ def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_fact
     cross_test_key = 'test_pkg_relationships_game_details_winner__team_city__ref_team_cities_'
     assert cross_test_key in by_key
     assert by_key[cross_test_key]['dbt_task']['commands'] == [
-        'dbt test --select relationships_game_details_winner__team_city__ref_team_cities_ --target dev'
+        'dbt test --select pkg.relationships_game_details_winner__team_city__ref_team_cities_ --target dev'
     ]
     assert {dep['task_key'] for dep in by_key[cross_test_key]['depends_on']} == {
         'model_pkg_team_cities',
@@ -352,6 +375,56 @@ def test_single_package_bundled_test_uses_qualified_select(dbt_factory_bundled):
         'dbt test --select pkg_a.customers --indirect-selection cautious --target dev'
     ]
     assert by_key['model_pkg_a_orders']['depends_on'] == [{'task_key': 'tests_model_pkg_a_customers'}]
+
+
+def test_duplicate_model_name_across_packages_selects_by_distinct_fqn(dbt_factory):
+    # Two packages define a model named `customers`. Selecting by the bare name would make both
+    # tasks run `dbt run --select customers`, executing both models from each task. The full FQN
+    # keeps each task scoped to exactly its own node.
+    nodes = dict(
+        [
+            _model('pkg_a', 'customers'),
+            _model('pkg_b', 'customers'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['model_pkg_a_customers']['dbt_task']['commands'] == ['dbt run --select pkg_a.customers --target dev']
+    assert by_key['model_pkg_b_customers']['dbt_task']['commands'] == ['dbt run --select pkg_b.customers --target dev']
+
+
+def test_model_in_subdirectory_selects_by_full_fqn_flat_mode(dbt_factory):
+    # A model in a subdirectory has fqn [pkg, sub, name]. The select must be the full dotted fqn
+    # `pkg.sub.name`, not `pkg.name` (which matches nothing).
+    nodes = dict([_model('pkg', 'stg_orders', fqn=['pkg', 'staging', 'stg_orders'])])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['model_pkg_stg_orders']['dbt_task']['commands'] == [
+        'dbt run --select pkg.staging.stg_orders --target dev'
+    ]
+
+
+def test_model_in_subdirectory_bundled_test_selects_by_full_fqn(dbt_factory_bundled):
+    # In bundled mode the `tests_<model>` select must be the model's full fqn so
+    # `dbt test --select ... --indirect-selection cautious` actually matches the subdirectory
+    # model. `pkg.stg_orders` would match no nodes and silently run zero tests.
+    nodes = dict(
+        [
+            _model('pkg', 'stg_orders', fqn=['pkg', 'staging', 'stg_orders']),
+            _test('pkg', 'unique_stg_orders_id', ['model.pkg.stg_orders']),
+        ]
+    )
+
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['tests_model_pkg_stg_orders']['dbt_task']['commands'] == [
+        'dbt test --select pkg.staging.stg_orders --indirect-selection cautious --target dev'
+    ]
 
 
 def test_create_job_spec_and_update(dbt_factory):

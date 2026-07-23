@@ -75,6 +75,18 @@ class DbtFactory:
     _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
     _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
+    @staticmethod
+    def _fqn_select(node_info: dict) -> str:
+        """
+        Returns the dbt `--select` argument for a node: its fully qualified name (fqn) joined by
+        dots. dbt matches `--select a.b.c` positionally against a node's fqn, so the full fqn is
+        unambiguous across packages (a bare name collides when two packages share it) and matches
+        models in subdirectories (a `<package>.<name>` selector does not). Falls back to the bare
+        `name` if the manifest node has no fqn.
+        """
+        fqn = node_info.get('fqn')
+        return '.'.join(fqn) if fqn else node_info['name']
+
     def _create_tasks(self, dbt_manifest: dict) -> list[DbtTask]:
         """
         Builds `DbtTask` instances from the manifest, applying the bundling and gating policies.
@@ -256,7 +268,7 @@ class DbtFactory:
 
             task_key = generate_task_key(node_full_name)
             factory = self.task_factories[resource_type]
-            task = factory.create_task(node_info['name'], node_info, task_key)
+            task = factory.create_task(self._fqn_select(node_info), node_info['name'], node_info, task_key)
 
             if resource_type in self._GATEABLE_TYPES:
                 if bundle:
@@ -294,8 +306,10 @@ class DbtFactory:
             info = dbt_sources[full_name] if is_source else dbt_nodes[full_name]
             resource_task_key = generate_task_key(full_name)
             bare_name = info['name']
-            qualified = f"{info['package_name']}.{bare_name}"
-            select = f"source:{info['package_name']}.{info['source_name']}.{bare_name}" if is_source else qualified
+            if is_source:
+                select = f"source:{info['package_name']}.{info['source_name']}.{bare_name}"
+            else:
+                select = self._fqn_select(info)
             tasks.append(
                 test_factory.create_bundled_task(
                     task_key=f"tests_{resource_task_key}",
@@ -318,5 +332,7 @@ class DbtFactory:
         tasks: list[DbtTask] = []
         for test_full_name, test_info in sorted(standalone_tests, key=lambda item: item[0]):
             test_task_key = generate_task_key(test_full_name)
-            tasks.append(test_factory.create_task(test_info['name'], test_info, test_task_key))
+            tasks.append(
+                test_factory.create_task(self._fqn_select(test_info), test_info['name'], test_info, test_task_key)
+            )
         return tasks

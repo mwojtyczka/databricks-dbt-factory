@@ -340,6 +340,14 @@ resources:
           - dbt deps --target dev
           - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_win_loss_records_losses --target dev
           source: GIT
+      - task_key: model_dbt_util_country
+        depends_on: []
+        environment_key: Default
+        dbt_task:
+          commands:
+          - dbt deps --target dev
+          - dbt run --select dbt_util.country --target dev
+          source: GIT
       - task_key: unit_test_dbt_demo_diamonds_list_colors_test_get_distinct_colors
         depends_on:
         - task_key: model_dbt_demo_diamonds_list_colors

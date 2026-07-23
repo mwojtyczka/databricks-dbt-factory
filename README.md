@@ -153,7 +153,7 @@ flowchart LR
 pip install databricks-dbt-factory
 ```
 
-> **For production, pin the version** to get reproducible builds and avoid unexpected changes from new releases, e.g. `pip install databricks-dbt-factory==0.2.1`.
+> **For production, pin the version** to get reproducible builds and avoid unexpected changes from new releases, e.g. `pip install databricks-dbt-factory==0.2.2`.
 
 # Usage
 

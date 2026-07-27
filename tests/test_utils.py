@@ -10,7 +10,7 @@ from databricks_dbt_factory.Utils import (
 
 
 def test_generate_task_key_readable_per_type():
-    assert generate_task_key('model.shop.orders') == 'orders_run'
+    assert generate_task_key('model.shop.orders') == 'orders_model'
     assert generate_task_key('seed.shop.countries') == 'countries_seed'
     assert generate_task_key('snapshot.shop.orders_snap') == 'orders_snap_snapshot'
     assert generate_task_key('test.shop.unique_orders_id.9a1') == 'unique_orders_id_test'
@@ -18,19 +18,19 @@ def test_generate_task_key_readable_per_type():
 
 
 def test_generate_task_key_keeps_model_version():
-    assert generate_task_key('model.shop.dim.v2') == 'dim_v2_run'
+    assert generate_task_key('model.shop.dim.v2') == 'dim_v2_model'
 
 
 def test_build_task_key_maps_disambiguates_collisions():
     # Same model name in two packages -> keys must differ.
     task_keys, _ = build_task_key_maps(['model.a.orders', 'model.b.orders'])
     assert task_keys['model.a.orders'] != task_keys['model.b.orders']
-    assert set(task_keys.values()) == {'a_orders_run', 'b_orders_run'}
+    assert set(task_keys.values()) == {'a_orders_model', 'b_orders_model'}
 
 
 def test_build_task_key_maps_unique_names_stay_plain():
     task_keys, _ = build_task_key_maps(['model.a.orders', 'model.a.customers'])
-    assert task_keys == {'model.a.orders': 'orders_run', 'model.a.customers': 'customers_run'}
+    assert task_keys == {'model.a.orders': 'orders_model', 'model.a.customers': 'customers_model'}
 
 
 def test_bundled_test_key():

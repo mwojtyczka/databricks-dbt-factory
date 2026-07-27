@@ -303,12 +303,12 @@ You can also check all input arguments by running `databricks_dbt_factory --help
 
 ## Task keys
 
-Each generated Databricks task gets a readable key derived from the dbt resource name plus a
-verb suffix:
+Each generated Databricks task gets a readable key derived from the dbt resource name plus the
+resource type as a suffix:
 
 | dbt node | task key |
 | --- | --- |
-| `model.my_project.customers` | `customers_run` |
+| `model.my_project.customers` | `customers_model` |
 | `seed.my_project.country_codes` | `country_codes_seed` |
 | `snapshot.my_project.orders_snap` | `orders_snap_snapshot` |
 | `test.my_project.unique_customers_id` | `unique_customers_id_test` |
@@ -316,7 +316,7 @@ verb suffix:
 
 When two nodes would produce the same key — a model name reused across packages, or the same
 custom test name on two models — the colliding keys are disambiguated with the package name or
-dbt's test hash (e.g. `pkg_a_customers_run` / `pkg_b_customers_run`). Keys are therefore always
+dbt's test hash (e.g. `pkg_a_customers_model` / `pkg_b_customers_model`). Keys are therefore always
 unique, so a valid dbt project can never fail to deploy on a duplicate task key. Keys are also
 bounded to Databricks' 100-character limit (long test names are truncated with a hash suffix).
 

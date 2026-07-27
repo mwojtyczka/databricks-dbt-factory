@@ -15,16 +15,16 @@ resources:
           dependencies:
           - dbt-databricks
       tasks:
-      - task_key: diamonds_list_colors_run
+      - task_key: diamonds_list_colors_model
         depends_on:
-        - task_key: diamonds_four_cs_run
+        - task_key: diamonds_four_cs_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
           base_parameters:
             dbt_commands: '["dbt run --select dbt_demo.sql_model1.diamonds_list_colors --target dev"]'
           source: GIT
-      - task_key: diamonds_prices_run
+      - task_key: diamonds_prices_model
         depends_on: []
         environment_key: Default
         notebook_task:
@@ -32,7 +32,7 @@ resources:
           base_parameters:
             dbt_commands: '["dbt run --select dbt_demo.sql_model1.diamonds_prices --target dev"]'
           source: GIT
-      - task_key: diamonds_four_cs_run
+      - task_key: diamonds_four_cs_model
         depends_on: []
         environment_key: Default
         notebook_task:
@@ -40,7 +40,7 @@ resources:
           base_parameters:
             dbt_commands: '["dbt run --select dbt_demo.sql_model1.diamonds_four_cs --target dev"]'
           source: GIT
-      - task_key: zzz_game_details_run
+      - task_key: zzz_game_details_model
         depends_on: []
         environment_key: Default
         notebook_task:
@@ -48,9 +48,9 @@ resources:
           base_parameters:
             dbt_commands: '["dbt run --select dbt_demo.sql_model1.zzz_game_details --target dev"]'
           source: GIT
-      - task_key: second_dbt_model_run
+      - task_key: second_dbt_model_model
         depends_on:
-        - task_key: first_dbt_model_run
+        - task_key: first_dbt_model_model
         - task_key: unique_first_dbt_model_id_test
         - task_key: not_null_first_dbt_model_id_test
         environment_key: Default
@@ -59,7 +59,7 @@ resources:
           base_parameters:
             dbt_commands: '["dbt run --select dbt_demo.sql_model2.second_dbt_model --target dev"]'
           source: GIT
-      - task_key: first_dbt_model_run
+      - task_key: first_dbt_model_model
         depends_on: []
         environment_key: Default
         notebook_task:
@@ -69,7 +69,7 @@ resources:
           source: GIT
       - task_key: zzz_game_details_check_scores_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -78,7 +78,7 @@ resources:
           source: GIT
       - task_key: zzz_game_details_check_dates_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -87,7 +87,7 @@ resources:
           source: GIT
       - task_key: zzz_win_loss_records_check_records_test
         depends_on:
-        - task_key: zzz_win_loss_records_run
+        - task_key: zzz_win_loss_records_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -96,7 +96,7 @@ resources:
           source: GIT
       - task_key: diamonds_list_colors_test_test
         depends_on:
-        - task_key: diamonds_list_colors_run
+        - task_key: diamonds_list_colors_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -113,7 +113,7 @@ resources:
           source: GIT
       - task_key: unique_zzz_game_details_game_id_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -122,7 +122,7 @@ resources:
           source: GIT
       - task_key: not_null_zzz_game_details_game_id_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -131,7 +131,7 @@ resources:
           source: GIT
       - task_key: not_null_zzz_game_details_home_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -140,7 +140,7 @@ resources:
           source: GIT
       - task_key: accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -149,7 +149,7 @@ resources:
           source: GIT
       - task_key: not_null_zzz_game_details_visitor_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -158,7 +158,7 @@ resources:
           source: GIT
       - task_key: accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -167,7 +167,7 @@ resources:
           source: GIT
       - task_key: not_null_zzz_game_details_home_score_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -176,7 +176,7 @@ resources:
           source: GIT
       - task_key: not_null_zzz_game_details_visitor_score_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -185,7 +185,7 @@ resources:
           source: GIT
       - task_key: not_null_zzz_game_details_winner_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -194,7 +194,7 @@ resources:
           source: GIT
       - task_key: accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -203,7 +203,7 @@ resources:
           source: GIT
       - task_key: not_null_zzz_game_details_date_test
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -212,7 +212,7 @@ resources:
           source: GIT
       - task_key: unique_first_dbt_model_id_test
         depends_on:
-        - task_key: first_dbt_model_run
+        - task_key: first_dbt_model_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -221,7 +221,7 @@ resources:
           source: GIT
       - task_key: not_null_first_dbt_model_id_test
         depends_on:
-        - task_key: first_dbt_model_run
+        - task_key: first_dbt_model_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -230,7 +230,7 @@ resources:
           source: GIT
       - task_key: unique_second_dbt_model_id_test
         depends_on:
-        - task_key: second_dbt_model_run
+        - task_key: second_dbt_model_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -239,7 +239,7 @@ resources:
           source: GIT
       - task_key: not_null_second_dbt_model_id_test
         depends_on:
-        - task_key: second_dbt_model_run
+        - task_key: second_dbt_model_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -248,14 +248,14 @@ resources:
           source: GIT
       - task_key: not_null_second_dbt_model_amount_usd_test
         depends_on:
-        - task_key: second_dbt_model_run
+        - task_key: second_dbt_model_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
           base_parameters:
             dbt_commands: '["dbt test --select dbt_demo.models.sql_model2.not_null_second_dbt_model_amount_usd --target dev"]'
           source: GIT
-      - task_key: changed_country_run
+      - task_key: changed_country_model
         depends_on:
         - task_key: country_snapshot_snapshot
         environment_key: Default
@@ -264,7 +264,7 @@ resources:
           base_parameters:
             dbt_commands: '["dbt run --select dbt_demo.sql_model1.changed_country --target dev"]'
           source: GIT
-      - task_key: dbt_demo_country_run
+      - task_key: dbt_demo_country_model
         depends_on:
         - task_key: country_codes_seed
         environment_key: Default
@@ -275,16 +275,16 @@ resources:
           source: GIT
       - task_key: country_snapshot_snapshot
         depends_on:
-        - task_key: dbt_demo_country_run
+        - task_key: dbt_demo_country_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
           base_parameters:
             dbt_commands: '["dbt snapshot --select dbt_demo.country_snapshot.country_snapshot --target dev"]'
           source: GIT
-      - task_key: zzz_win_loss_records_run
+      - task_key: zzz_win_loss_records_model
         depends_on:
-        - task_key: zzz_game_details_run
+        - task_key: zzz_game_details_model
         - task_key: zzz_game_details_check_scores_test
         - task_key: zzz_game_details_check_dates_test
         - task_key: unique_zzz_game_details_game_id_test
@@ -306,7 +306,7 @@ resources:
           source: GIT
       - task_key: unique_zzz_win_loss_records_team_test
         depends_on:
-        - task_key: zzz_win_loss_records_run
+        - task_key: zzz_win_loss_records_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -315,7 +315,7 @@ resources:
           source: GIT
       - task_key: not_null_zzz_win_loss_records_team_test
         depends_on:
-        - task_key: zzz_win_loss_records_run
+        - task_key: zzz_win_loss_records_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -324,7 +324,7 @@ resources:
           source: GIT
       - task_key: not_null_zzz_win_loss_records_wins_test
         depends_on:
-        - task_key: zzz_win_loss_records_run
+        - task_key: zzz_win_loss_records_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
@@ -333,14 +333,14 @@ resources:
           source: GIT
       - task_key: not_null_zzz_win_loss_records_losses_test
         depends_on:
-        - task_key: zzz_win_loss_records_run
+        - task_key: zzz_win_loss_records_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py
           base_parameters:
             dbt_commands: '["dbt test --select dbt_demo.models.sql_model1.not_null_zzz_win_loss_records_losses --target dev"]'
           source: GIT
-      - task_key: dbt_util_country_run
+      - task_key: dbt_util_country_model
         depends_on: []
         environment_key: Default
         notebook_task:
@@ -350,7 +350,7 @@ resources:
           source: GIT
       - task_key: unit_test_dbt_demo_diamonds_list_colors_test_get_distinct_colors
         depends_on:
-        - task_key: diamonds_list_colors_run
+        - task_key: diamonds_list_colors_model
         environment_key: Default
         notebook_task:
           notebook_path: ./notebooks/dbt_runner.py

@@ -5,8 +5,8 @@ from collections.abc import Iterable
 # Databricks caps task keys at 100 characters (letters, numbers, underscores, hyphens).
 MAX_TASK_KEY_LENGTH = 100
 
-# dbt resource type -> the dbt verb the task runs, used as the task-key suffix.
-_RUN_SUFFIX = {'model': 'run', 'seed': 'seed', 'snapshot': 'snapshot'}
+# dbt resource types whose task key is `<resource_name>_<type>` (the type doubles as the suffix).
+_SUFFIXED_TYPES = frozenset({'model', 'seed', 'snapshot'})
 
 
 def _resource_name(unique_id: str) -> str:
@@ -36,9 +36,9 @@ def generate_task_key(unique_id: str) -> str:
     Builds a readable Databricks task key from a dbt node `unique_id`.
 
     The key is based on the dbt resource *name* (not the fully-qualified id), so the package
-    prefix and dbt's test-name hash never appear, with a verb suffix per resource type:
+    prefix and dbt's test-name hash never appear, with the resource type as a suffix:
 
-    * `model.shop.orders`              -> `orders_run`
+    * `model.shop.orders`              -> `orders_model`
     * `seed.shop.countries`            -> `countries_seed`
     * `snapshot.shop.orders_snap`      -> `orders_snap_snapshot`
     * `test.shop.unique_orders_id.9a1` -> `unique_orders_id_test`  (hash dropped)
@@ -53,8 +53,8 @@ def generate_task_key(unique_id: str) -> str:
     parts = unique_id.split('.')
     resource_type = parts[0]
 
-    if resource_type in _RUN_SUFFIX:
-        return f'{_resource_name(unique_id)}_{_RUN_SUFFIX[resource_type]}'
+    if resource_type in _SUFFIXED_TYPES:
+        return f'{_resource_name(unique_id)}_{resource_type}'
 
     if resource_type == 'source':
         # A source only ever surfaces as a test task: source.<package>.<source_name>.<table>.
@@ -159,12 +159,12 @@ def _disambiguated_task_key(unique_id: str) -> str:
     Key for a node whose plain key collides with another node's: dbt's test hash (or the
     package name, when there is no hash) is folded in to keep the key unique yet readable,
     e.g. `test.shop.dup_check.9a1` -> `dup_check_9a1_test`, `model.pkg.orders` ->
-    `pkg_orders_run`.
+    `pkg_orders_model`.
     """
     parts = unique_id.split('.')
     resource_type = parts[0]
-    if resource_type in _RUN_SUFFIX:
-        return f'{parts[1]}_{_resource_name(unique_id)}_{_RUN_SUFFIX[resource_type]}'
+    if resource_type in _SUFFIXED_TYPES:
+        return f'{parts[1]}_{_resource_name(unique_id)}_{resource_type}'
     if resource_type == 'source':
         return _source_key(parts, with_package=True)
     if resource_type == 'test':

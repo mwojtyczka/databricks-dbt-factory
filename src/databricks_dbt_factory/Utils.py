@@ -17,6 +17,20 @@ def _resource_name(unique_id: str) -> str:
     return '_'.join(unique_id.split('.')[2:])
 
 
+def _source_key(parts: list[str], with_package: bool) -> str:
+    """
+    Test-task key for a source (`source.<package>.<source_name>.<table>`): `<source_name>_<table>_test`,
+    package-prefixed (`<package>_<source_name>_<table>_test`) when disambiguating a collision.
+    """
+    prefix = f'{parts[1]}_' if with_package else ''
+    return f'{prefix}{parts[2]}_{parts[3]}_test'
+
+
+def _sanitized_id(unique_id: str) -> str:
+    """Fallback key for an unhandled resource type: the sanitized `unique_id` (dots -> underscores)."""
+    return unique_id.replace('.', '_')
+
+
 def generate_task_key(unique_id: str) -> str:
     """
     Builds a readable Databricks task key from a dbt node `unique_id`.
@@ -44,7 +58,7 @@ def generate_task_key(unique_id: str) -> str:
 
     if resource_type == 'source':
         # A source only ever surfaces as a test task: source.<package>.<source_name>.<table>.
-        return f'{parts[2]}_{parts[3]}_test'
+        return _source_key(parts, with_package=False)
 
     if resource_type == 'test':
         # test.<package>.<test_name>[.<hash>] -> <test_name>_test (drop dbt's uniqueness hash).
@@ -52,7 +66,7 @@ def generate_task_key(unique_id: str) -> str:
         return _bounded_test_key(parts[2], test_hash)
 
     # Unknown type: fall back to the sanitized id (still unique).
-    return unique_id.replace('.', '_')
+    return _sanitized_id(unique_id)
 
 
 def bundled_test_key(unique_id: str) -> str:
@@ -62,7 +76,7 @@ def bundled_test_key(unique_id: str) -> str:
     """
     parts = unique_id.split('.')
     if parts[0] == 'source':
-        return f'{parts[2]}_{parts[3]}_test'
+        return _source_key(parts, with_package=False)
     return f'{_resource_name(unique_id)}_test'
 
 
@@ -152,19 +166,19 @@ def _disambiguated_task_key(unique_id: str) -> str:
     if resource_type in _RUN_SUFFIX:
         return f'{parts[1]}_{_resource_name(unique_id)}_{_RUN_SUFFIX[resource_type]}'
     if resource_type == 'source':
-        return f'{parts[1]}_{parts[2]}_{parts[3]}_test'
+        return _source_key(parts, with_package=True)
     if resource_type == 'test':
         if len(parts) > 3:
             return _hashed_test_key(parts[2], parts[3])
         return f'{parts[1]}_{parts[2]}_test'
-    return unique_id.replace('.', '_')
+    return _sanitized_id(unique_id)
 
 
 def _disambiguated_bundled_test_key(unique_id: str) -> str:
     """Package-prefixed variant of `bundled_test_key`, for contested bundled test keys."""
     parts = unique_id.split('.')
     if parts[0] == 'source':
-        return f'{parts[1]}_{parts[2]}_{parts[3]}_test'
+        return _source_key(parts, with_package=True)
     return f'{parts[1]}_{_resource_name(unique_id)}_test'
 
 

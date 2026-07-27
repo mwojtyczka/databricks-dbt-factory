@@ -31,8 +31,13 @@ class DbtDependencyResolver:
         deps = node_info.get("depends_on", {}).get("nodes", [])
         resolved_deps = []
         for node_full_name in deps:
-            if any(node_full_name.startswith(dbt_type + ".") for dbt_type in valid_deps_types):
-                resolved_deps.append(task_keys[node_full_name])
+            if not any(node_full_name.startswith(dbt_type + ".") for dbt_type in valid_deps_types):
+                continue
+            # A dep without its own task key is a single-model test folded into a bundled test
+            # task; downstream gating on it is handled by `_rewire_deps`.
+            task_key = task_keys.get(node_full_name)
+            if task_key is not None:
+                resolved_deps.append(task_key)
         return resolved_deps
 
 

@@ -115,6 +115,24 @@ def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(db
     }
 
 
+def test_bundle_mode_model_depending_on_single_model_test_does_not_raise(dbt_factory_bundled):
+    # In bundle mode, single-model test nodes fold into their resource's bundled task and get no
+    # task key of their own. A model that lists such a test in its `depends_on` drops that unkeyed
+    # dep during resolution.
+    nodes = dict(
+        [
+            _model('pkg', 'customers'),
+            _test('pkg', 'unique_customers_id', ['model.pkg.customers']),
+            _model('pkg', 'orders', depends_on=['test.pkg.unique_customers_id']),
+        ]
+    )
+
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_run']['depends_on'] == []
+
+
 def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory_bundled):
     nodes = dict(
         [
@@ -395,6 +413,23 @@ def test_duplicate_model_name_across_packages_selects_by_distinct_fqn(dbt_factor
 
     assert by_key['pkg_a_customers_run']['dbt_task']['commands'] == ['dbt run --select pkg_a.customers --target dev']
     assert by_key['pkg_b_customers_run']['dbt_task']['commands'] == ['dbt run --select pkg_b.customers --target dev']
+
+
+def test_flat_mode_downstream_dep_rewired_to_disambiguated_collided_key(dbt_factory):
+    # A downstream model depending on one of two same-named (collided) models gates on the
+    # disambiguated key `pkg_a_customers_run`. A plain `customers_run` here would be a dangling dep.
+    nodes = dict(
+        [
+            _model('pkg_a', 'customers'),
+            _model('pkg_b', 'customers'),
+            _model('pkg', 'orders', depends_on=['model.pkg_a.customers']),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_run']['depends_on'] == [{'task_key': 'pkg_a_customers_run'}]
 
 
 def test_model_in_subdirectory_selects_by_full_fqn_flat_mode(dbt_factory):

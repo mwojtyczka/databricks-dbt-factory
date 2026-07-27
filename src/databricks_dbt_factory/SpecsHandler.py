@@ -8,19 +8,7 @@ class SpecsHandler:
 
     @staticmethod
     def read_dbt_manifest(path: str) -> dict:
-        """
-        Reads a JSON manifest file and returns its content as a dictionary.
-
-        Args:
-            path (str): Path to the manifest file.
-
-        Returns:
-            dict: Parsed content of the manifest file.
-
-        Raises:
-            FileNotFoundError: If the file does not exist.
-            ValueError: If the file is not a valid manifest file.
-        """
+        """Reads the dbt manifest at `path`; see `Utils.read_dbt_manifest` for details."""
         return read_dbt_manifest(path)
 
     @staticmethod

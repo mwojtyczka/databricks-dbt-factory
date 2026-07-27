@@ -134,12 +134,9 @@ class DbtFactory:
         if not bundle and 'test' in self.task_factories:
             tests_by_resource = self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests, task_keys)
             ancestors = self._compute_ancestors(dbt_nodes, dbt_sources)
-        bundled_test_key_by_task_key = {
-            task_keys[fn]: bundled_test_keys[fn] for fn in single_model_tested if fn in task_keys
-        }
 
         tasks = self._build_resource_tasks(
-            dbt_nodes, bundle, task_keys, bundled_test_key_by_task_key, tests_by_resource, ancestors
+            dbt_nodes, bundle, task_keys, bundled_test_keys, tests_by_resource, ancestors
         )
 
         if bundle:
@@ -223,7 +220,8 @@ class DbtFactory:
                 continue
             if self._test_severity(node_info) != 'error':
                 continue
-            self._index_test(index, task_keys[node_full_name], node_info, dbt_nodes, dbt_sources)
+            if node_full_name in task_keys:
+                self._index_test(index, task_keys[node_full_name], node_info, dbt_nodes, dbt_sources)
 
         for unit_test_full_name, unit_test_info in dbt_unit_tests.items():
             if unit_test_full_name in task_keys:
@@ -342,11 +340,15 @@ class DbtFactory:
         dbt_nodes: dict,
         bundle: bool,
         task_keys: dict[str, str],
-        bundled_test_key_by_task_key: dict[str, str],
+        bundled_test_keys: dict[str, str],
         tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
         ancestors_by_node: dict[str, set[str]],
     ) -> list[DbtTask]:
         """Builds tasks for every non-test resource (plus per-test tasks when not bundling)."""
+        # Maps a tested resource's task key (what `depends_on` holds) to its gating bundled test
+        # task key, for rewiring in bundle mode. Sources have a bundled test key but no run task,
+        # so they are absent from `task_keys` and skipped.
+        bundled_test_key_by_task_key = {task_keys[fn]: key for fn, key in bundled_test_keys.items() if fn in task_keys}
         tasks: list[DbtTask] = []
         for node_full_name, node_info in dbt_nodes.items():
             resource_type = node_info['resource_type']

@@ -117,15 +117,10 @@ class DbtFactory:
             else []
         )
 
-        # In bundle mode, single-model tests fold into their resource's bundled task, so only
-        # standalone tests get their own key.
         task_ids = []
         for full_name, info in dbt_nodes.items():
-            if info['resource_type'] not in self.task_factories:
-                continue
-            if bundle and info['resource_type'] == 'test' and full_name not in standalone_test_ids:
-                continue
-            task_ids.append(full_name)
+            if self._node_gets_own_task(full_name, info, bundle, standalone_test_ids):
+                task_ids.append(full_name)
         task_ids += unit_test_ids
         task_keys, bundled_test_keys = build_task_key_maps(task_ids, sorted(single_model_tested))
 
@@ -150,6 +145,20 @@ class DbtFactory:
             tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys))
 
         return tasks
+
+    def _node_gets_own_task(self, full_name: str, node_info: dict, bundle: bool, standalone_test_ids: set[str]) -> bool:
+        """
+        Whether a `dbt_nodes` entry becomes its own task (and so receives a task key). True for any
+        resource type with a factory, except single-model test nodes in bundle mode — those fold
+        into their resource's bundled test task. The single authority for this decision, so the
+        task-key map and the task-building loops stay in agreement.
+        """
+        resource_type = node_info['resource_type']
+        if resource_type not in self.task_factories:
+            return False
+        if bundle and resource_type == 'test' and full_name not in standalone_test_ids:
+            return False
+        return True
 
     def _emitted_unit_test_ids(self, dbt_unit_tests: dict, dbt_nodes: dict) -> list[str]:
         """
@@ -351,12 +360,13 @@ class DbtFactory:
         bundled_test_key_by_task_key = {task_keys[fn]: key for fn, key in bundled_test_keys.items() if fn in task_keys}
         tasks: list[DbtTask] = []
         for node_full_name, node_info in dbt_nodes.items():
-            resource_type = node_info['resource_type']
-            if resource_type not in self.task_factories:
+            if node_full_name not in task_keys:
                 continue
-            if bundle and resource_type == 'test':
+            if bundle and node_info['resource_type'] == 'test':
+                # Standalone tests are keyed but built by `_build_standalone_test_tasks`, not here.
                 continue
 
+            resource_type = node_info['resource_type']
             task_key = task_keys[node_full_name]
             factory = self.task_factories[resource_type]
             task = factory.create_task(self._fqn_select(node_info), node_info['name'], node_info, task_key, task_keys)

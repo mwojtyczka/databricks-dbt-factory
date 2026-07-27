@@ -31,6 +31,24 @@ def _sanitized_id(unique_id: str) -> str:
     return unique_id.replace('.', '_')
 
 
+# Minimum dot-separated segment count required to build a key for each resource type. dbt ids are
+# `<type>.<package>.<name>[...]`; sources are `source.<package>.<source_name>.<table>`.
+_MIN_SEGMENTS = {'model': 3, 'seed': 3, 'snapshot': 3, 'test': 3, 'source': 4}
+
+
+def _split_unique_id(unique_id: str) -> list[str]:
+    """
+    Splits a dbt node `unique_id` into its dot-separated parts, validating it has enough segments
+    for its resource type. Raises `ValueError` with a clear message on a malformed id (e.g. a
+    name-less `model.pkg`, or a source missing its table).
+    """
+    parts = unique_id.split('.')
+    minimum = _MIN_SEGMENTS.get(parts[0])
+    if minimum is not None and len(parts) < minimum:
+        raise ValueError(f'Malformed dbt node id {unique_id!r}: expected at least {minimum} dot-separated segments.')
+    return parts
+
+
 def generate_task_key(unique_id: str) -> str:
     """
     Builds a readable Databricks task key from a dbt node `unique_id`.
@@ -50,7 +68,7 @@ def generate_task_key(unique_id: str) -> str:
     collisions. Over-long test keys are truncated and disambiguated with dbt's hash to stay
     within the task-key length limit.
     """
-    parts = unique_id.split('.')
+    parts = _split_unique_id(unique_id)
     resource_type = parts[0]
 
     if resource_type in _SUFFIXED_TYPES:
@@ -74,7 +92,7 @@ def bundled_test_key(unique_id: str) -> str:
     Key for the single `dbt test` task that gates a tested resource in bundled mode:
     `model.shop.orders` -> `orders_test`; `source.shop.raw.customers` -> `raw_customers_test`.
     """
-    parts = unique_id.split('.')
+    parts = _split_unique_id(unique_id)
     if parts[0] == 'source':
         return _source_key(parts, with_package=False)
     return f'{_resource_name(unique_id)}_test'
@@ -150,7 +168,7 @@ def _bounded(key: str) -> str:
     """
     if len(key) <= MAX_TASK_KEY_LENGTH:
         return key
-    digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:8]
+    digest = hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]
     return f'{key[: MAX_TASK_KEY_LENGTH - len(digest) - 1]}_{digest}'
 
 

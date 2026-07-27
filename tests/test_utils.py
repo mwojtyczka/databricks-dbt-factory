@@ -57,6 +57,27 @@ def test_build_task_key_maps_disambiguates_tests_via_hash():
     assert task_keys['test.b.dup_check.7f2'] == 'dup_check_7f2_test'
 
 
+def test_build_task_key_maps_numeric_suffix_when_disambiguated_key_collides():
+    # `model.a.orders`'s plain key `orders_model` collides with `model.pkg.orders`, so it takes the
+    # package-prefixed `a_orders_model` — which in turn collides with `model.pkg.a_orders`'s plain
+    # key. The final guard appends `_2` to keep every key unique.
+    task_keys, _ = build_task_key_maps(['model.pkg.a_orders', 'model.a.orders', 'model.c.orders'])
+    assert task_keys['model.pkg.a_orders'] == 'a_orders_model'
+    assert task_keys['model.a.orders'] == 'a_orders_model_2'
+    assert task_keys['model.c.orders'] == 'c_orders_model'
+    assert len(set(task_keys.values())) == 3
+
+
+def test_generate_task_key_rejects_malformed_id_missing_name():
+    with pytest.raises(ValueError):
+        generate_task_key('model.pkg')
+
+
+def test_generate_task_key_rejects_source_id_missing_table():
+    with pytest.raises(ValueError):
+        generate_task_key('source.pkg.raw')
+
+
 def test_build_task_key_maps_disambiguates_bundled_test_collisions():
     _, bundled_test_keys = build_task_key_maps([], bundled_test_ids=['model.a.orders', 'model.b.orders'])
     assert bundled_test_keys['model.a.orders'] != bundled_test_keys['model.b.orders']

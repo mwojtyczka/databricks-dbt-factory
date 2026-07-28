@@ -5,7 +5,8 @@ from importlib import resources
 from pathlib import Path
 
 from databricks_dbt_factory.DbtFactory import DbtFactory
-from databricks_dbt_factory.SpecsHandler import SpecsHandler
+from databricks_dbt_factory.SpecsHandler import replace_tasks_in_job_spec
+from databricks_dbt_factory.Utils import read_dbt_manifest
 from databricks_dbt_factory.DbtTask import DbtTaskOptions
 from databricks_dbt_factory.TaskFactory import (
     ModelTaskFactory,
@@ -21,7 +22,6 @@ _RUNNER_NOTEBOOK_FILENAME = "run_dbt_command.py"
 def main():
     args = parse_args()
 
-    file_handler = SpecsHandler()
     resolver = DbtDependencyResolver()
 
     dbt_options = build_dbt_options(args)
@@ -64,10 +64,13 @@ def main():
     if args.run_tests:
         task_factories['test'] = TestTaskFactory(resolver, task_options, dbt_options)
 
-    factory = DbtFactory(file_handler, task_factories, bundle_tests=args.bundle_tests)
-    factory.create_tasks_and_update_job_spec(
-        args.dbt_manifest_path, args.input_job_spec_path, args.target_job_spec_path, args.new_job_name, args.dry_run
-    )
+    factory = DbtFactory(task_factories, bundle_tests=args.bundle_tests)
+    manifest = read_dbt_manifest(args.dbt_manifest_path)
+    tasks = factory.create_tasks(manifest)
+    if args.dry_run:
+        print(tasks)
+    else:
+        replace_tasks_in_job_spec(args.input_job_spec_path, tasks, args.target_job_spec_path, args.new_job_name)
 
 
 def _copy_runner_notebook(target_job_spec_path: str, project_directory: str | None) -> tuple[str, bool]:

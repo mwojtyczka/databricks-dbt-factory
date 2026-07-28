@@ -46,6 +46,30 @@ def test_main_given_default_args(monkeypatch):
             os.remove(target_job_spec_path)
 
 
+def test_main_dry_run_prints_tasks_and_writes_nothing(monkeypatch, capsys, tmp_path):
+    """--dry-run prints the generated tasks and does not write the target job spec."""
+    target_job_spec_path = tmp_path / "out.yaml"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target_job_spec_path),
+            "--dry-run",
+        ],
+    )
+
+    main()
+
+    assert not target_job_spec_path.exists()
+    assert "task_key" in capsys.readouterr().out
+
+
 def test_main_notebook_mode_auto_copies_runner_notebook_next_to_spec(monkeypatch, tmp_path):
     """Without --project-directory, the factory copies the runner notebook next to the
     generated job spec and emits `notebook_path: ./run_dbt_command.py`."""

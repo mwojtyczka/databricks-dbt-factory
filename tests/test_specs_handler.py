@@ -21,6 +21,13 @@ def test_replace_tasks_raises_keyerror_when_resources_missing(tmp_path):
         replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"))
 
 
+def test_replace_tasks_raises_keyerror_when_resources_null(tmp_path):
+    # `resources:` with a null value: the read chain must not raise AttributeError.
+    spec = _write(tmp_path / "in.yaml", {"resources": None})
+    with pytest.raises(KeyError):
+        replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"))
+
+
 def test_replace_tasks_writes_tasks_into_first_job(tmp_path):
     spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {"my_job": {"tasks": []}}}})
     target = tmp_path / "out.yaml"

@@ -21,7 +21,7 @@ def replace_tasks_in_job_spec(
     with open(input_job_spec_path, 'r', encoding="utf-8") as file:
         job_definition = yaml.safe_load(file)
 
-    jobs = job_definition.get('resources', {}).get('jobs', {})
+    jobs = (job_definition.get('resources') or {}).get('jobs')
 
     if not jobs:
         raise KeyError("No jobs found in the provided YAML file.")

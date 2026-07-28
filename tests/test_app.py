@@ -46,8 +46,10 @@ def test_main_given_default_args(monkeypatch):
             os.remove(target_job_spec_path)
 
 
-def test_main_dry_run_prints_tasks_and_writes_nothing(monkeypatch, capsys, tmp_path):
-    """--dry-run prints the generated tasks and does not write the target job spec."""
+@pytest.mark.parametrize("task_type", ["dbt", "notebook"])
+def test_main_dry_run_prints_tasks_and_writes_nothing(monkeypatch, capsys, tmp_path, task_type):
+    """--dry-run prints the generated tasks and writes nothing — not the spec, nor (in notebook
+    mode) the runner notebook that a real run copies next to it."""
     target_job_spec_path = tmp_path / "out.yaml"
 
     monkeypatch.setattr(
@@ -60,14 +62,16 @@ def test_main_dry_run_prints_tasks_and_writes_nothing(monkeypatch, capsys, tmp_p
             BASE_PATH + "/test_data/job_definition_template.yaml",
             "--target-job-spec-path",
             str(target_job_spec_path),
+            "--task-type",
+            task_type,
             "--dry-run",
         ],
     )
 
     main()
 
-    assert not target_job_spec_path.exists()
     assert "task_key" in capsys.readouterr().out
+    assert not list(tmp_path.iterdir())
 
 
 def test_main_notebook_mode_auto_copies_runner_notebook_next_to_spec(monkeypatch, tmp_path):

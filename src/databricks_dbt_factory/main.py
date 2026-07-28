@@ -33,7 +33,7 @@ def main():
     effective_project_directory = args.project_directory
     if args.task_type == "notebook" and notebook_path is None:
         notebook_path, notebook_at_project_root = _copy_runner_notebook(
-            args.target_job_spec_path, args.project_directory
+            args.target_job_spec_path, args.project_directory, write=not args.dry_run
         )
         # If the runner landed at the project root, CWD at task runtime already equals the
         # project root. Pass `.` explicitly so the generated spec is self-documenting (and
@@ -73,7 +73,9 @@ def main():
         replace_tasks_in_job_spec(args.input_job_spec_path, tasks, args.target_job_spec_path, args.new_job_name)
 
 
-def _copy_runner_notebook(target_job_spec_path: str, project_directory: str | None) -> tuple[str, bool]:
+def _copy_runner_notebook(
+    target_job_spec_path: str, project_directory: str | None, write: bool = True
+) -> tuple[str, bool]:
     """
     Copies the packaged dbt runner notebook into the bundle so `databricks bundle deploy`
     uploads it automatically.
@@ -86,6 +88,9 @@ def _copy_runner_notebook(target_job_spec_path: str, project_directory: str | No
     When `project_directory` is absolute (typical for `--source WORKSPACE` with a pinned
     workspace path we can't write to from local CLI) or missing, falls back to copying the
     notebook next to the generated job spec.
+
+    When `write` is False, computes the paths without writing the file (used for `--dry-run`,
+    which must not touch the filesystem).
 
     Returns `(notebook_path, notebook_at_project_root)`:
     - `notebook_path`: relative path from the spec's directory to the copied notebook,
@@ -106,9 +111,10 @@ def _copy_runner_notebook(target_job_spec_path: str, project_directory: str | No
         dest_dir = spec_dir
 
     dest = dest_dir / _RUNNER_NOTEBOOK_FILENAME
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    with resources.as_file(source) as src_path:
-        shutil.copyfile(src_path, dest)
+    if write:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        with resources.as_file(source) as src_path:
+            shutil.copyfile(src_path, dest)
 
     relative = Path(os.path.relpath(dest, start=spec_dir)).as_posix()
     notebook_path = relative if relative.startswith("..") else f"./{relative}"

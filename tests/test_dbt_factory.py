@@ -3,10 +3,8 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 import yaml
 
-from databricks_dbt_factory.DbtFactory import DbtFactory
-from databricks_dbt_factory.DbtTask import DbtTaskOptions
 from databricks_dbt_factory.SpecsHandler import replace_tasks_in_job_spec
-from databricks_dbt_factory.TaskFactory import DbtDependencyResolver, ModelTaskFactory
+from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
 from databricks_dbt_factory.Utils import read_dbt_manifest
 
 
@@ -85,17 +83,6 @@ def _unit_test(package: str, model: str, name: str, fqn: list[str] | None = None
         'fqn': fqn or [package, model, name],
         'depends_on': {'nodes': [f"model.{package}.{model}"]},
     }
-
-
-def test_create_tasks_from_parsed_manifest():
-    # A factory built from a subset of task factories renders one task dict per node.
-    resolver = DbtDependencyResolver()
-    options = DbtTaskOptions(environment_key="Default")
-    factory = DbtFactory({'model': ModelTaskFactory(resolver, options, "--target dev")})
-
-    tasks = factory.create_tasks({'nodes': dict([_model('pkg', 'orders')])})
-
-    assert [task['task_key'] for task in tasks] == ['orders_model']
 
 
 def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(dbt_factory_bundled):

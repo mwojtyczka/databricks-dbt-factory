@@ -11,13 +11,16 @@ implement the full dbt selector grammar (set intersections with commas, ``method
 manifest-only approach.
 
 After selecting the matching resource nodes, the manifest is rewritten so it stays
-internally consistent: only the selected nodes (plus the tests/unit-tests that reference
-them) are kept, and every kept node's ``depends_on`` is pruned to the surviving set. This
-mirrors dbt, where unselected upstream models simply are not built as part of the run.
+internally consistent: only the selected nodes (plus the sources and tests/unit-tests that
+reference them) are kept, and every kept node's ``depends_on`` is pruned to the surviving
+set. This mirrors dbt, where unselected upstream models simply are not built as part of the
+run.
 """
 
+from databricks_dbt_factory.Utils import SELECTABLE_TYPES, unit_test_model
+
 # Resource types the factory turns into resource tasks and that a selector targets directly.
-_SELECTABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
+_SELECTABLE_TYPES = SELECTABLE_TYPES
 
 
 class ManifestFilter:
@@ -25,6 +28,11 @@ class ManifestFilter:
 
     def __init__(self, select: str):
         self._selectors = select.split()
+        if not self._selectors:
+            raise ValueError(
+                f'Empty --select expression {select!r}: expected at least one selector '
+                '(e.g. "tag:daily", "+my_model", "path:models/staging").'
+            )
 
     def apply(self, manifest: dict) -> dict:
         """Returns a shallow-rewritten copy of ``manifest`` scoped to the selection.
@@ -34,39 +42,63 @@ class ManifestFilter:
         only reads those three).
         """
         nodes = manifest.get('nodes', {})
+        sources = manifest.get('sources', {})
         unit_tests = manifest.get('unit_tests', {})
 
         selectable = {uid: info for uid, info in nodes.items() if info.get('resource_type') in _SELECTABLE_TYPES}
         selected = self._select_nodes(selectable, manifest)
 
+        # A source survives only if a selected model/seed/snapshot depends on it. This scopes
+        # sources (and their tests) to the selection, so a scoped job never emits
+        # `<source>_test` tasks for sources belonging to a deselected domain.
+        surviving_sources = self._sources_reachable_from(selected, nodes, sources)
+
         kept_nodes = {}
         for uid, info in nodes.items():
-            kept = self._keep_node(uid, info, selected)
+            kept = self._keep_node(uid, info, selected, surviving_sources)
             if kept is not None:
                 kept_nodes[uid] = kept
 
-        kept_unit_tests = {uid: info for uid, info in unit_tests.items() if self._unit_test_model(info) in selected}
+        kept_sources = {uid: info for uid, info in sources.items() if uid in surviving_sources}
+
+        kept_unit_tests = {uid: info for uid, info in unit_tests.items() if unit_test_model(info) in selected}
 
         filtered = dict(manifest)
         filtered['nodes'] = kept_nodes
+        filtered['sources'] = kept_sources
         filtered['unit_tests'] = kept_unit_tests
         return filtered
 
-    def _keep_node(self, uid: str, info: dict, selected: set[str]) -> dict | None:
+    def _keep_node(self, uid: str, info: dict, selected: set[str], surviving_sources: set[str]) -> dict | None:
         """Decides whether a manifest node survives the selection, returning the (possibly
         dep-pruned) node to keep or None to drop it.
 
         - Selectable resources (model/seed/snapshot) are kept iff selected, with deps pruned.
-        - Tests are kept only if every resource they reference survived, so a test never gates
-          on a node that is no longer generated.
+        - Tests are kept only if every resource they reference survived: model/seed/snapshot
+          refs must be selected, and source refs must be reachable from the selection. This
+          keeps a test from gating on a node that is no longer generated, and drops a
+          source-only test whose source belongs to a deselected domain.
         - Any other node type is dropped (the factory does not turn it into a task).
         """
         resource_type = info.get('resource_type')
         if resource_type in _SELECTABLE_TYPES:
             return self._prune_deps(info, selected) if uid in selected else None
         if resource_type == 'test':
-            return info if self._refs_within(info, selected) else None
+            return info if self._refs_within(info, selected, surviving_sources) else None
         return None
+
+    @staticmethod
+    def _sources_reachable_from(selected: set[str], nodes: dict, sources: dict) -> set[str]:
+        """Full names of sources that a selected model/seed/snapshot directly depends on."""
+        reachable: set[str] = set()
+        for uid in selected:
+            info = nodes.get(uid)
+            if info is None:
+                continue
+            for dep in info.get('depends_on', {}).get('nodes', []):
+                if dep.startswith('source.') and dep in sources:
+                    reachable.add(dep)
+        return reachable
 
     def _select_nodes(self, selectable: dict, manifest: dict) -> set[str]:
         """Resolves the selector expression to the set of matching selectable node ids."""
@@ -79,7 +111,7 @@ class ManifestFilter:
     def _strip_operators(raw: str) -> tuple[str, bool, bool]:
         """Splits graph operators off a selector, returning (spec, want_ancestors, want_descendants)."""
         if raw.startswith('@'):
-            # `@x` selects x, its descendants, and the ancestors of those descendants.
+            # `@x` selects x, its descendants, and the ancestors of x and those descendants.
             return raw[1:], True, True
         want_ancestors = raw.startswith('+')
         spec = raw[1:] if want_ancestors else raw
@@ -88,15 +120,21 @@ class ManifestFilter:
         return spec, want_ancestors, want_descendants
 
     def _select_one(self, raw: str, selectable: dict, manifest: dict) -> set[str]:
+        at_operator = raw.startswith('@')
         spec, want_ancestors, want_descendants = self._strip_operators(raw)
 
         matched = {uid for uid, info in selectable.items() if self._matches(spec, info)}
 
         result = set(matched)
-        if want_ancestors:
-            result |= self._walk(matched, manifest.get('parent_map', {}), selectable)
+        descendants: set[str] = set()
         if want_descendants:
-            result |= self._walk(matched, manifest.get('child_map', {}), selectable)
+            descendants = self._walk(matched, manifest.get('child_map', {}), selectable)
+            result |= descendants
+        if want_ancestors:
+            # `@x` walks ancestors of x *and its descendants* (dbt semantics); plain `+x`
+            # walks only x's ancestors.
+            ancestor_seeds = matched | descendants if at_operator else matched
+            result |= self._walk(ancestor_seeds, manifest.get('parent_map', {}), selectable)
         return result
 
     @staticmethod
@@ -155,17 +193,18 @@ class ManifestFilter:
         return new_info
 
     @staticmethod
-    def _refs_within(test_info: dict, selected: set[str]) -> bool:
-        """Whether every selectable resource a test references is in the selected set."""
+    def _refs_within(test_info: dict, selected: set[str], surviving_sources: set[str]) -> bool:
+        """Whether every resource a test references survived the selection.
+
+        A model/seed/snapshot ref must be in ``selected``; a source ref must be in
+        ``surviving_sources`` (i.e. reachable from a selected node). A test with a ref to a
+        deselected node — of either kind — is dropped so it never gates on, or drags in, a
+        resource that is no longer part of the scoped job.
+        """
+        selectable_prefixes = tuple(t + '.' for t in _SELECTABLE_TYPES)
         for dep in test_info.get('depends_on', {}).get('nodes', []):
-            if dep.startswith(tuple(t + '.' for t in _SELECTABLE_TYPES)) and dep not in selected:
+            if dep.startswith(selectable_prefixes) and dep not in selected:
+                return False
+            if dep.startswith('source.') and dep not in surviving_sources:
                 return False
         return True
-
-    @staticmethod
-    def _unit_test_model(unit_test_info: dict) -> str | None:
-        model = unit_test_info.get('model')
-        package = unit_test_info.get('package_name')
-        if model and package:
-            return f"model.{package}.{model}"
-        return None

@@ -1,4 +1,16 @@
+import pytest
+
 from databricks_dbt_factory.ManifestFilter import ManifestFilter
+
+
+def _source(package, source_name, table):
+    full = f"source.{package}.{source_name}.{table}"
+    return full, {
+        'resource_type': 'source',
+        'name': table,
+        'package_name': package,
+        'source_name': source_name,
+    }
 
 
 def _model(package, name, *, fqn=None, tags=None, path=None, depends_on=None):
@@ -38,10 +50,10 @@ def _unit_test(package, model, name):
     }
 
 
-def _manifest(nodes, unit_tests=None, parent_map=None, child_map=None):
+def _manifest(nodes, unit_tests=None, parent_map=None, child_map=None, sources=None):
     return {
         'nodes': dict(nodes),
-        'sources': {},
+        'sources': dict(sources or {}),
         'unit_tests': dict(unit_tests or {}),
         'parent_map': parent_map or {},
         'child_map': child_map or {},
@@ -95,6 +107,21 @@ def test_path_selector_matches_directory_prefix():
     assert _model_keys(filtered) == {'model.pkg.stg_orders', 'model.pkg.stg_users'}
 
 
+def test_path_selector_matches_from_start_of_path_not_a_middle_segment():
+    # `path:` is matched as a prefix of the node's full file path. A bare mid-path segment
+    # like `path:staging` (where the file lives at `models/staging/...`) matches nothing,
+    # unlike dbt which matches any path component. Callers must use the full prefix
+    # `path:models/staging`.
+    manifest = _manifest(
+        [
+            _model('pkg', 'stg_orders', path='models/staging/stg_orders.sql'),
+            _model('pkg', 'stg_users', path='models/staging/stg_users.sql'),
+        ]
+    )
+
+    assert _model_keys(ManifestFilter('path:staging').apply(manifest)) == set()
+
+
 def test_bare_name_and_fqn_selectors():
     manifest = _manifest([_model('pkg', 'orders', fqn=['pkg', 'staging', 'orders']), _model('pkg', 'users')])
 
@@ -102,6 +129,15 @@ def test_bare_name_and_fqn_selectors():
     assert _model_keys(ManifestFilter('pkg.staging.orders').apply(manifest)) == {'model.pkg.orders'}
     # fqn path prefix selects the subtree
     assert _model_keys(ManifestFilter('pkg.staging').apply(manifest)) == {'model.pkg.orders'}
+
+
+def test_explicit_fqn_prefix_selector():
+    # The `fqn:` prefix is stripped and the remainder matched against the dotted fqn (full or
+    # path prefix), same as a bare selector — it just states the method explicitly.
+    manifest = _manifest([_model('pkg', 'orders', fqn=['pkg', 'staging', 'orders']), _model('pkg', 'users')])
+
+    assert _model_keys(ManifestFilter('fqn:pkg.staging.orders').apply(manifest)) == {'model.pkg.orders'}
+    assert _model_keys(ManifestFilter('fqn:pkg.staging').apply(manifest)) == {'model.pkg.orders'}
 
 
 def test_space_separated_selectors_are_unioned():
@@ -200,3 +236,69 @@ def test_no_match_yields_empty_selection():
 
     assert _model_keys(filtered) == set()
     assert not filtered['nodes']
+
+
+@pytest.mark.parametrize('select', ['', '   ', '\t\n'])
+def test_empty_selector_expression_is_rejected(select):
+    # A whitespace-only --select would otherwise silently select nothing and overwrite the job
+    # spec with an empty task list; fail loudly instead.
+    with pytest.raises(ValueError, match='Empty --select expression'):
+        ManifestFilter(select)
+
+
+def test_at_operator_includes_ancestors_of_descendants():
+    # Graph:  a -> b -> c ,  x -> c   (x feeds c, a descendant of b, but is not upstream of b)
+    # `@b` = b + descendants(b)={c} + ancestors of {b, c} = {a, x}. Plain `+b` would omit x.
+    manifest = _manifest(
+        [
+            _model('pkg', 'a'),
+            _model('pkg', 'x'),
+            _model('pkg', 'b', depends_on=['model.pkg.a']),
+            _model('pkg', 'c', depends_on=['model.pkg.b', 'model.pkg.x']),
+        ],
+        parent_map={
+            'model.pkg.a': [],
+            'model.pkg.x': [],
+            'model.pkg.b': ['model.pkg.a'],
+            'model.pkg.c': ['model.pkg.b', 'model.pkg.x'],
+        },
+        child_map={
+            'model.pkg.a': ['model.pkg.b'],
+            'model.pkg.x': ['model.pkg.c'],
+            'model.pkg.b': ['model.pkg.c'],
+            'model.pkg.c': [],
+        },
+    )
+
+    at_selection = _model_keys(ManifestFilter('@b').apply(manifest))
+    assert at_selection == {'model.pkg.a', 'model.pkg.b', 'model.pkg.c', 'model.pkg.x'}
+
+    # Contrast: `+b` walks only b's own ancestors, so x (upstream of a descendant, not of b) is out.
+    assert _model_keys(ManifestFilter('+b').apply(manifest)) == {'model.pkg.a', 'model.pkg.b'}
+
+
+def test_source_survives_only_when_a_selected_node_depends_on_it():
+    # Two domains, each a model with a source and a source test. Selecting domain A must drop
+    # domain B's source and its source test, so the scoped job emits no `<source>_test` task
+    # for the deselected domain.
+    src_a_key, src_a = _source('pkg', 'raw_a', 'events')
+    src_b_key, src_b = _source('pkg', 'raw_b', 'events')
+    model_a_key, model_a = _model('pkg', 'a', tags=['domain_a'], depends_on=[src_a_key])
+    model_b_key, model_b = _model('pkg', 'b', tags=['domain_b'], depends_on=[src_b_key])
+    test_a_key, test_a = _test('pkg', 'src_a_not_null', [src_a_key])
+    test_b_key, test_b = _test('pkg', 'src_b_not_null', [src_b_key])
+
+    manifest = _manifest(
+        [(model_a_key, model_a), (model_b_key, model_b), (test_a_key, test_a), (test_b_key, test_b)],
+        sources=[(src_a_key, src_a), (src_b_key, src_b)],
+    )
+
+    filtered = ManifestFilter('tag:domain_a').apply(manifest)
+
+    assert _model_keys(filtered) == {model_a_key}
+    # domain A's source and its source test survive
+    assert set(filtered['sources']) == {src_a_key}
+    assert test_a_key in filtered['nodes']
+    # domain B's source and its source-only test are dropped, not leaked into the scoped job
+    assert src_b_key not in filtered['sources']
+    assert test_b_key not in filtered['nodes']

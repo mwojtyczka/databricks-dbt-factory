@@ -5,8 +5,22 @@ from collections.abc import Iterable
 # Databricks caps task keys at 100 characters (letters, numbers, underscores, hyphens).
 MAX_TASK_KEY_LENGTH = 100
 
+# dbt resource types the factory materializes as their own run tasks: the types a `--select`
+# expression targets directly, and the types whose downstream deps get gated on tests. Shared
+# by `DbtFactory` (gating) and `ManifestFilter` (selection) so the two stay in agreement.
+SELECTABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
+
 # dbt resource types whose task key is `<resource_name>_<type>` (the type doubles as the suffix).
-_SUFFIXED_TYPES = frozenset({'model', 'seed', 'snapshot'})
+_SUFFIXED_TYPES = SELECTABLE_TYPES
+
+
+def unit_test_model(unit_test_info: dict) -> str | None:
+    """Returns the full name (`model.<package>.<model>`) of the model a unit test targets, or None."""
+    model = unit_test_info.get('model')
+    package = unit_test_info.get('package_name')
+    if model and package:
+        return f'model.{package}.{model}'
+    return None
 
 
 def _resource_name(unique_id: str) -> str:

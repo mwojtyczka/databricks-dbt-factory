@@ -100,7 +100,6 @@ def _copy_runner_notebook(
 
     Overwrites any existing file at the destination.
     """
-    source = resources.files("databricks_dbt_factory") / "notebook" / _RUNNER_NOTEBOOK_FILENAME
     spec_dir = Path(target_job_spec_path).resolve().parent
 
     if project_directory and not Path(project_directory).is_absolute():
@@ -112,6 +111,7 @@ def _copy_runner_notebook(
 
     dest = dest_dir / _RUNNER_NOTEBOOK_FILENAME
     if write:
+        source = resources.files("databricks_dbt_factory") / "notebook" / _RUNNER_NOTEBOOK_FILENAME
         dest_dir.mkdir(parents=True, exist_ok=True)
         with resources.as_file(source) as src_path:
             shutil.copyfile(src_path, dest)

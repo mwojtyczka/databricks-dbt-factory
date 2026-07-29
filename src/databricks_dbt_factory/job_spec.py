@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 import yaml
 
 
@@ -17,6 +20,11 @@ def replace_tasks_in_job_spec(
 
     Raises:
         KeyError: If no jobs are found in the provided YAML file.
+
+    The target is written atomically (serialize fully, write to a temp file in the same
+    directory, then `os.replace`), so a serialization error or interruption never leaves a
+    truncated spec — important because the CLI supports updating a file in place
+    (`input_job_spec_path == target_job_spec_path`).
     """
     with open(input_job_spec_path, 'r', encoding="utf-8") as file:
         job_definition = yaml.safe_load(file)
@@ -37,5 +45,13 @@ def replace_tasks_in_job_spec(
         first_job['name'] = new_job_name
     first_job['tasks'] = new_tasks  # Replace tasks field
 
-    with open(target_job_spec_path, 'w', encoding="utf-8") as file:
-        yaml.dump(job_definition, file, sort_keys=False, width=1000)
+    # Serialize before touching the target so a dump failure leaves any existing file intact,
+    # then swap the fully-written temp file into place atomically.
+    rendered = yaml.dump(job_definition, sort_keys=False, width=1000)
+    target_dir = os.path.dirname(os.path.abspath(target_job_spec_path))
+    with tempfile.NamedTemporaryFile(
+        'w', encoding="utf-8", dir=target_dir, prefix='.job_spec_', suffix='.tmp', delete=False
+    ) as tmp:
+        tmp.write(rendered)
+        tmp_path = tmp.name
+    os.replace(tmp_path, target_job_spec_path)

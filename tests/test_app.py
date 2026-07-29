@@ -70,7 +70,14 @@ def test_main_dry_run_prints_tasks_and_writes_nothing(monkeypatch, capsys, tmp_p
 
     main()
 
-    assert "task_key" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "task_key" in out
+    # the printed tasks must match the requested task type, not just contain a task_key
+    expected_task_field = "notebook_task" if task_type == "notebook" else "dbt_task"
+    unexpected_task_field = "dbt_task" if task_type == "notebook" else "notebook_task"
+    assert expected_task_field in out
+    assert unexpected_task_field not in out
+    # dry-run writes nothing: not the spec, nor (in notebook mode) the runner notebook
     assert not list(tmp_path.iterdir())
 
 

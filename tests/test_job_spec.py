@@ -1,6 +1,7 @@
 import pytest
 import yaml
 
+from databricks_dbt_factory import job_spec
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
 
 
@@ -36,3 +37,34 @@ def test_replace_tasks_writes_tasks_into_first_job(tmp_path):
 
     written = yaml.safe_load(target.read_text(encoding="utf-8"))
     assert written["resources"]["jobs"]["my_job"]["tasks"] == [{"task_key": "orders_model"}]
+
+
+def test_replace_tasks_in_place_update(tmp_path):
+    # input path == target path: the file is updated in place, tasks replaced, other content kept.
+    path = tmp_path / "job.yaml"
+    _write(path, {"resources": {"jobs": {"my_job": {"name": "keep", "tasks": [{"task_key": "old"}]}}}})
+
+    replace_tasks_in_job_spec(str(path), [{"task_key": "new"}], str(path))
+
+    written = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert written["resources"]["jobs"]["my_job"]["tasks"] == [{"task_key": "new"}]
+    assert written["resources"]["jobs"]["my_job"]["name"] == "keep"
+
+
+def test_replace_tasks_write_is_atomic_on_failure(tmp_path, monkeypatch):
+    # If serialization fails, an existing in-place target is left intact and no temp file leaks.
+    path = tmp_path / "job.yaml"
+    original = {"resources": {"jobs": {"my_job": {"tasks": [{"task_key": "original"}]}}}}
+    _write(path, original)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("serialization failed")
+
+    monkeypatch.setattr(job_spec.yaml, "dump", boom)
+
+    with pytest.raises(RuntimeError):
+        replace_tasks_in_job_spec(str(path), [{"task_key": "new"}], str(path))
+
+    # original untouched, and no stray .job_spec_*.tmp left behind
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == original
+    assert [p.name for p in tmp_path.iterdir()] == ["job.yaml"]

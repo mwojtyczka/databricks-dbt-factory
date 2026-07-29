@@ -215,7 +215,7 @@ def parse_args():
             "tests. Cross-model tests (e.g. `relationships`) are detected from the manifest and "
             "emitted as their own tasks gated on every referenced resource, so no tests are "
             "silently dropped. Trade-off: fewer tasks and a smaller DAG, but per-test failures "
-            "show up as a single red `<resource>_tests` task — drill into the logs to see which "
+            "show up as a single red `<resource>_test` task — drill into the logs to see which "
             "assertion failed."
         ),
     )

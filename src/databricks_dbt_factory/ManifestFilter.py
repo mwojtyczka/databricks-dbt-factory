@@ -156,7 +156,11 @@ class ManifestFilter:
         """Whether a single (operator-stripped) selector matches a node."""
         if spec.startswith('tag:'):
             tag = spec[len('tag:') :]
-            return tag in info.get('tags', []) or tag in info.get('config', {}).get('tags', [])
+            # `or []`/`or {}` guard against a manifest node serialized with `"tags": null` or
+            # `"config": null`, which `DbtFactory` tolerates the same way.
+            tags = info.get('tags') or []
+            config_tags = (info.get('config') or {}).get('tags') or []
+            return tag in tags or tag in config_tags
         if spec.startswith('path:'):
             path = spec[len('path:') :]
             node_path = info.get('original_file_path') or info.get('path') or ''
@@ -208,17 +212,26 @@ class ManifestFilter:
 
     @staticmethod
     def _refs_within(test_info: dict, selected: set[str], surviving_sources: set[str]) -> bool:
-        """Whether every resource a test references survived the selection.
+        """Whether a test stays attached to the selection: it references at least one surviving
+        resource and every resource it references survived.
 
         A model/seed/snapshot ref must be in ``selected``; a source ref must be in
         ``surviving_sources`` (i.e. reachable from a selected node). A test with a ref to a
         deselected node — of either kind — is dropped so it never gates on, or drags in, a
-        resource that is no longer part of the scoped job.
+        resource that is no longer part of the scoped job. A test with no surviving ref at all
+        (including a zero-ref singular/custom test) is also dropped: it is not connected to the
+        selected subgraph, so a scoped job must not emit it — mirroring dbt, which does not run
+        tests unconnected to the selection.
         """
         selectable_prefixes = tuple(t + '.' for t in SELECTABLE_TYPES)
+        has_surviving_ref = False
         for dep in test_info.get('depends_on', {}).get('nodes', []):
-            if dep.startswith(selectable_prefixes) and dep not in selected:
-                return False
-            if dep.startswith('source.') and dep not in surviving_sources:
-                return False
-        return True
+            if dep.startswith(selectable_prefixes):
+                if dep not in selected:
+                    return False
+                has_surviving_ref = True
+            elif dep.startswith('source.'):
+                if dep not in surviving_sources:
+                    return False
+                has_surviving_ref = True
+        return has_surviving_ref

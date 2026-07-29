@@ -218,6 +218,45 @@ def test_tests_of_dropped_models_are_removed():
     assert test_key not in filtered['nodes']
 
 
+def test_test_of_selected_model_is_kept():
+    # Guard the "must reference at least one surviving resource" rule: a test on a *selected*
+    # model must still survive.
+    manifest = _manifest([_model('pkg', 'a', tags=['keep'])])
+    test_key, test_info = _test('pkg', 'unique_a', ['model.pkg.a'])
+    manifest['nodes'][test_key] = test_info
+
+    filtered = ManifestFilter('tag:keep').apply(manifest)
+
+    assert test_key in filtered['nodes']
+
+
+def test_zero_ref_test_is_dropped_from_scoped_job():
+    # A singular/custom test dbt could not resolve deps for (empty depends_on) is not connected
+    # to the selection, so a scoped job must not emit it — otherwise a deselected domain's
+    # unattached test leaks in as a task.
+    manifest = _manifest([_model('pkg', 'a', tags=['keep']), _model('pkg', 'b')])
+    test_key, test_info = _test('pkg', 'singular_b', [])
+    manifest['nodes'][test_key] = test_info
+
+    filtered = ManifestFilter('tag:keep').apply(manifest)
+
+    assert _model_keys(filtered) == {'model.pkg.a'}
+    assert test_key not in filtered['nodes']
+
+
+def test_null_tags_and_config_do_not_crash_matching():
+    # A manifest node serialized with `"tags": null` / `"config": null` must not crash tag
+    # matching (DbtFactory tolerates the same shape).
+    _, info = _model('pkg', 'a')
+    info['tags'] = None
+    info['config'] = None
+    manifest = _manifest([('model.pkg.a', info), _model('pkg', 'b', tags=['keep'])])
+
+    filtered = ManifestFilter('tag:keep').apply(manifest)
+
+    assert _model_keys(filtered) == {'model.pkg.b'}
+
+
 def test_unit_tests_follow_their_model():
     manifest = _manifest(
         [_model('pkg', 'a', tags=['keep']), _model('pkg', 'b')],

@@ -1,7 +1,7 @@
 import pytest
 import yaml
 
-from databricks_dbt_factory.SpecsHandler import replace_tasks_in_job_spec
+from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
 
 
 def _write(path, content: dict) -> str:

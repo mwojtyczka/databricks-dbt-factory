@@ -3,7 +3,7 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 import yaml
 
-from databricks_dbt_factory.SpecsHandler import replace_tasks_in_job_spec
+from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
 from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
 from databricks_dbt_factory.Utils import read_dbt_manifest
 

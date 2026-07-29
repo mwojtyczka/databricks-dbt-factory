@@ -18,7 +18,7 @@ It reads your dbt manifest and generates a new job specification — a Databrick
 - [How it works](#how-it-works)
 - [Installation](#installation)
 - [Usage](#usage)
-- [dbt test handling](#dbt-test-handling)
+- [Handling dbt tests](#handling-dbt-tests)
 - [Task types](#task-types)
 - [End-to-end example](#end-to-end-example)
 - [Contribution](#contribution)
@@ -153,7 +153,29 @@ flowchart LR
 pip install databricks-dbt-factory
 ```
 
-> **For production, pin the version** to get reproducible builds and avoid unexpected changes from new releases, e.g. `pip install databricks-dbt-factory==0.2.2`.
+> **For production, pin the version** to get reproducible builds and avoid unexpected changes from new releases, e.g. `pip install databricks-dbt-factory==0.3.1`.
+
+Check the installed version at any time:
+
+```shell
+databricks_dbt_factory --version
+```
+
+## Upgrading
+
+Upgrade to the latest release:
+
+```shell
+pip install --upgrade databricks-dbt-factory
+```
+
+Or pin to a specific version (recommended for production):
+
+```shell
+pip install --upgrade databricks-dbt-factory==<version>
+```
+
+Run `databricks_dbt_factory --version` afterwards to confirm the upgrade.
 
 # Usage
 
@@ -294,10 +316,11 @@ databricks_dbt_factory  \
 - `--job-cluster-key` (type: str, optional): Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with `--environment-key`.
 - `--extra-dbt-command-options` (type: str, optional, default: ""): Additional dbt command options to include.
 - `--no-run-tests` (flag, default: tests enabled): Skip generating dbt test tasks. Tests are included by default.
-- `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle single-model tests per resource into one `dbt test --select <resource>` task. Fewer Databricks tasks means fewer task startups, fewer dbt cold starts, and noticeably faster end-to-end runtime for projects with many tests. Downstream models/seeds/snapshots gate on the upstream's `<resource>_test` task so failing tests still halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [dbt test handling](#dbt-test-handling).
+- `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle single-model tests per resource into one `dbt test --select <resource>` task. Fewer Databricks tasks means fewer task startups, fewer dbt cold starts, and noticeably faster end-to-end runtime for projects with many tests. Downstream models/seeds/snapshots gate on the upstream's `<resource>_test` task so failing tests still halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Handling dbt tests](#handling-dbt-tests).
 - `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
 - `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
+- `--version` (flag): Print the installed `databricks-dbt-factory` version.
 
 You can also check all input arguments by running `databricks_dbt_factory --help`.
 
@@ -320,7 +343,7 @@ dbt's test hash (e.g. `pkg_a_customers_model` / `pkg_b_customers_model`). Keys a
 unique, so a valid dbt project can never fail to deploy on a duplicate task key. Keys are also
 bounded to Databricks' 100-character limit (long test names are truncated with a hash suffix).
 
-## dbt test handling
+## Handling dbt tests
 
 The factory produces tasks for dbt tests (both data tests and unit tests) from the manifest by
 default (pass `--no-run-tests` to skip them). Selectors use each node's full dot-separated FQN

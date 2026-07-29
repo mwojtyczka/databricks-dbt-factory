@@ -4,6 +4,7 @@ import shutil
 from importlib import resources
 from pathlib import Path
 
+from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.DbtFactory import DbtFactory
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
 from databricks_dbt_factory.Utils import read_dbt_manifest
@@ -137,6 +138,12 @@ def build_dbt_options(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate Databricks job definition from dbt manifest.")
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"databricks-dbt-factory {__version__}",
+        help="Show the installed databricks-dbt-factory version and exit.",
+    )
+    parser.add_argument(
         "--new-job-name",
         type=str,
         help="Optional job name. If provided the existing job name in job spec is updated",
@@ -208,7 +215,7 @@ def parse_args():
             "tests. Cross-model tests (e.g. `relationships`) are detected from the manifest and "
             "emitted as their own tasks gated on every referenced resource, so no tests are "
             "silently dropped. Trade-off: fewer tasks and a smaller DAG, but per-test failures "
-            "show up as a single red `<resource>_tests` task — drill into the logs to see which "
+            "show up as a single red `<resource>_test` task — drill into the logs to see which "
             "assertion failed."
         ),
     )

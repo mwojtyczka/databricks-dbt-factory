@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.main import main, parse_args
 
 BASE_PATH = str(Path(__file__).resolve().parent)
@@ -286,6 +287,16 @@ REQUIRED_ARGS = [
     "--target-job-spec-path",
     "out.yaml",
 ]
+
+
+def test_version_flag_prints_version_and_exits(monkeypatch, capsys):
+    # --version short-circuits argparse (exits 0) before the required args are enforced.
+    monkeypatch.setattr("sys.argv", ["main.py", "--version"])
+    with pytest.raises(SystemExit) as exc:
+        parse_args()
+
+    assert exc.value.code == 0
+    assert __version__ in capsys.readouterr().out
 
 
 def test_explicit_environment_key_with_job_cluster_key_is_rejected(monkeypatch):

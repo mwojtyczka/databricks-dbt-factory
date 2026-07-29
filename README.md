@@ -153,7 +153,29 @@ flowchart LR
 pip install databricks-dbt-factory
 ```
 
-> **For production, pin the version** to get reproducible builds and avoid unexpected changes from new releases, e.g. `pip install databricks-dbt-factory==0.2.2`.
+> **For production, pin the version** to get reproducible builds and avoid unexpected changes from new releases, e.g. `pip install databricks-dbt-factory==0.3.1`.
+
+Check the installed version at any time:
+
+```shell
+databricks_dbt_factory --version
+```
+
+## Upgrading
+
+Upgrade to the latest release:
+
+```shell
+pip install --upgrade databricks-dbt-factory
+```
+
+Or pin to a specific version (recommended for production):
+
+```shell
+pip install --upgrade databricks-dbt-factory==<version>
+```
+
+Run `databricks_dbt_factory --version` afterwards to confirm the upgrade.
 
 # Usage
 
@@ -298,6 +320,7 @@ databricks_dbt_factory  \
 - `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
 - `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
+- `--version` (flag): Print the installed `databricks-dbt-factory` version and exit.
 
 You can also check all input arguments by running `databricks_dbt_factory --help`.
 

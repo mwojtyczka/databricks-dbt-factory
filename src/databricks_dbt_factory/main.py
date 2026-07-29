@@ -4,6 +4,7 @@ import shutil
 from importlib import resources
 from pathlib import Path
 
+from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.DbtFactory import DbtFactory
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
 from databricks_dbt_factory.Utils import read_dbt_manifest
@@ -136,6 +137,12 @@ def build_dbt_options(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate Databricks job definition from dbt manifest.")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"databricks-dbt-factory {__version__}",
+        help="Show the installed databricks-dbt-factory version and exit.",
+    )
     parser.add_argument(
         "--new-job-name",
         type=str,

@@ -68,7 +68,10 @@ def main():
 
     factory = DbtFactory(task_factories, bundle_tests=args.bundle_tests)
     manifest = read_dbt_manifest(args.dbt_manifest_path)
-    if args.select:
+    # `is not None` (not truthiness) so a provided-but-empty `--select ""` is routed to
+    # ManifestFilter and rejected the same way `--select "   "` is, rather than silently
+    # skipping the filter and generating the full job. The flag defaults to None when omitted.
+    if args.select is not None:
         manifest = ManifestFilter(args.select).apply(manifest)
     tasks = factory.create_tasks(manifest)
     if args.dry_run:

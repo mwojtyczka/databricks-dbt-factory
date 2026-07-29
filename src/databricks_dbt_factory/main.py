@@ -4,8 +4,11 @@ import shutil
 from importlib import resources
 from pathlib import Path
 
+from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.DbtFactory import DbtFactory
-from databricks_dbt_factory.SpecsHandler import SpecsHandler
+from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
+from databricks_dbt_factory.ManifestFilter import ManifestFilter
+from databricks_dbt_factory.Utils import read_dbt_manifest
 from databricks_dbt_factory.DbtTask import DbtTaskOptions
 from databricks_dbt_factory.TaskFactory import (
     ModelTaskFactory,
@@ -21,7 +24,6 @@ _RUNNER_NOTEBOOK_FILENAME = "run_dbt_command.py"
 def main():
     args = parse_args()
 
-    file_handler = SpecsHandler()
     resolver = DbtDependencyResolver()
 
     dbt_options = build_dbt_options(args)
@@ -33,7 +35,7 @@ def main():
     effective_project_directory = args.project_directory
     if args.task_type == "notebook" and notebook_path is None:
         notebook_path, notebook_at_project_root = _copy_runner_notebook(
-            args.target_job_spec_path, args.project_directory
+            args.target_job_spec_path, args.project_directory, write=not args.dry_run
         )
         # If the runner landed at the project root, CWD at task runtime already equals the
         # project root. Pass `.` explicitly so the generated spec is self-documenting (and
@@ -64,18 +66,20 @@ def main():
     if args.run_tests:
         task_factories['test'] = TestTaskFactory(resolver, task_options, dbt_options)
 
-    factory = DbtFactory(file_handler, task_factories, bundle_tests=args.bundle_tests)
-    factory.create_tasks_and_update_job_spec(
-        args.dbt_manifest_path,
-        args.input_job_spec_path,
-        args.target_job_spec_path,
-        args.new_job_name,
-        args.dry_run,
-        args.select,
-    )
+    factory = DbtFactory(task_factories, bundle_tests=args.bundle_tests)
+    manifest = read_dbt_manifest(args.dbt_manifest_path)
+    if args.select:
+        manifest = ManifestFilter(args.select).apply(manifest)
+    tasks = factory.create_tasks(manifest)
+    if args.dry_run:
+        print(tasks)
+    else:
+        replace_tasks_in_job_spec(args.input_job_spec_path, tasks, args.target_job_spec_path, args.new_job_name)
 
 
-def _copy_runner_notebook(target_job_spec_path: str, project_directory: str | None) -> tuple[str, bool]:
+def _copy_runner_notebook(
+    target_job_spec_path: str, project_directory: str | None, write: bool = True
+) -> tuple[str, bool]:
     """
     Copies the packaged dbt runner notebook into the bundle so `databricks bundle deploy`
     uploads it automatically.
@@ -89,6 +93,9 @@ def _copy_runner_notebook(target_job_spec_path: str, project_directory: str | No
     workspace path we can't write to from local CLI) or missing, falls back to copying the
     notebook next to the generated job spec.
 
+    When `write` is False, computes the paths without writing the file (used for `--dry-run`,
+    which must not touch the filesystem).
+
     Returns `(notebook_path, notebook_at_project_root)`:
     - `notebook_path`: relative path from the spec's directory to the copied notebook,
       which DAB resolves at deploy time.
@@ -97,7 +104,6 @@ def _copy_runner_notebook(target_job_spec_path: str, project_directory: str | No
 
     Overwrites any existing file at the destination.
     """
-    source = resources.files("databricks_dbt_factory") / "notebook" / _RUNNER_NOTEBOOK_FILENAME
     spec_dir = Path(target_job_spec_path).resolve().parent
 
     if project_directory and not Path(project_directory).is_absolute():
@@ -108,9 +114,11 @@ def _copy_runner_notebook(target_job_spec_path: str, project_directory: str | No
         dest_dir = spec_dir
 
     dest = dest_dir / _RUNNER_NOTEBOOK_FILENAME
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    with resources.as_file(source) as src_path:
-        shutil.copyfile(src_path, dest)
+    if write:
+        source = resources.files("databricks_dbt_factory") / "notebook" / _RUNNER_NOTEBOOK_FILENAME
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        with resources.as_file(source) as src_path:
+            shutil.copyfile(src_path, dest)
 
     relative = Path(os.path.relpath(dest, start=spec_dir)).as_posix()
     notebook_path = relative if relative.startswith("..") else f"./{relative}"
@@ -132,6 +140,12 @@ def build_dbt_options(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate Databricks job definition from dbt manifest.")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"databricks-dbt-factory {__version__}",
+        help="Show the installed databricks-dbt-factory version and exit.",
+    )
     parser.add_argument(
         "--new-job-name",
         type=str,
@@ -218,7 +232,7 @@ def parse_args():
             "tests. Cross-model tests (e.g. `relationships`) are detected from the manifest and "
             "emitted as their own tasks gated on every referenced resource, so no tests are "
             "silently dropped. Trade-off: fewer tasks and a smaller DAG, but per-test failures "
-            "show up as a single red `<resource>_tests` task — drill into the logs to see which "
+            "show up as a single red `<resource>_test` task — drill into the logs to see which "
             "assertion failed."
         ),
     )

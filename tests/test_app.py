@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.main import main, parse_args
 
 BASE_PATH = str(Path(__file__).resolve().parent)
@@ -44,6 +45,41 @@ def test_main_given_default_args(monkeypatch):
     finally:
         if os.path.exists(target_job_spec_path):
             os.remove(target_job_spec_path)
+
+
+@pytest.mark.parametrize("task_type", ["dbt", "notebook"])
+def test_main_dry_run_prints_tasks_and_writes_nothing(monkeypatch, capsys, tmp_path, task_type):
+    """--dry-run prints the generated tasks and writes nothing — not the spec, nor (in notebook
+    mode) the runner notebook that a real run copies next to it."""
+    target_job_spec_path = tmp_path / "out.yaml"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target_job_spec_path),
+            "--task-type",
+            task_type,
+            "--dry-run",
+        ],
+    )
+
+    main()
+
+    out = capsys.readouterr().out
+    assert "task_key" in out
+    # the printed tasks must match the requested task type, not just contain a task_key
+    expected_task_field = "notebook_task" if task_type == "notebook" else "dbt_task"
+    unexpected_task_field = "dbt_task" if task_type == "notebook" else "notebook_task"
+    assert expected_task_field in out
+    assert unexpected_task_field not in out
+    # dry-run writes nothing: not the spec, nor (in notebook mode) the runner notebook
+    assert not list(tmp_path.iterdir())
 
 
 def test_main_notebook_mode_auto_copies_runner_notebook_next_to_spec(monkeypatch, tmp_path):
@@ -251,6 +287,16 @@ REQUIRED_ARGS = [
     "--target-job-spec-path",
     "out.yaml",
 ]
+
+
+def test_version_flag_prints_version_and_exits(monkeypatch, capsys):
+    # --version short-circuits argparse (exits 0) before the required args are enforced.
+    monkeypatch.setattr("sys.argv", ["main.py", "--version"])
+    with pytest.raises(SystemExit) as exc:
+        parse_args()
+
+    assert exc.value.code == 0
+    assert __version__ in capsys.readouterr().out
 
 
 def test_explicit_environment_key_with_job_cluster_key_is_rejected(monkeypatch):

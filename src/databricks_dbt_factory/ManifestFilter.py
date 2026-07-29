@@ -17,6 +17,8 @@ set. This mirrors dbt, where unselected upstream models simply are not built as 
 run.
 """
 
+import sys
+
 from databricks_dbt_factory.Utils import SELECTABLE_TYPES, unit_test_model
 
 
@@ -44,6 +46,17 @@ class ManifestFilter:
 
         selectable = {uid: info for uid, info in nodes.items() if info.get('resource_type') in SELECTABLE_TYPES}
         selected = self._select_nodes(selectable, manifest)
+
+        if not selected:
+            # An empty selection is legal (the job just gets no tasks), but it is far more often
+            # a typo'd selector — and if the target spec is the input template (in-place update)
+            # it is silently overwritten with an empty task list. Warn loudly so the mistake is
+            # visible, without failing the run.
+            print(
+                f'WARNING: --select {" ".join(self._selectors)!r} matched no model/seed/snapshot '
+                'nodes; the generated job will have no tasks.',
+                file=sys.stderr,
+            )
 
         # A source survives only if a selected model/seed/snapshot depends on it. This scopes
         # sources (and their tests) to the selection, so a scoped job never emits
@@ -105,20 +118,24 @@ class ManifestFilter:
         return selected
 
     @staticmethod
-    def _strip_operators(raw: str) -> tuple[str, bool, bool]:
-        """Splits graph operators off a selector, returning (spec, want_ancestors, want_descendants)."""
+    def _strip_operators(raw: str) -> tuple[str, bool, bool, bool]:
+        """Splits graph operators off a selector.
+
+        Returns ``(spec, want_ancestors, want_descendants, is_at)``; ``is_at`` is True for the
+        ``@`` operator, which the caller needs to distinguish from ``+`` on both sides because
+        ``@x`` walks ancestors of x *and its descendants*, not just x's ancestors.
+        """
         if raw.startswith('@'):
             # `@x` selects x, its descendants, and the ancestors of x and those descendants.
-            return raw[1:], True, True
+            return raw[1:], True, True, True
         want_ancestors = raw.startswith('+')
         spec = raw[1:] if want_ancestors else raw
         want_descendants = spec.endswith('+')
         spec = spec[:-1] if want_descendants else spec
-        return spec, want_ancestors, want_descendants
+        return spec, want_ancestors, want_descendants, False
 
     def _select_one(self, raw: str, selectable: dict, manifest: dict) -> set[str]:
-        at_operator = raw.startswith('@')
-        spec, want_ancestors, want_descendants = self._strip_operators(raw)
+        spec, want_ancestors, want_descendants, is_at = self._strip_operators(raw)
 
         matched = {uid for uid, info in selectable.items() if self._matches(spec, info)}
 
@@ -130,7 +147,7 @@ class ManifestFilter:
         if want_ancestors:
             # `@x` walks ancestors of x *and its descendants* (dbt semantics); plain `+x`
             # walks only x's ancestors.
-            ancestor_seeds = matched | descendants if at_operator else matched
+            ancestor_seeds = matched | descendants if is_at else matched
             result |= self._walk(ancestor_seeds, manifest.get('parent_map', {}), selectable)
         return result
 

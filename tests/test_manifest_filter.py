@@ -229,13 +229,25 @@ def test_unit_tests_follow_their_model():
     assert set(filtered['unit_tests']) == {'unit_test.pkg.a.ut_a'}
 
 
-def test_no_match_yields_empty_selection():
+def test_no_match_yields_empty_selection_and_warns(capsys):
     manifest = _manifest([_model('pkg', 'a', tags=['x'])])
 
     filtered = ManifestFilter('tag:does_not_exist').apply(manifest)
 
     assert _model_keys(filtered) == set()
     assert not filtered['nodes']
+    # An empty match is legal but warns to stderr so a typo'd selector that would overwrite an
+    # in-place spec with no tasks is visible.
+    err = capsys.readouterr().err
+    assert 'WARNING' in err and 'tag:does_not_exist' in err
+
+
+def test_non_empty_selection_does_not_warn(capsys):
+    manifest = _manifest([_model('pkg', 'a', tags=['keep'])])
+
+    ManifestFilter('tag:keep').apply(manifest)
+
+    assert capsys.readouterr().err == ''
 
 
 @pytest.mark.parametrize('select', ['', '   ', '\t\n'])

@@ -1,7 +1,6 @@
 from dataclasses import replace
 
 from databricks_dbt_factory import TaskFactory
-from databricks_dbt_factory.SpecsHandler import SpecsHandler
 from databricks_dbt_factory.DbtTask import DbtTask
 from databricks_dbt_factory.Utils import build_task_key_maps
 
@@ -11,7 +10,6 @@ class DbtFactory:
 
     def __init__(
         self,
-        file_handler: SpecsHandler,
         task_factories: dict[str, TaskFactory],
         bundle_tests: bool = False,
     ):
@@ -19,7 +17,6 @@ class DbtFactory:
         Initializes the dbt factory.
 
         Args:
-            file_handler (SpecsHandler): Handles reading the dbt manifest and writing the job spec.
             task_factories (dict[str, TaskFactory]): Maps dbt resource types (`model`, `seed`,
                 `snapshot`, `test`) to their respective `TaskFactory` instances. Omitting `test`
                 disables test-task generation entirely.
@@ -28,35 +25,8 @@ class DbtFactory:
                 bundled test task so failing tests halt the DAG. When False, emit one task per
                 dbt test node.
         """
-        self.file_handler = file_handler
         self.task_factories = task_factories
         self.bundle_tests = bundle_tests
-
-    def create_tasks_and_update_job_spec(
-        self,
-        dbt_manifest_path: str,
-        input_job_spec_path: str,
-        target_job_spec_path: str,
-        new_job_name: str | None = None,
-        dry_run: bool = False,
-    ):
-        """
-        Generates tasks from a dbt manifest and writes them into a Databricks job spec.
-
-        Args:
-            dbt_manifest_path (str): Path to the dbt `manifest.json`.
-            input_job_spec_path (str): Path to the input (template) job spec YAML.
-            target_job_spec_path (str): Path to write the updated job spec YAML.
-            new_job_name (str | None): Optional replacement job name. If provided, overrides the
-                name in the input spec.
-            dry_run (bool): When True, print the generated tasks instead of writing to disk.
-        """
-        manifest = self.file_handler.read_dbt_manifest(dbt_manifest_path)
-        tasks = self.create_tasks(manifest)
-        if dry_run:
-            print(tasks)
-        else:
-            self.file_handler.replace_tasks_in_job_spec(input_job_spec_path, tasks, target_job_spec_path, new_job_name)
 
     def create_tasks(self, dbt_manifest: dict) -> list[dict]:
         """

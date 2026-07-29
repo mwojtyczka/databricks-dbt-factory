@@ -1,10 +1,11 @@
 import os
 from tempfile import NamedTemporaryFile
 from pathlib import Path
-import pytest
 import yaml
 
+from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
 from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
+from databricks_dbt_factory.Utils import read_dbt_manifest
 
 
 BASE_PATH = str(Path(__file__).resolve().parent)
@@ -558,9 +559,8 @@ def run_job_spec_test(dbt_factory, expected_job_definition_path):
         actual_job_definition_path = temp_file.name
 
     try:
-        dbt_factory.create_tasks_and_update_job_spec(
-            dbt_manifest_path, input_job_definition_path, actual_job_definition_path
-        )
+        tasks = dbt_factory.create_tasks(read_dbt_manifest(dbt_manifest_path))
+        replace_tasks_in_job_spec(input_job_definition_path, tasks, actual_job_definition_path)
 
         with open(expected_job_definition_path, "r", encoding="utf-8") as file:
             expected_job_definition = yaml.safe_load(file)
@@ -572,18 +572,6 @@ def run_job_spec_test(dbt_factory, expected_job_definition_path):
     finally:
         if os.path.exists(actual_job_definition_path):
             os.remove(actual_job_definition_path)
-
-
-@pytest.mark.skip("Manual testing")
-def test_generate(databricks_dbt_factory):
-    """Test job definition generation and saving to file."""
-    dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"
-    job_definition_path = BASE_PATH + "/test_data/job_definition_template.yaml"
-    destination_job_definition_path = "job_definition.yaml"
-
-    databricks_dbt_factory.create_tasks_and_update_job_spec(
-        dbt_manifest_path, job_definition_path, destination_job_definition_path, "new_job_name"
-    )
 
 
 def test_resolver_uses_task_keys_map():

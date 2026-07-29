@@ -42,7 +42,6 @@ class DbtFactory:
         tasks = self._create_tasks(dbt_manifest)
         return [task.to_dict() for task in tasks]
 
-    _GATEABLE_TYPES = SELECTABLE_TYPES
     _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
     @staticmethod
@@ -332,7 +331,7 @@ class DbtFactory:
             factory = self.task_factories[resource_type]
             task = factory.create_task(self._fqn_select(node_info), node_info['name'], node_info, task_key, task_keys)
 
-            if resource_type in self._GATEABLE_TYPES:
+            if resource_type in SELECTABLE_TYPES:
                 if bundle:
                     task = replace(task, depends_on=self._rewire_deps(task.depends_on, bundled_test_key_by_task_key))
                 elif tests_by_resource:

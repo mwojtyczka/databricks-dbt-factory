@@ -11,7 +11,9 @@ MAX_TASK_KEY_LENGTH = 100
 SELECTABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
 
 # dbt resource types whose task key is `<resource_name>_<type>` (the type doubles as the suffix).
-_SUFFIXED_TYPES = SELECTABLE_TYPES
+# A separate concept from `SELECTABLE_TYPES` (which is about selection/gating), even though the
+# two sets currently coincide — key formatting must not shift if selection semantics change.
+_SUFFIXED_TYPES = frozenset({'model', 'seed', 'snapshot'})
 
 
 def unit_test_model(unit_test_info: dict) -> str | None:

@@ -19,9 +19,6 @@ run.
 
 from databricks_dbt_factory.Utils import SELECTABLE_TYPES, unit_test_model
 
-# Resource types the factory turns into resource tasks and that a selector targets directly.
-_SELECTABLE_TYPES = SELECTABLE_TYPES
-
 
 class ManifestFilter:
     """Applies a dbt-style ``--select`` expression to a parsed manifest."""
@@ -45,7 +42,7 @@ class ManifestFilter:
         sources = manifest.get('sources', {})
         unit_tests = manifest.get('unit_tests', {})
 
-        selectable = {uid: info for uid, info in nodes.items() if info.get('resource_type') in _SELECTABLE_TYPES}
+        selectable = {uid: info for uid, info in nodes.items() if info.get('resource_type') in SELECTABLE_TYPES}
         selected = self._select_nodes(selectable, manifest)
 
         # A source survives only if a selected model/seed/snapshot depends on it. This scopes
@@ -81,7 +78,7 @@ class ManifestFilter:
         - Any other node type is dropped (the factory does not turn it into a task).
         """
         resource_type = info.get('resource_type')
-        if resource_type in _SELECTABLE_TYPES:
+        if resource_type in SELECTABLE_TYPES:
             return self._prune_deps(info, selected) if uid in selected else None
         if resource_type == 'test':
             return info if self._refs_within(info, selected, surviving_sources) else None
@@ -180,7 +177,7 @@ class ManifestFilter:
         deps = info.get('depends_on', {}).get('nodes')
         if not deps:
             return info
-        selectable_prefixes = tuple(t + '.' for t in _SELECTABLE_TYPES)
+        selectable_prefixes = tuple(t + '.' for t in SELECTABLE_TYPES)
         pruned = []
         for dep in deps:
             if not dep.startswith(selectable_prefixes) or dep in selected:
@@ -201,7 +198,7 @@ class ManifestFilter:
         deselected node — of either kind — is dropped so it never gates on, or drags in, a
         resource that is no longer part of the scoped job.
         """
-        selectable_prefixes = tuple(t + '.' for t in _SELECTABLE_TYPES)
+        selectable_prefixes = tuple(t + '.' for t in SELECTABLE_TYPES)
         for dep in test_info.get('depends_on', {}).get('nodes', []):
             if dep.startswith(selectable_prefixes) and dep not in selected:
                 return False

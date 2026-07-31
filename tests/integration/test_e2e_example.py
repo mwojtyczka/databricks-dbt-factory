@@ -60,7 +60,7 @@ def _run_factory(target_path: Path, *extra_args: str) -> None:
 @pytest.mark.parametrize(
     "extra_args, description",
     [
-        pytest.param((), "dbt task type", id="dbt-task"),
+        pytest.param(("--task-type", "dbt"), "dbt task type", id="dbt-task"),
         pytest.param(("--task-type", "notebook"), "notebook task type", id="notebook-task"),
     ],
 )

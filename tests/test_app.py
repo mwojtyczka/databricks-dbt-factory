@@ -10,8 +10,8 @@ from databricks_dbt_factory.main import main, parse_args
 BASE_PATH = str(Path(__file__).resolve().parent)
 
 
-def test_main_given_default_args(monkeypatch):
-    """Test the main function for job spec generation."""
+def test_main_dbt_task_type(monkeypatch):
+    """Test the main function generating native dbt_task specs."""
     dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"
     input_job_spec_path = BASE_PATH + "/test_data/job_definition_template.yaml"
     expected_job_definition_path = BASE_PATH + "/test_data/job_definition_default.yaml"
@@ -29,6 +29,8 @@ def test_main_given_default_args(monkeypatch):
             input_job_spec_path,
             "--target-job-spec-path",
             target_job_spec_path,
+            "--task-type",
+            "dbt",
         ],
     )
 
@@ -250,6 +252,8 @@ def test_main_all_args(monkeypatch):
             project_dir,
             "--extra-dbt-command-options",
             extra_dbt_command_options,
+            "--task-type",
+            "dbt",
         ],
     )
 
@@ -329,6 +333,7 @@ def test_boolean_flags_default(monkeypatch):
     assert args.bundle_tests is False
     assert args.enable_dbt_deps is False
     assert args.dry_run is False
+    assert args.task_type == "notebook"
 
 
 def test_boolean_flags_toggled(monkeypatch):

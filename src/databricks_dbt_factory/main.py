@@ -234,9 +234,9 @@ def parse_args():
     parser.add_argument(
         "--task-type",
         type=str,
-        help="Task type to generate: 'dbt' for native dbt_task (default), 'notebook' for notebook_task wrapper.",
+        help="Task type to generate: 'notebook' for notebook_task wrapper (default), 'dbt' for native dbt_task.",
         required=False,
-        default="dbt",
+        default="notebook",
         choices=["dbt", "notebook"],
     )
     parser.add_argument(

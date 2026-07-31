@@ -65,8 +65,8 @@ def _load(path: Path) -> dict:
         return yaml.safe_load(file)
 
 
-def test_cli_default_args_matches_golden_spec(tmp_path):
-    """The installed CLI generates the expected default job spec from test_data."""
+def test_cli_dbt_task_matches_golden_spec(tmp_path):
+    """The installed CLI generates the expected native dbt_task job spec from test_data."""
     target = tmp_path / "job_definition.yaml"
 
     _run_cli(
@@ -76,6 +76,8 @@ def test_cli_default_args_matches_golden_spec(tmp_path):
         str(TEST_DATA / "job_definition_template.yaml"),
         "--target-job-spec-path",
         str(target),
+        "--task-type",
+        "dbt",
     )
 
     assert _load(target) == _load(TEST_DATA / "job_definition_default.yaml")

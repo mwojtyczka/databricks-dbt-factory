@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import tempfile
+from urllib.parse import urlparse
 
 from dbt.cli.main import dbtRunner
 
@@ -25,7 +26,12 @@ if not dbt_commands:
 
 ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
 os.environ["DBT_ACCESS_TOKEN"] = ctx.apiToken().get()
-os.environ["DBT_HOST"] = ctx.apiUrl().get()
+# dbt's host must be a bare hostname, but apiUrl() returns a full URL (scheme + host, and
+# potentially a trailing slash or path). Parse it and keep only the netloc so a value like
+# "https://my-workspace.databricks.com/" yields "my-workspace.databricks.com".
+_api_url = ctx.apiUrl().get()
+_parsed = urlparse(_api_url)
+os.environ["DBT_HOST"] = _parsed.netloc or _parsed.path.strip("/")
 
 # chdir to the dbt project so dbt runs from inside it. Relative `project_directory` is
 # resolved against this notebook's own workspace location — the same anchor native
@@ -42,17 +48,16 @@ if project_directory:
     )
     os.chdir(target_dir)
 
-# dbt writes `logs/dbt.log` and `target/` inside CWD on every run. DAB sync only uploads
-# files, not empty directories — pre-create them (idempotent).
-os.makedirs("logs", exist_ok=True)
-os.makedirs("target", exist_ok=True)
+# Point dbt's artifact and log output at a private per-task dir so the parallel tasks of a job
+# don't contend on the shared workspace `target/`/`logs/`.
+local_dir = tempfile.mkdtemp(prefix="dbt_local_")
+os.environ["DBT_TARGET_PATH"] = local_dir
+os.environ["DBT_LOG_PATH"] = local_dir
 
 # If a pre-built msgpack sits next to the project, deserialize it into a manifest and inject it into
-# dbtRunner to skip dbt's parse phase (re-reading/hashing every file + DAG rebuild) on each task. Each
-# task then writes artifacts to a private local dir (DBT_TARGET_PATH/DBT_LOG_PATH) to avoid contention
-# on the shared workspace `target/`. Falls back to a normal parse if the msgpack is absent or unusable.
+# dbtRunner to skip dbt's parse phase (re-reading/hashing every file + DAG rebuild) on each task.
+# Falls back to a normal parse if the msgpack is absent or unusable.
 manifest = None
-local_dir = None
 prebuilt_manifest_path = os.path.join("target", "partial_parse.msgpack")
 if os.path.exists(prebuilt_manifest_path):
     try:
@@ -61,9 +66,6 @@ if os.path.exists(prebuilt_manifest_path):
         with open(prebuilt_manifest_path, "rb") as f:
             manifest = Manifest.from_msgpack(f.read())
         manifest.build_flat_graph()
-        local_dir = tempfile.mkdtemp(prefix="dbt_local_")
-        os.environ["DBT_TARGET_PATH"] = local_dir
-        os.environ["DBT_LOG_PATH"] = local_dir
         print(f"[dbt-factory] injecting pre-built manifest from {prebuilt_manifest_path} (skipping dbt parse)")
     except Exception as e:
         print(f"[dbt-factory] manifest injection unavailable, falling back to dbt parse: {e}")

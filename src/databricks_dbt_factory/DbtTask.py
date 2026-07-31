@@ -53,10 +53,11 @@ class DbtTaskOptions:
     dbt_tasks_deps: list[str] = field(default_factory=list)
     """Optional comma separated list of tasks that requires dbt debs. Only in effect if dbt_deps_enabled is enabled."""
 
-    task_type: TaskType = TaskType.DBT
-    """Task type to generate: `TaskType.DBT` for native dbt_task, `TaskType.NOTEBOOK` for notebook_task
-    wrapper. Strings are accepted and coerced — any value outside the enum raises `ValueError`.
-    Notebook mode enables base environment support and environment variables on serverless."""
+    task_type: TaskType = TaskType.NOTEBOOK
+    """Task type to generate: `TaskType.NOTEBOOK` for a notebook_task wrapper (default),
+    `TaskType.DBT` for a native dbt_task. Strings are accepted and coerced — any value outside the
+    enum raises `ValueError`. Notebook mode enables base environment support and environment
+    variables on serverless."""
 
     notebook_path: str | None = None
     """Path to the dbt runner notebook. Required when task_type is `TaskType.NOTEBOOK`."""
@@ -68,6 +69,8 @@ class DbtTaskOptions:
         if not isinstance(self.task_type, TaskType):
             object.__setattr__(self, 'task_type', TaskType(self.task_type))
         if self.task_type is TaskType.NOTEBOOK:
+            if not self.notebook_path:
+                raise ValueError("notebook_path is required when task_type=NOTEBOOK.")
             unsupported = []
             for name, value in (
                 ('warehouse_id', self.warehouse_id),

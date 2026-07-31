@@ -91,7 +91,7 @@ dbt manifest and its dependencies.
 
 ## dbt tasks
 
-With the default task type, each dbt object becomes a native Databricks `dbt_task`:
+With `--task-type dbt`, each dbt object becomes a native Databricks `dbt_task`:
 
 ```mermaid
 flowchart LR
@@ -117,9 +117,9 @@ flowchart LR
     class snap1 snapshot
 ```
 
-## Notebook runner tasks (recommended for best performance)
+## Notebook runner tasks (default, recommended for best performance)
 
-With `--task-type notebook`, each task instead runs the packaged runner notebook
+With the default task type, each task runs the packaged runner notebook
 (`run_dbt_command.py`), which triggers the dbt commands programmatically using dbt core package. This gives much faster task
 start times — see [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
 
@@ -220,6 +220,7 @@ databricks_dbt_factory  \
   --dbt-manifest-path target/manifest.json \
   --input-job-spec-path job_template.yaml \
   --target-job-spec-path job_definition.yaml \
+  --task-type dbt \
   --source GIT \
   --target dev
 ```
@@ -305,7 +306,7 @@ databricks_dbt_factory  \
 - `--target-job-spec-path` (type: str, required): Path to the target job spec file.
 - `--target` (type: str, optional): dbt target to use. If not provided, the default target from the dbt profile will be used.
 - `--source` (type: str, optional, default: None): Project source (`GIT` or `WORKSPACE`). If not provided, `WORKSPACE` will be used.
-- `--task-type` (type: str, optional, default: "dbt"): Task type to generate — `dbt` for native dbt_task, `notebook` for notebook_task wrapper.
+- `--task-type` (type: str, optional, default: "notebook"): Task type to generate — `notebook` for notebook_task wrapper, `dbt` for native dbt_task.
 - `--notebook-path` (type: str, optional): Path to the dbt runner notebook used when `--task-type notebook`. If omitted, the packaged runner notebook is copied next to the generated job spec and referenced relatively, so `databricks bundle deploy` uploads it automatically. **When provided, also pass `--project-directory` as an absolute workspace path** — see the note in [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
 - `--warehouse_id` (type: str, optional): SQL Warehouse ID. Only used with native dbt_task.
 - `--schema` (type: str, optional): Metastore schema. Only used with native dbt_task.
@@ -424,7 +425,7 @@ filtering.
 
 The factory supports two task types, controlled by `--task-type`:
 
-### `dbt` (default)
+### `dbt`
 
 Generates native Databricks `dbt_task` entries. This is the standard approach that
 uses Databricks' built-in dbt integration. Works with both classic compute and serverless.
@@ -432,7 +433,7 @@ uses Databricks' built-in dbt integration. Works with both classic compute and s
 **Limitations on Serverless:** Native dbt tasks do not support workspace base environments (requiring installing dependencies on every task)
 or environment variables. If you need either of these, use the `notebook` task type instead.
 
-### `notebook`
+### `notebook` (default)
 
 Generates `notebook_task` entries that wrap dbt execution via the `dbtRunner` Python API.
 Each task calls a shared runner notebook (`run_dbt_command.py`) with parameterized dbt commands.
@@ -522,7 +523,7 @@ The steps below walk through running it end-to-end.
       --new-job-name dbt_sql_job_explicit_tasks
     ```
 
-    For best performance, add `--task-type notebook` to the command above — it routes dbt execution through the packaged runner notebook (pre-cached base environments, faster cold starts). See [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance) for the full rationale.
+    This uses the default `notebook` task type, which routes dbt execution through the packaged runner notebook (pre-cached base environments, faster cold starts). See [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance) for the full rationale, or pass `--task-type dbt` for native dbt tasks.
 
 6. **Authenticate the Databricks CLI to your workspace.** The `databricks.yml` in the demo references a specific profile (e.g. `FIELD-ENG`) under each target. Log in so that profile resolves:
 

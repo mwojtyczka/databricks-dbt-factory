@@ -44,7 +44,7 @@ def test_notebook_task_without_job_cluster_key_uses_environment():
 
 
 def test_dbt_task_without_job_cluster_key_uses_environment():
-    options = DbtTaskOptions(environment_key="Default")
+    options = DbtTaskOptions(environment_key="Default", task_type=TaskType.DBT)
     task = DbtTask(task_key="my_model", commands=["dbt run --select my_model"], options=options)
 
     result = task.to_dict()
@@ -94,3 +94,12 @@ def test_dbt_task_still_accepts_warehouse_schema_catalog():
         catalog="main",
     )
     assert options.warehouse_id == "wh123"
+
+
+def test_task_type_defaults_to_notebook():
+    assert DbtTaskOptions(notebook_path="./runner.py").task_type is TaskType.NOTEBOOK
+
+
+def test_notebook_task_requires_notebook_path():
+    with pytest.raises(ValueError, match="notebook_path is required"):
+        DbtTaskOptions(task_type=TaskType.NOTEBOOK)

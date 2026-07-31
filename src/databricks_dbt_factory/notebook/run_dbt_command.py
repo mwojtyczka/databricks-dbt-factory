@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import tempfile
+from urllib.parse import urlparse
 
 from dbt.cli.main import dbtRunner
 
@@ -25,8 +26,12 @@ if not dbt_commands:
 
 ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
 os.environ["DBT_ACCESS_TOKEN"] = ctx.apiToken().get()
-# dbt's host must be a bare hostname; apiUrl() includes the https:// scheme.
-os.environ["DBT_HOST"] = ctx.apiUrl().get().removeprefix("https://").removeprefix("http://")
+# dbt's host must be a bare hostname, but apiUrl() returns a full URL (scheme + host, and
+# potentially a trailing slash or path). Parse it and keep only the netloc so a value like
+# "https://my-workspace.databricks.com/" yields "my-workspace.databricks.com".
+_api_url = ctx.apiUrl().get()
+_parsed = urlparse(_api_url)
+os.environ["DBT_HOST"] = _parsed.netloc or _parsed.path.strip("/")
 
 # chdir to the dbt project so dbt runs from inside it. Relative `project_directory` is
 # resolved against this notebook's own workspace location — the same anchor native

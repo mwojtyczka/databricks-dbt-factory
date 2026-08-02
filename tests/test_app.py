@@ -336,6 +336,51 @@ def test_boolean_flags_default(monkeypatch):
     assert args.task_type == "notebook"
 
 
+def test_select_defaults_to_none(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS])
+    args = parse_args()
+    assert args.select is None
+
+
+def test_select_parses(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py", *REQUIRED_ARGS, "--select", "tag:daily +orders"])
+    args = parse_args()
+    assert args.select == "tag:daily +orders"
+
+
+@pytest.mark.parametrize("select", ["", "   "])
+def test_main_rejects_empty_select(monkeypatch, select):
+    # A provided-but-empty --select (empty string or whitespace) is routed to ManifestFilter
+    # and rejected, rather than the empty string silently skipping the filter and generating
+    # the full job. Omitting the flag entirely (select=None) still generates everything.
+    dbt_manifest_path = BASE_PATH + "/test_data/manifest.json"
+    input_job_spec_path = BASE_PATH + "/test_data/job_definition_template.yaml"
+
+    with NamedTemporaryFile(suffix=".yaml", delete=False) as temp_file:
+        target_job_spec_path = temp_file.name
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            dbt_manifest_path,
+            "--input-job-spec-path",
+            input_job_spec_path,
+            "--target-job-spec-path",
+            target_job_spec_path,
+            "--select",
+            select,
+        ],
+    )
+    try:
+        with pytest.raises(ValueError, match="Empty --select expression"):
+            main()
+    finally:
+        if os.path.exists(target_job_spec_path):
+            os.remove(target_job_spec_path)
+
+
 def test_boolean_flags_toggled(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",

@@ -2,7 +2,7 @@ from dataclasses import replace
 
 from databricks_dbt_factory import TaskFactory
 from databricks_dbt_factory.DbtTask import DbtTask
-from databricks_dbt_factory.Utils import build_task_key_maps
+from databricks_dbt_factory.Utils import build_task_key_maps, unit_test_model, SELECTABLE_TYPES
 
 
 class DbtFactory:
@@ -42,7 +42,6 @@ class DbtFactory:
         tasks = self._create_tasks(dbt_manifest)
         return [task.to_dict() for task in tasks]
 
-    _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
     _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
     @staticmethod
@@ -139,7 +138,7 @@ class DbtFactory:
         """
         ids: list[str] = []
         for unit_test_full_name, unit_test_info in dbt_unit_tests.items():
-            model_full_name = self._unit_test_model(unit_test_info)
+            model_full_name = unit_test_model(unit_test_info)
             if model_full_name is not None and model_full_name in dbt_nodes:
                 ids.append(unit_test_full_name)
         return ids
@@ -238,15 +237,6 @@ class DbtFactory:
         return 'error'
 
     @staticmethod
-    def _unit_test_model(unit_test_info: dict) -> str | None:
-        """Returns the full name of the model a unit test targets, or None if it can't be resolved."""
-        model = unit_test_info.get('model')
-        package = unit_test_info.get('package_name')
-        if model and package:
-            return f'model.{package}.{model}'
-        return None
-
-    @staticmethod
     def _extend_deps_with_upstream_tests(
         node_full_name: str,
         existing_deps: list[str] | None,
@@ -309,7 +299,7 @@ class DbtFactory:
                 standalone_tests.append((node_full_name, node_info))
 
         for unit_test_info in dbt_unit_tests.values():
-            model_full_name = self._unit_test_model(unit_test_info)
+            model_full_name = unit_test_model(unit_test_info)
             if model_full_name is not None and model_full_name in dbt_nodes:
                 single_model_tested.add(model_full_name)
         return single_model_tested, standalone_tests
@@ -341,7 +331,7 @@ class DbtFactory:
             factory = self.task_factories[resource_type]
             task = factory.create_task(self._fqn_select(node_info), node_info['name'], node_info, task_key, task_keys)
 
-            if resource_type in self._GATEABLE_TYPES:
+            if resource_type in SELECTABLE_TYPES:
                 if bundle:
                     task = replace(task, depends_on=self._rewire_deps(task.depends_on, bundled_test_key_by_task_key))
                 elif tests_by_resource:

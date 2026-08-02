@@ -4,6 +4,7 @@ from pathlib import Path
 import yaml
 
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
+from databricks_dbt_factory.ManifestFilter import ManifestFilter
 from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
 from databricks_dbt_factory.Utils import read_dbt_manifest
 
@@ -520,6 +521,38 @@ def test_flat_mode_unit_test_on_absent_model_is_skipped(dbt_factory):
 
     assert 'unit_test_pkg_missing_test_totals' not in by_key
     assert by_key == {}
+
+
+def test_select_scopes_generated_tasks_from_real_manifest(dbt_factory):
+    # `--select dbt_demo.sql_model2` scopes generation to the sql_model2 subtree. Only its two
+    # models (and their attached tests) are emitted; sql_model1 / dbt_util models are excluded.
+    manifest_path = BASE_PATH + "/test_data/manifest.json"
+    input_spec = BASE_PATH + "/test_data/job_definition_template.yaml"
+
+    with NamedTemporaryFile(suffix=".yaml", delete=False) as temp_file:
+        out_path = temp_file.name
+
+    try:
+        manifest = ManifestFilter("dbt_demo.sql_model2").apply(read_dbt_manifest(manifest_path))
+        tasks = dbt_factory.create_tasks(manifest)
+        replace_tasks_in_job_spec(input_spec, tasks, out_path)
+        with open(out_path, "r", encoding="utf-8") as file:
+            spec = yaml.safe_load(file)
+    finally:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
+    tasks = spec["resources"]["jobs"]["dbt_sql_job"]["tasks"]
+    model_task_keys = {t["task_key"] for t in tasks if t["task_key"].endswith("_model")}
+    assert model_task_keys == {"first_dbt_model_model", "second_dbt_model_model"}
+    # a sql_model1 model must not be generated
+    assert "diamonds_prices_model" not in {t["task_key"] for t in tasks}
+    # second_dbt_model depends on first_dbt_model (both selected) and its tests; the surviving
+    # depends_on must only reference generated tasks (no dangling deps on dropped nodes).
+    all_keys = {t["task_key"] for t in tasks}
+    for task in tasks:
+        for dep in task.get("depends_on", []):
+            assert dep["task_key"] in all_keys, f"dangling dep {dep['task_key']} in {task['task_key']}"
 
 
 def test_create_job_spec_and_update(dbt_factory):

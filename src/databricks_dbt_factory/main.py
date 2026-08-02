@@ -7,6 +7,7 @@ from pathlib import Path
 from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.DbtFactory import DbtFactory
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
+from databricks_dbt_factory.ManifestFilter import ManifestFilter
 from databricks_dbt_factory.Utils import read_dbt_manifest
 from databricks_dbt_factory.DbtTask import DbtTaskOptions
 from databricks_dbt_factory.TaskFactory import (
@@ -67,6 +68,11 @@ def main():
 
     factory = DbtFactory(task_factories, bundle_tests=args.bundle_tests)
     manifest = read_dbt_manifest(args.dbt_manifest_path)
+    # `is not None` (not truthiness) so a provided-but-empty `--select ""` is routed to
+    # ManifestFilter and rejected the same way `--select "   "` is, rather than silently
+    # skipping the filter and generating the full job. The flag defaults to None when omitted.
+    if args.select is not None:
+        manifest = ManifestFilter(args.select).apply(manifest)
     tasks = factory.create_tasks(manifest)
     if args.dry_run:
         print(tasks)
@@ -151,6 +157,20 @@ def parse_args():
         default=None,
     )
     parser.add_argument("--dbt-manifest-path", type=str, help="Path to the manifest file", required=True)
+    parser.add_argument(
+        "--select",
+        type=str,
+        required=False,
+        default=None,
+        help=(
+            "Optional dbt-style selector to scope the generated tasks to a subset of the manifest, "
+            "so a monorepo project can produce one job per domain without pre-filtering the manifest. "
+            "Supports space-separated union of `tag:<tag>`, `path:<dir>`, `fqn:<a.b.c>` and bare "
+            "name/fqn selectors, each optionally wrapped in the `+`/`@` graph operators (e.g. "
+            "`+my_model`, `tag:daily+`). Resolved from the manifest alone (no dbt invocation); the "
+            "full dbt selector grammar (set intersections, `state:`, `config:`, …) is not supported."
+        ),
+    )
     parser.add_argument("--input-job-spec-path", type=str, help="Path to the input job spec file", required=True)
     parser.add_argument(
         "--target-job-spec-path",

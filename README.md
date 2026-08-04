@@ -356,10 +356,16 @@ default (pass `--no-run-tests` to skip them). Selectors are each node's full dot
 reused across packages still resolves to a single node. Two modes are available, controlled by
 `--bundle-tests`:
 
-> **Known limitation.** dbt matches an FQN selector as a *prefix*, so a node that has another node
-> nested beneath it also selects that descendant. If you have both `models/orders.sql` and
-> `models/orders/items.sql`, the `orders` task also builds `items` (and in bundled mode sweeps
-> `items`' tests into `orders_test`). Avoid naming a model directory after a sibling model.
+> **Note on FQN selection.** FQN selectors are hierarchical by design: dbt matches them as a path
+> *prefix*, which is what lets `--select staging` build everything under `staging/`. Tasks inherit
+> that behaviour, and it is what you want almost always — including for a model and its unit tests,
+> since the model task is restricted by resource type and a bundled test task is meant to sweep its
+> resource's unit tests in.
+>
+> The one layout to avoid is naming a model directory after a sibling model in the same directory
+> (`models/marts/orders.sql` next to `models/marts/orders/items.sql`). There `orders`' selector also
+> matches `items`, so the `orders` task builds `items` too, ignoring `items`' own dependencies, and
+> in bundled mode `orders_test` sweeps in `items`' tests. Renaming either one resolves it.
 
 ### Per-test (default)
 

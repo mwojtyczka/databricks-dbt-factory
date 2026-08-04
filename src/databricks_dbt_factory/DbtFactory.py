@@ -52,15 +52,20 @@ class DbtFactory:
         dots. The fqn scopes the selector to one package, so a model name reused across packages
         still resolves to a single node. Falls back to the bare `name` if the node has no fqn.
 
-        Known limitation: dbt matches an fqn selector as a positional *prefix* (of either the fqn
-        or, per `QualifiedNameSelectorMethod`, the fqn with its package stripped), so a node that
-        has another node nested beneath it also selects that descendant. `models/orders.sql`
-        alongside `models/orders/items.sql` builds `items` inside `orders`' task as well as its
-        own, and in bundled mode sweeps `items`' tests into `orders_test`. Verified with `dbt ls`
-        on dbt 1.11.6. A bare-name intersection (`orders,pkg.orders`) does not fix this — the
-        unscoped-fqn fallback matches `items` on the bare name too — so disambiguation needs a
-        different selector method (`file:` / `path:` both isolate correctly). Left as-is for now
-        because it requires the unusual layout of a model directory named after a sibling model.
+        fqn selection is hierarchical by design: dbt matches a selector as a positional path
+        *prefix* — of the fqn, or per `QualifiedNameSelectorMethod` of the fqn with its package
+        stripped — which is what makes `--select staging` build everything under `staging/`. Tasks
+        inherit that, and it is the desired behaviour in practice, including for a model and its
+        unit tests (whose fqn nests under the model's): a resource task is filtered by resource
+        type, and a bundled test task is meant to sweep its resource's unit tests in.
+
+        The one layout it does not serve is a model directory named after a sibling model in the
+        same directory (`models/marts/orders.sql` beside `models/marts/orders/items.sql`), where
+        `orders`' selector also matches `items` — so `orders`' task builds `items` too, ignoring
+        `items`' own dependency wiring. Confirmed with `dbt ls` on dbt 1.11.6. Intersecting with
+        the bare name does not help, since the unscoped-fqn fallback matches the descendant on the
+        bare name as well; only a different selector method would (`file:` and `path:` both isolate
+        correctly). Left as-is because the layout is rare and renaming either node avoids it.
         """
         fqn = node_info.get('fqn')
         return '.'.join(fqn) if fqn else node_info['name']

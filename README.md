@@ -362,10 +362,13 @@ reused across packages still resolves to a single node. Two modes are available,
 > since the model task is restricted by resource type and a bundled test task is meant to sweep its
 > resource's unit tests in.
 >
-> The one layout to avoid is naming a model directory after a sibling model in the same directory
-> (`models/marts/orders.sql` next to `models/marts/orders/items.sql`). There `orders`' selector also
-> matches `items`, so the `orders` task builds `items` too, ignoring `items`' own dependencies, and
-> in bundled mode `orders_test` sweeps in `items`' tests. Renaming either one resolves it.
+> The exception is naming a model directory after a sibling model in the same directory
+> (`models/marts/orders.sql` next to `models/marts/orders/items.sql`). There `orders`' FQN is a
+> prefix of `items`' FQN, so a plain selector would build `items` inside `orders`' task — ignoring
+> `items`' own dependencies — as well as concurrently in its own task, writing the same table twice.
+> For those nodes only, the selector is intersected with `path:<file>`
+> (`pkg.marts.orders,path:models/marts/orders.sql`), which restricts it to the single file. Every
+> other selector stays a plain FQN.
 
 ### Per-test (default)
 

@@ -27,6 +27,9 @@ class DbtFactory:
         """
         self.task_factories = task_factories
         self.bundle_tests = bundle_tests
+        # fqns that a nested node's fqn extends, so `_fqn_select` knows which selectors to pin.
+        # Recomputed per manifest at the start of `_create_tasks`.
+        self._ambiguous_fqns: frozenset[tuple[str, ...]] = frozenset()
 
     def create_tasks(self, dbt_manifest: dict) -> list[dict]:
         """
@@ -45,30 +48,71 @@ class DbtFactory:
     _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
     _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
-    @staticmethod
-    def _fqn_select(node_info: dict) -> str:
+    # Characters `Path.glob` treats as pattern syntax. A `path:` selector containing any of them is
+    # read as a glob and matches nothing, so such paths cannot be used to pin a selector.
+    _GLOB_METACHARACTERS = frozenset('*?[]')
+
+    def _fqn_select(self, node_info: dict) -> str:
         """
         Returns the dbt `--select` argument for a node: its fully qualified name (fqn) joined by
-        dots. The fqn scopes the selector to one package, so a model name reused across packages
-        still resolves to a single node. Falls back to the bare `name` if the node has no fqn.
+        dots, intersected with a `path:` selector when the plain fqn would over-select.
 
         fqn selection is hierarchical by design: dbt matches a selector as a positional path
         *prefix* — of the fqn, or per `QualifiedNameSelectorMethod` of the fqn with its package
-        stripped — which is what makes `--select staging` build everything under `staging/`. Tasks
-        inherit that, and it is the desired behaviour in practice, including for a model and its
-        unit tests (whose fqn nests under the model's): a resource task is filtered by resource
-        type, and a bundled test task is meant to sweep its resource's unit tests in.
+        stripped — which is what makes `--select staging` build everything under `staging/`. That is
+        the desired behaviour nearly everywhere, including for a model and its unit tests (whose fqn
+        nests under the model's): a resource task is filtered by resource type, and a bundled test
+        task is meant to sweep its resource's unit tests in.
 
-        The one layout it does not serve is a model directory named after a sibling model in the
-        same directory (`models/marts/orders.sql` beside `models/marts/orders/items.sql`), where
-        `orders`' selector also matches `items` — so `orders`' task builds `items` too, ignoring
-        `items`' own dependency wiring. Confirmed with `dbt ls` on dbt 1.11.6. Intersecting with
-        the bare name does not help, since the unscoped-fqn fallback matches the descendant on the
-        bare name as well; only a different selector method would (`file:` and `path:` both isolate
-        correctly). Left as-is because the layout is rare and renaming either node avoids it.
+        The exception is a model directory named after a sibling model (`models/marts/orders.sql`
+        beside `models/marts/orders/items.sql`). There `orders`' fqn is a prefix of `items`' fqn, so
+        the plain selector builds `items` inside `orders`' task — ignoring `items`' own dependency
+        wiring — as well as in `items`' own task, concurrently. For those nodes only, the selector
+        is intersected with `path:<original_file_path>`, which restricts it to the one file.
+        `path:` is used rather than a bare-name intersection because the latter does not work: dbt
+        also matches the package-stripped fqn, so the descendant matches the bare name too.
+
+        Falls back to the plain fqn when the node has no usable path — absent, or containing glob
+        metacharacters, since dbt resolves `path:` through `Path.glob` and a pattern that is meant
+        literally would match nothing at all. Over-selecting is bad; selecting nothing is worse.
         """
         fqn = node_info.get('fqn')
-        return '.'.join(fqn) if fqn else node_info['name']
+        if not fqn:
+            return node_info['name']
+        select = '.'.join(fqn)
+        if tuple(fqn) not in self._ambiguous_fqns:
+            return select
+        path = node_info.get('original_file_path')
+        if not path or self._GLOB_METACHARACTERS & set(path):
+            return select
+        return f'{select},path:{path}'
+
+    @classmethod
+    def _compute_ambiguous_fqns(cls, dbt_manifest: dict) -> frozenset[tuple[str, ...]]:
+        """
+        The fqns whose plain selector would also match a *buildable* node nested beneath them, and
+        which `_fqn_select` therefore pins.
+
+        Only models, seeds and snapshots count as the nested node here — those are the resources a
+        selector would wrongly build a second time. A unit test's fqn also nests under its model's
+        (`pkg.marts.orders.ut_orders` under `pkg.marts.orders`), but sweeping it in is exactly what
+        a bundled test task is for, and a resource task is filtered by resource type so it can never
+        run one. Counting unit tests would pin nearly every unit-tested model in a conventional
+        project for no benefit.
+        """
+        fqns_by_node = {
+            unique_id: tuple(info['fqn'])
+            for unique_id, info in dbt_manifest.get('nodes', {}).items()
+            if info.get('fqn')
+        }
+        buildable = {
+            fqn
+            for unique_id, fqn in fqns_by_node.items()
+            if dbt_manifest['nodes'][unique_id].get('resource_type') in cls._GATEABLE_TYPES
+        }
+        all_fqns = set(fqns_by_node.values())
+        # An fqn needs pinning iff a buildable node's fqn strictly extends it.
+        return frozenset(fqn[:i] for fqn in buildable for i in range(1, len(fqn)) if fqn[:i] in all_fqns)
 
     def _create_tasks(self, dbt_manifest: dict) -> list[DbtTask]:
         """
@@ -83,6 +127,7 @@ class DbtFactory:
         dbt_nodes = dbt_manifest.get('nodes', {})
         dbt_sources = dbt_manifest.get('sources', {})
         dbt_unit_tests = dbt_manifest.get('unit_tests', {})
+        self._ambiguous_fqns = self._compute_ambiguous_fqns(dbt_manifest)
 
         bundle = 'test' in self.task_factories and self.bundle_tests
         single_model_tested: set[str] = set()

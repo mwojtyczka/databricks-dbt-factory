@@ -17,6 +17,7 @@ def _model(
     depends_on: list[str] | None = None,
     fqn: list[str] | None = None,
     version: int | str | None = None,
+    path: str | None = None,
 ) -> tuple[str, dict]:
     # A versioned model's unique_id carries its version: model.<pkg>.<name>.v<N>.
     full_name = f"model.{package}.{name}" + (f".v{version}" if version is not None else "")
@@ -25,6 +26,7 @@ def _model(
         'name': name,
         'package_name': package,
         'fqn': fqn or [package, name],
+        'original_file_path': path or f"models/{name}.sql",
         'depends_on': {'nodes': depends_on or []},
     }
     if version is not None:
@@ -589,6 +591,100 @@ def test_resolver_uses_task_keys_map():
     node = {"depends_on": {"nodes": ["model.a.orders"]}}
     task_keys = {"model.a.orders": "a_orders_model"}  # disambiguated
     assert DbtDependencyResolver.resolve(node, ["model"], task_keys) == ["a_orders_model"]
+
+
+def test_select_stays_plain_fqn_when_nothing_is_nested_beneath_the_node(dbt_factory):
+    # The `path:` pin is only needed to fence off nodes nested beneath a node's fqn. Without one,
+    # the plain fqn already resolves to a single node, so selectors stay readable and no existing
+    # job spec changes.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'staging', 'orders'], path='models/staging/orders.sql'),
+            _model('pkg', 'customers', fqn=['pkg', 'staging', 'customers'], path='models/staging/customers.sql'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select pkg.staging.orders --target dev']
+
+
+def test_select_of_ancestor_is_pinned_by_path_so_nested_model_is_not_built_twice(dbt_factory):
+    # `models/marts/orders.sql` beside `models/marts/orders/items.sql`. dbt matches an fqn selector
+    # as a path prefix, so the plain fqn `pkg.marts.orders` also selects `items` — building it in
+    # orders' task (ignoring items' own deps) and again, concurrently, in items' own task.
+    # Intersecting with `path:` restricts the selection to the one file.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'marts', 'orders'], path='models/marts/orders.sql'),
+            _model('pkg', 'items', fqn=['pkg', 'marts', 'orders', 'items'], path='models/marts/orders/items.sql'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_model']['dbt_task']['commands'] == [
+        'dbt run --select pkg.marts.orders,path:models/marts/orders.sql --target dev'
+    ]
+    # The nested node has nothing beneath it, so its own selector needs no pin.
+    assert by_key['items_model']['dbt_task']['commands'] == ['dbt run --select pkg.marts.orders.items --target dev']
+
+
+def test_bundled_test_select_of_ancestor_is_pinned_by_path(dbt_factory_bundled):
+    # Same hazard for the bundled `<model>_test` task: unpinned, `orders_test` would sweep in the
+    # nested model's tests under `--indirect-selection cautious`, gated only on orders' own task.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'marts', 'orders'], path='models/marts/orders.sql'),
+            _model('pkg', 'items', fqn=['pkg', 'marts', 'orders', 'items'], path='models/marts/orders/items.sql'),
+            _test('pkg', 'unique_orders_id', ['model.pkg.orders']),
+        ]
+    )
+
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    expected = (
+        'dbt test --select pkg.marts.orders,path:models/marts/orders.sql --indirect-selection cautious --target dev'
+    )
+    assert by_key['orders_test']['dbt_task']['commands'] == [expected]
+
+
+def test_select_is_not_pinned_when_the_path_contains_glob_metacharacters(dbt_factory):
+    # dbt resolves `path:` through `Path.glob`, so a path containing `*?[]` is read as a pattern and
+    # matches nothing at all — silently selecting zero nodes, which is worse than over-selecting.
+    # Such nodes keep the plain fqn and stay subject to the prefix behaviour.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'marts', 'orders'], path='models/marts/or[der]s.sql'),
+            _model('pkg', 'items', fqn=['pkg', 'marts', 'orders', 'items'], path='models/marts/orders/items.sql'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select pkg.marts.orders --target dev']
+
+
+def test_select_of_ancestor_is_not_pinned_when_the_node_has_no_path(dbt_factory):
+    # A manifest node without `original_file_path` (hand-rolled, or a resource type that has none)
+    # cannot be pinned, so it falls back to the plain fqn rather than emitting a broken selector.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'marts', 'orders']),
+            _model('pkg', 'items', fqn=['pkg', 'marts', 'orders', 'items']),
+        ]
+    )
+    for info in nodes.values():
+        info.pop('original_file_path', None)
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select pkg.marts.orders --target dev']
 
 
 def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):

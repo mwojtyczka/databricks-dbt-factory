@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from databricks_dbt_factory import TaskFactory
+from databricks_dbt_factory.TaskFactory import TaskFactory
 from databricks_dbt_factory.DbtTask import DbtTask
 from databricks_dbt_factory.Utils import build_task_key_maps
 
@@ -48,14 +48,27 @@ class DbtFactory:
     @staticmethod
     def _fqn_select(node_info: dict) -> str:
         """
-        Returns the dbt `--select` argument for a node: its fully qualified name (fqn) joined by
-        dots. dbt matches `--select a.b.c` positionally against a node's fqn, so the full fqn is
-        unambiguous across packages (a bare name collides when two packages share it) and matches
-        models in subdirectories (a `<package>.<name>` selector does not). Falls back to the bare
-        `name` if the manifest node has no fqn.
+        Returns the dbt `--select` argument that matches exactly one node: the intersection
+        (`,`) of the node's bare name and its full dot-joined fqn.
+
+        Neither half is exact on its own. dbt matches an fqn selector as a positional *prefix* of
+        the node's fqn, so the full fqn alone also selects every node nested beneath it —
+        `pkg.staging.orders` matches both `models/staging/orders.sql` and
+        `models/staging/orders/items.sql`, which would build `items` inside `orders`' task,
+        ignoring its own dependency wiring. The bare name alone matches the fqn leaf exactly but
+        collides when two packages share a model name. Intersected, the fqn scopes the package and
+        directory while the leaf-name match pins the selector to a single node.
+
+        Falls back to the bare `name` if the manifest node has no fqn.
         """
+        name = node_info['name']
         fqn = node_info.get('fqn')
-        return '.'.join(fqn) if fqn else node_info['name']
+        if not fqn:
+            return name
+        # dbt matches the bare `name` against the fqn leaf, or — for a versioned model, whose fqn
+        # leaf is its version — against the name segment preceding it. Either way `name` is the
+        # spelling that matches, so it is used rather than `fqn[-1]`.
+        return f"{name},{'.'.join(fqn)}"
 
     def _create_tasks(self, dbt_manifest: dict) -> list[DbtTask]:
         """
@@ -239,7 +252,20 @@ class DbtFactory:
 
     @staticmethod
     def _unit_test_model(unit_test_info: dict) -> str | None:
-        """Returns the full name of the model a unit test targets, or None if it can't be resolved."""
+        """
+        Returns the full name of the model a unit test targets, or None if it can't be resolved.
+
+        Prefers dbt's already-resolved `depends_on.nodes[0]`, which is the authority: dbt resolves
+        the `model` field to a node id at parse time and rewrites unit tests on *versioned* models
+        to target `model.<pkg>.<name>.v<N>` while leaving `model` as the bare name. Rebuilding
+        `model.<pkg>.<model>` from the `model` field would therefore miss versioned models
+        entirely (and dbt's `<name> <version>` spelling of the field), silently dropping the unit
+        test. Falls back to that reconstruction only when `depends_on` is absent, so manifests
+        that predate it keep working.
+        """
+        for dep in unit_test_info.get('depends_on', {}).get('nodes', []):
+            if dep.startswith('model.'):
+                return dep
         model = unit_test_info.get('model')
         package = unit_test_info.get('package_name')
         if model and package:

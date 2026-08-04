@@ -125,12 +125,19 @@ def build_task_key_maps(
     task_keys: dict[str, str] = {}
     bundled_test_keys: dict[str, str] = {}
     taken: set[str] = set()
+    # Both passes walk their claims in sorted order rather than manifest order. `_reserve`'s
+    # numeric suffix is handed out first-come, so iterating in manifest order would let the
+    # *arrangement* of the manifest decide which of two colliding nodes keeps the readable key —
+    # adding or renaming an unrelated model could then silently swap two task keys, repointing
+    # per-task run history and task-level alerts at a different model. Sorting makes every
+    # assigned key a function of the node ids alone.
+    ordered_claims = sorted((key, sorted(claimants)) for key, claimants in claims.items())
     # Assign uncontested keys first so a contested claimant's fallback never steals a plain key.
-    for key, claimants in claims.items():
+    for key, claimants in ordered_claims:
         if len(claimants) == 1:
             uid, is_bundled = claimants[0]
             (bundled_test_keys if is_bundled else task_keys)[uid] = _reserve(key, taken)
-    for key, claimants in claims.items():
+    for key, claimants in ordered_claims:
         if len(claimants) == 1:
             continue
         for uid, is_bundled in claimants:

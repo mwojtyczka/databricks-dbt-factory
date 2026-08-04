@@ -370,6 +370,12 @@ reused across packages still resolves to a single node. Two modes are available,
 > (`pkg.marts.orders,file:orders.sql`), which pins it to the single node. Every other selector stays
 > a plain FQN. The same applies when the sibling's *name* contains a dot
 > (`models/marts/orders.items.sql`), since dbt treats dots in names as path separators too.
+>
+> **Avoid spaces in model file and directory names.** dbt reads a space in a selector as its union
+> separator, so an FQN containing one can never match — and its leading fragment may match a
+> different model instead. Such nodes are selected by file name alone (`file:orders.sql`); if the
+> file name is also unusable, generation fails rather than emit a selector that could build the
+> wrong model.
 
 ### Per-test (default)
 

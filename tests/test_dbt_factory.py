@@ -1,6 +1,7 @@
 import os
 from tempfile import NamedTemporaryFile
 from pathlib import Path
+import pytest
 import yaml
 
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
@@ -705,6 +706,36 @@ def test_select_of_ancestor_is_pinned_when_a_sibling_name_contains_a_dot(dbt_fac
     assert by_key['orders_model']['dbt_task']['commands'] == [
         'dbt run --select pkg.marts.orders,file:orders.sql --target dev'
     ]
+
+
+def test_select_drops_the_fqn_when_it_contains_a_space(dbt_factory):
+    # dbt splits a selector on spaces itself (a space is its union separator), so an fqn containing
+    # one can never match however it is quoted — and worse, the leading fragment can match an
+    # unrelated model: `probe.my marts.orders` becomes `probe.my` + `marts.orders`, and `probe.my`
+    # selects `models/my/decoy.sql`. Verified with `dbt ls`. Emitting `file:` alone still isolates
+    # the intended node, so a spacey path drops the unusable fqn half rather than mis-selecting.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'my marts', 'orders'], path='models/my marts/orders.sql'),
+            _model('pkg', 'decoy', fqn=['pkg', 'my', 'decoy'], path='models/my/decoy.sql'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select file:orders.sql --target dev']
+
+
+def test_select_raises_when_neither_the_fqn_nor_the_file_name_is_usable(dbt_factory):
+    # If the fqn is unusable (space) *and* the file name is unusable (glob metacharacters), no
+    # selector reliably isolates the node. Emitting the spacey fqn could build an unrelated model
+    # and silently omitting the task would hide the problem, so generation fails loudly instead —
+    # at build time, where it is fixable, rather than at run time.
+    nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'my marts', 'orders'], path='models/my marts/or[der]s.sql')])
+
+    with pytest.raises(ValueError, match='no selector can isolate'):
+        dbt_factory.create_tasks({'nodes': nodes})
 
 
 def test_select_falls_back_to_the_bare_name_when_the_node_has_no_fqn(dbt_factory):

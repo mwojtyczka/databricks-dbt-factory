@@ -373,9 +373,9 @@ reused across packages still resolves to a single node. Two modes are available,
 >
 > **Avoid spaces in model file and directory names.** dbt reads a space in a selector as its union
 > separator, so an FQN containing one can never match — and its leading fragment may match a
-> different model instead. Such nodes are selected by file name alone (`file:orders.sql`); if the
-> file name is also unusable, generation fails rather than emit a selector that could build the
-> wrong model.
+> different model instead. Such nodes are selected by file name and package instead
+> (`file:orders.sql,package:mypkg`); if the file name is also unusable, generation fails rather than
+> emit a selector that could build the wrong model.
 
 ### Per-test (default)
 

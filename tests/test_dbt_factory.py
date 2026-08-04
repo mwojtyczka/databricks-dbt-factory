@@ -724,6 +724,41 @@ def test_select_drops_the_fqn_when_it_contains_a_space(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
+    assert by_key['orders_model']['dbt_task']['commands'] == [
+        'dbt run --select file:orders.sql,package:pkg --target dev'
+    ]
+
+
+def test_select_of_spacey_node_is_scoped_to_its_package(dbt_factory):
+    # Dropping the fqn also drops its package scoping, and `file:` matches base names across every
+    # package. Two models named `orders.sql` in different packages are legal, so `file:orders.sql`
+    # alone would build both. `package:` restores the scoping the fqn was providing.
+    nodes = dict(
+        [
+            _model('mypkg', 'orders', fqn=['mypkg', 'my marts', 'orders'], path='models/my marts/orders.sql'),
+            _model('pkg', 'orders', fqn=['pkg', 'other', 'orders'], path='models/other/orders.sql'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['mypkg_orders_model']['dbt_task']['commands'] == [
+        'dbt run --select file:orders.sql,package:mypkg --target dev'
+    ]
+
+
+def test_select_of_spacey_node_is_not_package_scoped_when_the_package_name_is_unusable(dbt_factory):
+    # `package:` is matched with `fnmatch` as well, so a package name containing glob metacharacters
+    # would match the wrong packages (or none). Such a node keeps the bare `file:` selector rather
+    # than a scoping term that cannot be trusted.
+    nodes = dict(
+        [_model('my[pkg]', 'orders', fqn=['my[pkg]', 'my marts', 'orders'], path='models/my marts/orders.sql')]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
     assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select file:orders.sql --target dev']
 
 

@@ -105,13 +105,18 @@ class DbtFactory:
         file_usable = bool(file_name) and not cls._GLOB_METACHARACTERS & set(file_name)
 
         if not cls._fqn_is_usable(fqn):
-            # The fqn cannot be used at all, so `file:` alone has to identify the node.
+            # The fqn cannot be used at all, so `file:` has to identify the node. Dropping the fqn
+            # also drops its package scoping, and `file:` matches base names across every package —
+            # two packages may each have an `orders.sql` — so `package:` restores that scoping.
             if not file_usable:
                 raise ValueError(
                     f'Cannot generate a task for {node_info.get("name")!r}: no selector can isolate it. Its dbt fqn '
                     f'{fqn!r} contains a space, which dbt reads as a selector separator, and its file name '
                     f'{file_name!r} is empty or contains glob metacharacters. Rename the file or its directory.'
                 )
+            package = node_info.get('package_name') or ''
+            if package and not cls._GLOB_METACHARACTERS & set(package):
+                return f'file:{file_name},package:{package}'
             return f'file:{file_name}'
 
         if cls._flat_fqn(fqn) not in ambiguous_fqns or not file_usable:

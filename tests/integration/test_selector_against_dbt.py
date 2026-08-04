@@ -18,14 +18,14 @@ tests never skip. A skip would defeat the point: it would let a selector regress
 machine where dbt happened to be missing.
 """
 
+import functools
 import itertools
 import json
-import os
 import random
 from pathlib import Path
 
 import pytest
-from dbt.cli.main import dbtRunner
+from dbt.cli.main import dbtRunner, dbtRunnerResult
 
 from tests.conftest import create_dbt_factory
 
@@ -59,48 +59,43 @@ def _write_project(root: Path, model_paths: dict[str, str], schema_yml: str | No
         (root / 'models' / 'schema.yml').write_text(schema_yml, encoding='utf-8')
 
 
+def _dbt(root: Path, *args: str) -> dbtRunnerResult:
+    """
+    Invokes dbt against the project at `root`.
+
+    Passes the project and profile directories explicitly rather than changing the working
+    directory: `os.chdir` in a test leaks into everything else in the process, and under
+    `pytest-cov` it makes coverage write its data file to the wrong place.
+    """
+    return dbtRunner().invoke([*args, '--project-dir', str(root), '--profiles-dir', str(root)])
+
+
 def _parse(root: Path) -> dict:
     """Parses the project with dbt and returns its real manifest, failing loudly if dbt cannot."""
-    previous = os.environ.get('DBT_PROFILES_DIR')
-    os.environ['DBT_PROFILES_DIR'] = str(root)
-    cwd = Path.cwd()
-    try:
-        os.chdir(root)
-        result = dbtRunner().invoke(['parse', '--quiet'])
-        assert result.success, f'dbt could not parse the generated project: {result.exception}'
-        return json.loads((root / 'target' / 'manifest.json').read_text(encoding='utf-8'))
-    finally:
-        os.chdir(cwd)
-        if previous is None:
-            os.environ.pop('DBT_PROFILES_DIR', None)
-        else:
-            os.environ['DBT_PROFILES_DIR'] = previous
+    result = _dbt(root, 'parse', '--quiet')
+    assert result.success, f'dbt could not parse the generated project: {result.exception}'
+    return json.loads((root / 'target' / 'manifest.json').read_text(encoding='utf-8'))
 
 
-def _selected_ids(root: Path, select: str, resource_type: str | None, indirect: bool) -> list[str]:
-    """Returns the unique IDs dbt resolves `select` to, as `dbt ls` reports them."""
+@functools.lru_cache(maxsize=None)
+def _selected_ids(root: Path, select: str, resource_type: str | None, indirect: bool) -> tuple[str, ...]:
+    """
+    Returns the unique IDs dbt resolves `select` to, as `dbt ls` reports them.
+
+    Memoised: a `dbt ls` invocation costs a few hundred milliseconds, and the same selector recurs
+    across per-test and bundled mode, so caching keeps the suite inside the project's test timeout.
+    """
     args = ['ls', '--quiet', '--select', select]
     if resource_type:
         args += ['--resource-type', resource_type]
     if indirect:
         args += ['--indirect-selection', 'cautious']
-    cwd = Path.cwd()
-    previous = os.environ.get('DBT_PROFILES_DIR')
-    os.environ['DBT_PROFILES_DIR'] = str(root)
-    try:
-        os.chdir(root)
-        result = dbtRunner().invoke(args)
-        assert result.success, f'dbt ls failed for {select!r}: {result.exception}'
-        # `dbt ls` returns a list of unique-id strings; the runner's result type is a union across
-        # every dbt command, so narrow it here rather than trusting the annotation.
-        assert isinstance(result.result, list), f'expected dbt ls to return a list, got {type(result.result)}'
-        return sorted(str(unique_id) for unique_id in result.result)
-    finally:
-        os.chdir(cwd)
-        if previous is None:
-            os.environ.pop('DBT_PROFILES_DIR', None)
-        else:
-            os.environ['DBT_PROFILES_DIR'] = previous
+    result = _dbt(root, *args)
+    assert result.success, f'dbt ls failed for {select!r}: {result.exception}'
+    # `dbt ls` returns a list of unique-id strings; the runner's result type is a union across every
+    # dbt command, so narrow it here rather than trusting the annotation.
+    assert isinstance(result.result, list), f'expected dbt ls to return a list, got {type(result.result)}'
+    return tuple(sorted(str(unique_id) for unique_id in result.result))
 
 
 def _resource_selectors(manifest: dict, bundle_tests: bool) -> list[tuple[str, str, str]]:

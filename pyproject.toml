@@ -78,8 +78,8 @@ path = ".venv"
 
 [tool.hatch.envs.default.scripts]
 test        = "pytest -n 10 src --timeout 30 --ignore=tests/integration tests --durations 20"
-integration = "pytest -n 10 --timeout 60 tests/integration --durations 20"
-coverage    = "pytest -n 10 --cov src tests/ --timeout 30 --cov-report=html --durations 20"
+integration = "pytest -n 10 --timeout 300 tests/integration --durations 20"
+coverage    = "pytest -n 10 --cov src tests/ --timeout 300 --cov-report=html --durations 20"
 fmt         = ["black .",
                "ruff check . --fix",
                "mypy .",

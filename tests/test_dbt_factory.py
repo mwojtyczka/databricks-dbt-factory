@@ -36,7 +36,12 @@ def _model(
 
 
 def _test(
-    package: str, name: str, depends_on: list[str], severity: str = 'error', fqn: list[str] | None = None
+    package: str,
+    name: str,
+    depends_on: list[str],
+    severity: str = 'error',
+    fqn: list[str] | None = None,
+    path: str | None = None,
 ) -> tuple[str, dict]:
     full_name = f"test.{package}.{name}"
     return full_name, {
@@ -44,6 +49,8 @@ def _test(
         'name': name,
         'package_name': package,
         'fqn': fqn or [package, name],
+        # dbt points a schema test at the .yml that declares it, so several tests share one path.
+        'original_file_path': path or f"models/{name}.yml",
         'depends_on': {'nodes': depends_on},
         'config': {'severity': severity},
     }
@@ -651,13 +658,42 @@ def test_bundled_test_select_of_ancestor_is_pinned_by_path(dbt_factory_bundled):
     assert by_key['orders_test']['dbt_task']['commands'] == [expected]
 
 
-def test_select_is_not_pinned_when_the_file_name_contains_glob_metacharacters(dbt_factory):
-    # dbt matches `file:` with `fnmatch`, so a name containing `*?[]` is read as a pattern. A
-    # literal `or[der]s.sql` would match nothing at all — silently selecting zero nodes, which is
-    # worse than over-selecting. Such nodes keep the plain fqn.
+@pytest.mark.parametrize(
+    'bad_name',
+    [
+        # dbt derives a model's name and fqn from its file name, so a metacharacter in the file name
+        # appears in all three. Each of these breaks a selector that contains it; verified against
+        # dbt 1.12.0 with `dbt ls`:
+        pytest.param('or[der]s', id='brackets-select-nothing'),
+        pytest.param('star*model', id='star-selects-other-nodes'),
+        pytest.param('q?model', id='question-mark-is-a-glob'),
+        pytest.param('orders,archive', id='comma-is-an-intersection'),
+        pytest.param('colon:model', id='colon-is-a-method-prefix'),
+        pytest.param('my orders', id='space-is-a-union'),
+    ],
+)
+def test_generation_fails_for_a_node_whose_name_breaks_selector_syntax(dbt_factory, bad_name):
+    # dbt happily parses these file names, but every selector that could identify the node carries
+    # the offending character: the fqn, the file name, and the resource name all derive from it. So
+    # no selector can isolate the node and generation must fail loudly rather than emit one that
+    # silently selects nothing (brackets, comma), selects extra nodes (`*`), or raises inside dbt
+    # (`:`). Failing at build time is the whole point — at run time the task exits 0 having built
+    # nothing.
+    node_id, info = _model('pkg', bad_name, fqn=['pkg', 'marts', bad_name], path=f'models/marts/{bad_name}.sql')
+
+    with pytest.raises(ValueError, match='no selector can isolate'):
+        dbt_factory.create_tasks({'nodes': {node_id: info}})
+
+
+def test_select_of_ancestor_is_pinned_when_a_sibling_flattens_to_the_same_fqn(dbt_factory):
+    # `models/marts/orders.items.sql` (fqn [pkg, marts, 'orders.items']) and
+    # `models/marts/orders/items.sql` (fqn [pkg, marts, orders, items]) flatten to the *same* tuple,
+    # because dbt treats a dot in a name as a path separator. Comparing flattened fqns as a set
+    # discards that collision, so neither node was pinned and `pkg.marts.orders.items` selected both
+    # — each task building both models. Detection must keep the multiplicity.
     nodes = dict(
         [
-            _model('pkg', 'orders', fqn=['pkg', 'marts', 'orders'], path='models/marts/or[der]s.sql'),
+            _model('pkg', 'orders.items', fqn=['pkg', 'marts', 'orders.items'], path='models/marts/orders.items.sql'),
             _model('pkg', 'items', fqn=['pkg', 'marts', 'orders', 'items'], path='models/marts/orders/items.sql'),
         ]
     )
@@ -665,7 +701,34 @@ def test_select_is_not_pinned_when_the_file_name_contains_glob_metacharacters(db
     tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select pkg.marts.orders --target dev']
+    assert by_key['orders_items_model']['dbt_task']['commands'] == [
+        'dbt run --select pkg.marts.orders.items,file:orders.items.sql --target dev'
+    ]
+    assert by_key['items_model']['dbt_task']['commands'] == [
+        'dbt run --select pkg.marts.orders.items,file:items.sql --target dev'
+    ]
+
+
+def test_file_pin_is_rejected_when_the_file_holds_more_than_one_node(dbt_factory):
+    # Every test declared in one `schema.yml` shares that `original_file_path`, so `file:schema.yml`
+    # selects them all. With a spacey directory forcing the file-only fallback, both test tasks would
+    # emit the same selector and each would run the other's test — before that test's model is built,
+    # since each task depends only on its own model. A `file:` term is only usable when it identifies
+    # exactly one node.
+    nodes = dict(
+        [
+            _model('pkg', 'a', fqn=['pkg', 'my tests', 'a'], path='models/my tests/a.sql'),
+            _model('pkg', 'b', fqn=['pkg', 'my tests', 'b'], path='models/my tests/b.sql'),
+            _test('pkg', 'not_null_a_id', ['model.pkg.a'], fqn=['pkg', 'my tests', 'not_null_a_id']),
+            _test('pkg', 'unique_b_id', ['model.pkg.b'], fqn=['pkg', 'my tests', 'unique_b_id']),
+        ]
+    )
+    for full_name, info in nodes.items():
+        if full_name.startswith('test.'):
+            info['original_file_path'] = 'models/my tests/schema.yml'
+
+    with pytest.raises(ValueError, match='no selector can isolate'):
+        dbt_factory.create_tasks({'nodes': nodes})
 
 
 def test_select_pin_uses_the_file_name_so_it_survives_installed_packages(dbt_factory):
@@ -729,10 +792,11 @@ def test_select_drops_the_fqn_when_it_contains_a_space(dbt_factory):
     ]
 
 
-def test_select_of_spacey_node_is_scoped_to_its_package(dbt_factory):
-    # Dropping the fqn also drops its package scoping, and `file:` matches base names across every
-    # package. Two models named `orders.sql` in different packages are legal, so `file:orders.sql`
-    # alone would build both. `package:` restores the scoping the fqn was providing.
+def test_generation_fails_when_the_only_usable_term_is_a_shared_file_name(dbt_factory):
+    # The spacey node can only be selected by file name, but another package also has an
+    # `orders.sql`, and `file:` matches base names in every package. `package:mypkg` would scope it
+    # here, but relying on that means trusting two terms to be jointly unique; requiring the file
+    # name itself to be unique keeps the guarantee simple and provable.
     nodes = dict(
         [
             _model('mypkg', 'orders', fqn=['mypkg', 'my marts', 'orders'], path='models/my marts/orders.sql'),
@@ -740,12 +804,8 @@ def test_select_of_spacey_node_is_scoped_to_its_package(dbt_factory):
         ]
     )
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
-    by_key = {t['task_key']: t for t in tasks}
-
-    assert by_key['mypkg_orders_model']['dbt_task']['commands'] == [
-        'dbt run --select file:orders.sql,package:mypkg --target dev'
-    ]
+    with pytest.raises(ValueError, match='no selector can isolate'):
+        dbt_factory.create_tasks({'nodes': nodes})
 
 
 def test_select_of_spacey_node_is_not_package_scoped_when_the_package_name_is_unusable(dbt_factory):
@@ -786,9 +846,10 @@ def test_select_falls_back_to_the_bare_name_when_the_node_has_no_fqn(dbt_factory
     assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select orders --target dev']
 
 
-def test_select_of_ancestor_is_not_pinned_when_the_node_has_no_path(dbt_factory):
-    # A manifest node without `original_file_path` (hand-rolled, or a resource type that has none)
-    # cannot be pinned, so it falls back to the plain fqn rather than emitting a broken selector.
+def test_generation_fails_for_an_ambiguous_ancestor_with_no_path(dbt_factory):
+    # An ambiguous ancestor needs a `file:` term to pin it, so a node with no `original_file_path`
+    # (hand-rolled manifest, or a truncated one) cannot be isolated. Emitting the plain fqn would
+    # over-select and build the nested node too, so generation fails instead.
     nodes = dict(
         [
             _model('pkg', 'orders', fqn=['pkg', 'marts', 'orders']),
@@ -798,10 +859,8 @@ def test_select_of_ancestor_is_not_pinned_when_the_node_has_no_path(dbt_factory)
     for info in nodes.values():
         info.pop('original_file_path', None)
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
-    by_key = {t['task_key']: t for t in tasks}
-
-    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select pkg.marts.orders --target dev']
+    with pytest.raises(ValueError, match='no selector can isolate'):
+        dbt_factory.create_tasks({'nodes': nodes})
 
 
 def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):

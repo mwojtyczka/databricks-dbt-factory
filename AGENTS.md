@@ -27,6 +27,12 @@ this way, and each had already survived a reading of dbt's own source:
   verbatim, so hand-written fixtures encoding a per-version fqn made tests pass against
   behaviour dbt never produces.
 
+`tests/integration/test_selector_against_dbt.py` does exactly this and is the place to add cases:
+dbt is a declared test dependency, so it writes real projects, has dbt parse them, runs the factory
+over the real manifest, and feeds every emitted selector back through `dbt ls`. It also generates
+randomised layouts, so a shape nobody enumerated still gets checked. Add a regression layout there
+whenever you touch selector construction.
+
 Practically:
 
 - **Prefer `dbt ls`** (or `dbt parse` plus the resulting `target/manifest.json`) over reading

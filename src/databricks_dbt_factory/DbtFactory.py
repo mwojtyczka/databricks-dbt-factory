@@ -1,9 +1,25 @@
-from dataclasses import replace
+from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 
 from databricks_dbt_factory.TaskFactory import TaskFactory
 from databricks_dbt_factory.DbtTask import DbtTask
 from databricks_dbt_factory.Utils import build_task_key_maps
+
+
+@dataclass(frozen=True)
+class SelectorFacts:
+    """
+    The manifest-wide facts `DbtFactory._fqn_select` needs to build an unambiguous `--select`.
+
+    Computed once per manifest and passed down, rather than held as factory state, so selector
+    construction never depends on the order in which the task builders run.
+    """
+
+    # Flattened fqns that a plain selector would match for more than one node.
+    ambiguous_fqns: frozenset[tuple[str, ...]]
+    # Base file names claimed by exactly one node, so `file:<name>` identifies that node alone.
+    unique_file_names: frozenset[str]
 
 
 class DbtFactory:
@@ -46,9 +62,16 @@ class DbtFactory:
     _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
     _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
-    # Characters `fnmatch` treats as pattern syntax. A `file:` selector containing any of them is
-    # matched as a glob, so a name that means them literally cannot be used to pin a selector.
-    _GLOB_METACHARACTERS = frozenset('*?[]')
+    # Characters that change how dbt parses a selector component, so a component containing one
+    # cannot be used to identify a node. Derived from dbt's own grammar and each confirmed against
+    # dbt 1.12.0 with `dbt ls`:
+    #   ' '    union separator (`graph/cli.py` splits the raw spec on spaces), and the fragments are
+    #          matched independently, so a leading fragment can select an unrelated node
+    #   ','    intersection separator — the component is read as two, matching zero nodes
+    #   '*?[]' `fnmatch` pattern syntax — `*` pulls in other nodes, `[...]` matches nothing
+    #   ':'    method prefix (`RAW_SELECTOR_PATTERN`) — dbt raises InvalidSelectorError
+    # `@` and `+` are graph operators but only at the very start/end, so they are checked separately.
+    _SELECTOR_METACHARACTERS = frozenset(' ,*?[]:')
 
     @staticmethod
     def _flat_fqn(fqn: list[str]) -> tuple[str, ...]:
@@ -61,13 +84,13 @@ class DbtFactory:
         return tuple(part for segment in fqn for part in segment.split('.'))
 
     @classmethod
-    def _fqn_select(cls, node_info: dict, ambiguous_fqns: frozenset[tuple[str, ...]]) -> str:
+    def _fqn_select(cls, node_info: dict, facts: 'SelectorFacts') -> str:
         """
         Returns the dbt `--select` argument for a node: its fully qualified name (fqn) joined by
         dots, intersected with a `file:` selector when the plain fqn would over-select.
 
-        `ambiguous_fqns` comes from `_compute_ambiguous_fqns` for the manifest being processed, and
-        is passed in rather than held as state so this never depends on call order.
+        `facts` carries the manifest-wide information this needs (see `SelectorFacts`), passed in
+        rather than held as state so this never depends on call order.
 
         fqn selection is hierarchical by design: dbt matches a selector as a positional path
         *prefix* — of the fqn, or per `QualifiedNameSelectorMethod` of the fqn with its package
@@ -90,51 +113,81 @@ class DbtFactory:
         bare-name intersection, since dbt also matches the package-stripped fqn, which the
         descendant satisfies too.
 
-        A pin falls back to the plain fqn when the file name is unusable (absent, or containing glob
-        metacharacters, which `fnmatch` would read as a pattern and match nothing).
+        Every component is validated with `_is_usable_component` before use, and a `file:` term is
+        only used when it identifies exactly one node.
 
         Raises:
-            ValueError: if neither half can identify the node — an fqn containing a space *and* no
-                usable file name. See `_fqn_is_usable` for why a spacey fqn is unusable.
+            ValueError: when no combination of components can isolate the node. Generation fails
+                loudly rather than emit a selector that would silently select nothing, or the wrong
+                node, at run time.
         """
         fqn = node_info.get('fqn')
         if not fqn:
             return node_info['name']
-        select = '.'.join(fqn)
+
+        fqn_usable = all(cls._is_usable_component(segment) for segment in fqn)
         file_name = PurePosixPath(node_info.get('original_file_path') or '').name
-        file_usable = bool(file_name) and not cls._GLOB_METACHARACTERS & set(file_name)
+        # A `file:` term only identifies the node if no other node shares the file: every test in one
+        # `schema.yml` shares its path, so `file:schema.yml` would select all of them.
+        file_usable = cls._is_usable_component(file_name) and file_name in facts.unique_file_names
 
-        if not cls._fqn_is_usable(fqn):
-            # The fqn cannot be used at all, so `file:` has to identify the node. Dropping the fqn
-            # also drops its package scoping, and `file:` matches base names across every package —
-            # two packages may each have an `orders.sql` — so `package:` restores that scoping.
-            if not file_usable:
-                raise ValueError(
-                    f'Cannot generate a task for {node_info.get("name")!r}: no selector can isolate it. Its dbt fqn '
-                    f'{fqn!r} contains a space, which dbt reads as a selector separator, and its file name '
-                    f'{file_name!r} is empty or contains glob metacharacters. Rename the file or its directory.'
-                )
-            package = node_info.get('package_name') or ''
-            if package and not cls._GLOB_METACHARACTERS & set(package):
-                return f'file:{file_name},package:{package}'
-            return f'file:{file_name}'
+        if fqn_usable:
+            if cls._flat_fqn(fqn) not in facts.ambiguous_fqns:
+                return '.'.join(fqn)
+            if file_usable:
+                return f'{".".join(fqn)},file:{file_name}'
+            raise cls._unisolable(node_info, fqn, file_name, 'its fqn is ambiguous with a nested node')
 
-        if cls._flat_fqn(fqn) not in ambiguous_fqns or not file_usable:
-            return select
-        return f'{select},file:{file_name}'
+        if not file_usable:
+            raise cls._unisolable(node_info, fqn, file_name, 'its fqn cannot be used in a selector')
+        # Without the fqn there is no package scoping, and `file:` matches base names in every
+        # package — two packages may each have an `orders.sql` — so `package:` restores it.
+        package = node_info.get('package_name') or ''
+        if cls._is_usable_component(package):
+            return f'file:{file_name},package:{package}'
+        return f'file:{file_name}'
+
+    @classmethod
+    def _is_usable_component(cls, value: str) -> bool:
+        """
+        Whether `value` can appear in a `--select` component and still mean itself.
+
+        Rejects the empty string, anything containing `_SELECTOR_METACHARACTERS`, and a leading `@`
+        or `+N` / trailing `+N`, which dbt's `RAW_SELECTOR_PATTERN` reads as graph operators
+        (`@model` = model and its parents' children, `model+` = model and its children).
+        """
+        if not value:
+            return False
+        if cls._SELECTOR_METACHARACTERS & set(value):
+            return False
+        return not (value.startswith(('@', '+')) or value.endswith('+'))
 
     @staticmethod
-    def _fqn_is_usable(fqn: list[str]) -> bool:
-        """
-        Whether an fqn can appear in a `--select` argument at all.
+    def _unisolable(node_info: dict, fqn: list[str], file_name: str, reason: str) -> ValueError:
+        """Builds the error raised when no selector can identify a node, naming the remedy."""
+        return ValueError(
+            f'Cannot generate a task for {node_info.get("name")!r}: no selector can isolate it, because {reason} '
+            f'and its file name {file_name!r} is unusable (empty, shared with another node, or containing characters '
+            f'dbt reads as selector syntax). dbt fqn: {fqn!r}. Rename the file, its directory, or the resource.'
+        )
 
-        dbt splits a selector on spaces itself — a space is its *union* separator — so no quoting
-        makes a spacey fqn match. Worse, the fragments are matched independently, so
-        `pkg.my marts.orders` becomes `pkg.my` + `marts.orders` and `pkg.my` can select an unrelated
-        model in `models/my/`, silently building the wrong thing. Verified with `dbt ls` on
-        dbt 1.11.6.
+    @classmethod
+    def _unique_file_names(cls, dbt_manifest: dict) -> frozenset[str]:
         """
-        return not any(' ' in segment for segment in fqn)
+        Base file names that exactly one node in the manifest claims, so a `file:` term naming one
+        selects a single node.
+
+        dbt points every schema test at the `.yml` that declares it, so a shared `schema.yml` cannot
+        identify any of them; `file:` also matches on the name alone, so two packages each having an
+        `orders.sql` makes that name ambiguous too.
+        """
+        counts: Counter[str] = Counter()
+        for group in ('nodes', 'sources', 'unit_tests'):
+            for info in dbt_manifest.get(group, {}).values():
+                name = PurePosixPath(info.get('original_file_path') or '').name
+                if name:
+                    counts[name] += 1
+        return frozenset(name for name, count in counts.items() if count == 1)
 
     @classmethod
     def _compute_ambiguous_fqns(cls, dbt_manifest: dict) -> frozenset[tuple[str, ...]]:
@@ -151,12 +204,18 @@ class DbtFactory:
         """
         nodes = dbt_manifest.get('nodes', {})
         flat_fqns = {unique_id: cls._flat_fqn(info['fqn']) for unique_id, info in nodes.items() if info.get('fqn')}
-        buildable = {
-            fqn for unique_id, fqn in flat_fqns.items() if nodes[unique_id].get('resource_type') in cls._GATEABLE_TYPES
-        }
-        all_fqns = set(flat_fqns.values())
-        # An fqn needs pinning iff a buildable node's fqn strictly extends it.
-        return frozenset(fqn[:i] for fqn in buildable for i in range(1, len(fqn)) if fqn[:i] in all_fqns)
+        buildable = []
+        for unique_id, fqn in flat_fqns.items():
+            if nodes[unique_id].get('resource_type') in cls._GATEABLE_TYPES:
+                buildable.append(fqn)
+        counts = Counter(flat_fqns.values())
+        all_fqns = set(counts)
+        # Two nodes can flatten to the *same* tuple (`orders.items.sql` and `orders/items.sql`), which
+        # a plain selector matches for both, so an fqn claimed more than once is ambiguous in itself.
+        ambiguous = {fqn for fqn, count in counts.items() if count > 1}
+        # Otherwise an fqn needs pinning iff a buildable node's fqn strictly extends it.
+        ambiguous.update(fqn[:i] for fqn in buildable for i in range(1, len(fqn)) if fqn[:i] in all_fqns)
+        return frozenset(ambiguous)
 
     def _create_tasks(self, dbt_manifest: dict) -> list[DbtTask]:
         """
@@ -171,7 +230,10 @@ class DbtFactory:
         dbt_nodes = dbt_manifest.get('nodes', {})
         dbt_sources = dbt_manifest.get('sources', {})
         dbt_unit_tests = dbt_manifest.get('unit_tests', {})
-        ambiguous_fqns = self._compute_ambiguous_fqns(dbt_manifest)
+        facts = SelectorFacts(
+            ambiguous_fqns=self._compute_ambiguous_fqns(dbt_manifest),
+            unique_file_names=self._unique_file_names(dbt_manifest),
+        )
 
         bundle = 'test' in self.task_factories and self.bundle_tests
         single_model_tested: set[str] = set()
@@ -203,18 +265,29 @@ class DbtFactory:
             ancestors = self._compute_ancestors(dbt_nodes, dbt_sources)
 
         tasks = self._build_resource_tasks(
-            dbt_nodes, bundle, task_keys, bundled_test_keys, tests_by_resource, ancestors, ambiguous_fqns
+            dbt_nodes,
+            bundle,
+            task_keys,
+            bundled_test_keys,
+            tests_by_resource,
+            ancestors,
+            facts,
         )
 
         if bundle:
             tasks.extend(
                 self._build_bundled_test_tasks(
-                    dbt_nodes, dbt_sources, single_model_tested, task_keys, bundled_test_keys, ambiguous_fqns
+                    dbt_nodes,
+                    dbt_sources,
+                    single_model_tested,
+                    task_keys,
+                    bundled_test_keys,
+                    facts,
                 )
             )
-            tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys, ambiguous_fqns))
+            tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys, facts))
         elif 'test' in self.task_factories:
-            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys, ambiguous_fqns))
+            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys, facts))
 
         return tasks
 
@@ -437,7 +510,7 @@ class DbtFactory:
         bundled_test_keys: dict[str, str],
         tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
         ancestors_by_node: dict[str, set[str]],
-        ambiguous_fqns: frozenset[tuple[str, ...]],
+        facts: SelectorFacts,
     ) -> list[DbtTask]:
         """Builds tasks for every non-test resource (plus per-test tasks when not bundling)."""
         # Maps a tested resource's task key (what `depends_on` holds) to its gating bundled test
@@ -456,7 +529,11 @@ class DbtFactory:
             task_key = task_keys[node_full_name]
             factory = self.task_factories[resource_type]
             task = factory.create_task(
-                self._fqn_select(node_info, ambiguous_fqns), node_info['name'], node_info, task_key, task_keys
+                self._fqn_select(node_info, facts),
+                node_info['name'],
+                node_info,
+                task_key,
+                task_keys,
             )
 
             if resource_type in self._GATEABLE_TYPES:
@@ -485,7 +562,7 @@ class DbtFactory:
         nodes_with_tests: set[str],
         task_keys: dict[str, str],
         bundled_test_keys: dict[str, str],
-        ambiguous_fqns: frozenset[tuple[str, ...]],
+        facts: SelectorFacts,
     ) -> list[DbtTask]:
         """Emits one bundled `<resource>_test` task per tested resource via `TestTaskFactory.create_bundled_task`."""
         test_factory = self.task_factories['test']
@@ -497,7 +574,7 @@ class DbtFactory:
             if is_source:
                 select = f"source:{info['package_name']}.{info['source_name']}.{bare_name}"
             else:
-                select = self._fqn_select(info, ambiguous_fqns)
+                select = self._fqn_select(info, facts)
             tasks.append(
                 test_factory.create_bundled_task(
                     task_key=bundled_test_keys[full_name],
@@ -512,7 +589,7 @@ class DbtFactory:
         self,
         standalone_tests: list[tuple[str, dict]],
         task_keys: dict[str, str],
-        ambiguous_fqns: frozenset[tuple[str, ...]],
+        facts: SelectorFacts,
     ) -> list[DbtTask]:
         """
         Emits one task per standalone test — cross-model tests (e.g. `relationships`) gated on
@@ -524,13 +601,20 @@ class DbtFactory:
             test_task_key = task_keys[test_full_name]
             tasks.append(
                 test_factory.create_task(
-                    self._fqn_select(test_info, ambiguous_fqns), test_info['name'], test_info, test_task_key, task_keys
+                    self._fqn_select(test_info, facts),
+                    test_info['name'],
+                    test_info,
+                    test_task_key,
+                    task_keys,
                 )
             )
         return tasks
 
     def _build_unit_test_tasks(
-        self, dbt_unit_tests: dict, task_keys: dict[str, str], ambiguous_fqns: frozenset[tuple[str, ...]]
+        self,
+        dbt_unit_tests: dict,
+        task_keys: dict[str, str],
+        facts: SelectorFacts,
     ) -> list[DbtTask]:
         """
         Emits one task per unit test, selected by its full FQN and gated on the model it tests.
@@ -546,7 +630,7 @@ class DbtFactory:
                 continue
             tasks.append(
                 test_factory.create_task(
-                    self._fqn_select(unit_test_info, ambiguous_fqns),
+                    self._fqn_select(unit_test_info, facts),
                     unit_test_info['name'],
                     unit_test_info,
                     task_keys[unit_test_full_name],

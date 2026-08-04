@@ -62,6 +62,11 @@ dependencies = [
   "pytest-timeout~=2.3.1",
   "pytest-xdist~=3.5.0",
   "ruff~=0.3.4",
+  # dbt itself, so tests/integration/test_selector_against_dbt.py can verify every generated
+  # `--select` against the real matcher instead of against our model of it. Not a runtime
+  # dependency: the factory only reads a manifest dbt has already produced.
+  "dbt-core~=1.12.0",
+  "dbt-databricks~=1.11",
   "types-PyYAML~=6.0.12",
   "types-requests~=2.31.0",
 ]

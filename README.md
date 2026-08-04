@@ -366,9 +366,10 @@ reused across packages still resolves to a single node. Two modes are available,
 > (`models/marts/orders.sql` next to `models/marts/orders/items.sql`). There `orders`' FQN is a
 > prefix of `items`' FQN, so a plain selector would build `items` inside `orders`' task — ignoring
 > `items`' own dependencies — as well as concurrently in its own task, writing the same table twice.
-> For those nodes only, the selector is intersected with `path:<file>`
-> (`pkg.marts.orders,path:models/marts/orders.sql`), which restricts it to the single file. Every
-> other selector stays a plain FQN.
+> For those nodes only, the selector is intersected with `file:<name>`
+> (`pkg.marts.orders,file:orders.sql`), which pins it to the single node. Every other selector stays
+> a plain FQN. The same applies when the sibling's *name* contains a dot
+> (`models/marts/orders.items.sql`), since dbt treats dots in names as path separators too.
 
 ### Per-test (default)
 

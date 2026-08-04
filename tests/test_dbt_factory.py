@@ -626,7 +626,7 @@ def test_select_of_ancestor_is_pinned_by_path_so_nested_model_is_not_built_twice
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.marts.orders,path:models/marts/orders.sql --target dev'
+        'dbt run --select pkg.marts.orders,file:orders.sql --target dev'
     ]
     # The nested node has nothing beneath it, so its own selector needs no pin.
     assert by_key['items_model']['dbt_task']['commands'] == ['dbt run --select pkg.marts.orders.items --target dev']
@@ -646,16 +646,14 @@ def test_bundled_test_select_of_ancestor_is_pinned_by_path(dbt_factory_bundled):
     tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    expected = (
-        'dbt test --select pkg.marts.orders,path:models/marts/orders.sql --indirect-selection cautious --target dev'
-    )
+    expected = 'dbt test --select pkg.marts.orders,file:orders.sql --indirect-selection cautious --target dev'
     assert by_key['orders_test']['dbt_task']['commands'] == [expected]
 
 
-def test_select_is_not_pinned_when_the_path_contains_glob_metacharacters(dbt_factory):
-    # dbt resolves `path:` through `Path.glob`, so a path containing `*?[]` is read as a pattern and
-    # matches nothing at all — silently selecting zero nodes, which is worse than over-selecting.
-    # Such nodes keep the plain fqn and stay subject to the prefix behaviour.
+def test_select_is_not_pinned_when_the_file_name_contains_glob_metacharacters(dbt_factory):
+    # dbt matches `file:` with `fnmatch`, so a name containing `*?[]` is read as a pattern. A
+    # literal `or[der]s.sql` would match nothing at all — silently selecting zero nodes, which is
+    # worse than over-selecting. Such nodes keep the plain fqn.
     nodes = dict(
         [
             _model('pkg', 'orders', fqn=['pkg', 'marts', 'orders'], path='models/marts/or[der]s.sql'),
@@ -667,6 +665,46 @@ def test_select_is_not_pinned_when_the_path_contains_glob_metacharacters(dbt_fac
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select pkg.marts.orders --target dev']
+
+
+def test_select_pin_uses_the_file_name_so_it_survives_installed_packages(dbt_factory):
+    # A package node's `original_file_path` is relative to the *package* root, but dbt resolves
+    # `path:` against the *root project*, so `path:` would match zero nodes and the task would
+    # silently succeed without building anything. `file:` matches on the base name only, so it
+    # resolves identically whether the node comes from the root project or a package.
+    nodes = dict(
+        [
+            _model('mypkg', 'orders', fqn=['mypkg', 'marts', 'orders'], path='models/marts/orders.sql'),
+            _model('mypkg', 'items', fqn=['mypkg', 'marts', 'orders', 'items'], path='models/marts/orders/items.sql'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_model']['dbt_task']['commands'] == [
+        'dbt run --select mypkg.marts.orders,file:orders.sql --target dev'
+    ]
+
+
+def test_select_of_ancestor_is_pinned_when_a_sibling_name_contains_a_dot(dbt_factory):
+    # dbt flattens dotted fqn segments before matching ("dots in model names act as namespace
+    # separators"), so `models/marts/orders.items.sql` has fqn [pkg, marts, 'orders.items'] and is
+    # still selected by `pkg.marts.orders`. Ambiguity detection must compare the flattened form, or
+    # the double build goes unnoticed.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'marts', 'orders'], path='models/marts/orders.sql'),
+            _model('pkg', 'orders.items', fqn=['pkg', 'marts', 'orders.items'], path='models/marts/orders.items.sql'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_model']['dbt_task']['commands'] == [
+        'dbt run --select pkg.marts.orders,file:orders.sql --target dev'
+    ]
 
 
 def test_select_of_ancestor_is_not_pinned_when_the_node_has_no_path(dbt_factory):

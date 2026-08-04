@@ -1,4 +1,5 @@
 from dataclasses import replace
+from pathlib import PurePosixPath
 
 from databricks_dbt_factory.TaskFactory import TaskFactory
 from databricks_dbt_factory.DbtTask import DbtTask
@@ -48,14 +49,24 @@ class DbtFactory:
     _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
     _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
-    # Characters `Path.glob` treats as pattern syntax. A `path:` selector containing any of them is
-    # read as a glob and matches nothing, so such paths cannot be used to pin a selector.
+    # Characters `fnmatch` treats as pattern syntax. A `file:` selector containing any of them is
+    # matched as a glob, so a name that means them literally cannot be used to pin a selector.
     _GLOB_METACHARACTERS = frozenset('*?[]')
+
+    @staticmethod
+    def _flat_fqn(fqn: list[str]) -> tuple[str, ...]:
+        """
+        The fqn as dbt compares it: each segment re-split on dots, since dbt treats a dot inside a
+        resource name as a namespace separator (`is_selected_node` flattens before matching). So
+        `models/marts/orders.items.sql` has fqn `[pkg, marts, 'orders.items']` but is matched as
+        `(pkg, marts, orders, items)` — and is therefore selected by `pkg.marts.orders`.
+        """
+        return tuple(part for segment in fqn for part in segment.split('.'))
 
     def _fqn_select(self, node_info: dict) -> str:
         """
         Returns the dbt `--select` argument for a node: its fully qualified name (fqn) joined by
-        dots, intersected with a `path:` selector when the plain fqn would over-select.
+        dots, intersected with a `file:` selector when the plain fqn would over-select.
 
         fqn selection is hierarchical by design: dbt matches a selector as a positional path
         *prefix* — of the fqn, or per `QualifiedNameSelectorMethod` of the fqn with its package
@@ -65,33 +76,39 @@ class DbtFactory:
         task is meant to sweep its resource's unit tests in.
 
         The exception is a model directory named after a sibling model (`models/marts/orders.sql`
-        beside `models/marts/orders/items.sql`). There `orders`' fqn is a prefix of `items`' fqn, so
-        the plain selector builds `items` inside `orders`' task — ignoring `items`' own dependency
-        wiring — as well as in `items`' own task, concurrently. For those nodes only, the selector
-        is intersected with `path:<original_file_path>`, which restricts it to the one file.
-        `path:` is used rather than a bare-name intersection because the latter does not work: dbt
-        also matches the package-stripped fqn, so the descendant matches the bare name too.
+        beside `models/marts/orders/items.sql`, or beside `models/marts/orders.items.sql`). There
+        `orders`' fqn is a prefix of the sibling's, so the plain selector builds it inside `orders`'
+        task — ignoring its own dependency wiring — as well as in its own task, concurrently: two
+        dbt runs writing one table. For those nodes only, the selector is intersected with
+        `file:<file name>`, which pins it to the one node.
 
-        Falls back to the plain fqn when the node has no usable path — absent, or containing glob
-        metacharacters, since dbt resolves `path:` through `Path.glob` and a pattern that is meant
-        literally would match nothing at all. Over-selecting is bad; selecting nothing is worse.
+        `file:` rather than `path:`, because `path:` is resolved by globbing the *root project's*
+        directory while a package node's `original_file_path` is relative to the *package* root — so
+        `path:` selects nothing at all for package nodes, and `dbt run` then exits 0 having built
+        nothing. `file:` matches the base name only, so it behaves the same either way. And not a
+        bare-name intersection, since dbt also matches the package-stripped fqn, which the
+        descendant satisfies too.
+
+        Falls back to the plain fqn when there is no usable file name — absent, or containing glob
+        metacharacters, since `file:` is matched with `fnmatch` and a name meant literally would
+        match nothing. Over-selecting is bad; selecting nothing is worse.
         """
         fqn = node_info.get('fqn')
         if not fqn:
             return node_info['name']
         select = '.'.join(fqn)
-        if tuple(fqn) not in self._ambiguous_fqns:
+        if self._flat_fqn(fqn) not in self._ambiguous_fqns:
             return select
-        path = node_info.get('original_file_path')
-        if not path or self._GLOB_METACHARACTERS & set(path):
+        file_name = PurePosixPath(node_info.get('original_file_path') or '').name
+        if not file_name or self._GLOB_METACHARACTERS & set(file_name):
             return select
-        return f'{select},path:{path}'
+        return f'{select},file:{file_name}'
 
     @classmethod
     def _compute_ambiguous_fqns(cls, dbt_manifest: dict) -> frozenset[tuple[str, ...]]:
         """
-        The fqns whose plain selector would also match a *buildable* node nested beneath them, and
-        which `_fqn_select` therefore pins.
+        The flattened fqns whose plain selector would also match a *buildable* node nested beneath
+        them, and which `_fqn_select` therefore pins.
 
         Only models, seeds and snapshots count as the nested node here — those are the resources a
         selector would wrongly build a second time. A unit test's fqn also nests under its model's
@@ -100,17 +117,12 @@ class DbtFactory:
         run one. Counting unit tests would pin nearly every unit-tested model in a conventional
         project for no benefit.
         """
-        fqns_by_node = {
-            unique_id: tuple(info['fqn'])
-            for unique_id, info in dbt_manifest.get('nodes', {}).items()
-            if info.get('fqn')
-        }
+        nodes = dbt_manifest.get('nodes', {})
+        flat_fqns = {unique_id: cls._flat_fqn(info['fqn']) for unique_id, info in nodes.items() if info.get('fqn')}
         buildable = {
-            fqn
-            for unique_id, fqn in fqns_by_node.items()
-            if dbt_manifest['nodes'][unique_id].get('resource_type') in cls._GATEABLE_TYPES
+            fqn for unique_id, fqn in flat_fqns.items() if nodes[unique_id].get('resource_type') in cls._GATEABLE_TYPES
         }
-        all_fqns = set(fqns_by_node.values())
+        all_fqns = set(flat_fqns.values())
         # An fqn needs pinning iff a buildable node's fqn strictly extends it.
         return frozenset(fqn[:i] for fqn in buildable for i in range(1, len(fqn)) if fqn[:i] in all_fqns)
 

@@ -707,6 +707,19 @@ def test_select_of_ancestor_is_pinned_when_a_sibling_name_contains_a_dot(dbt_fac
     ]
 
 
+def test_select_falls_back_to_the_bare_name_when_the_node_has_no_fqn(dbt_factory):
+    # dbt always emits an fqn, but a hand-rolled or truncated manifest may not. The selector then
+    # falls back to the bare resource name rather than emitting an empty `--select`, which would
+    # select the whole project.
+    node_id, info = _model('pkg', 'orders')
+    del info['fqn']
+
+    tasks = dbt_factory.create_tasks({'nodes': {node_id: info}})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select orders --target dev']
+
+
 def test_select_of_ancestor_is_not_pinned_when_the_node_has_no_path(dbt_factory):
     # A manifest node without `original_file_path` (hand-rolled, or a resource type that has none)
     # cannot be pinned, so it falls back to the plain fqn rather than emitting a broken selector.

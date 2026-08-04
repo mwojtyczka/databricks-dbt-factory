@@ -514,7 +514,7 @@ def test_bundled_mode_model_with_only_unit_test_emits_bundled_task(dbt_factory_b
 
     assert 'orders_test' in by_key
     assert by_key['orders_test']['dbt_task']['commands'] == [
-        'dbt test --select orders,pkg.staging.orders --indirect-selection cautious --target dev'
+        'dbt test --select pkg.staging.orders --indirect-selection cautious --target dev'
     ]
     assert by_key['orders_test']['depends_on'] == [{'task_key': 'orders_model'}]
     # No standalone unit-test task in bundled mode — the bundled task covers it.
@@ -591,77 +591,6 @@ def test_resolver_uses_task_keys_map():
     assert DbtDependencyResolver.resolve(node, ["model"], task_keys) == ["a_orders_model"]
 
 
-def test_select_is_plain_fqn_when_no_node_is_nested_beneath_it(dbt_factory):
-    # The name pin is only needed to separate a node from nodes nested *beneath* its fqn. When no
-    # such node exists — the overwhelmingly common case — the plain fqn already matches exactly one
-    # node, so the selector stays unpinned and readable.
-    nodes = dict(
-        [
-            _model('pkg', 'orders', fqn=['pkg', 'staging', 'orders']),
-            _model('pkg', 'customers', fqn=['pkg', 'staging', 'customers']),
-        ]
-    )
-
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
-    by_key = {t['task_key']: t for t in tasks}
-
-    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select pkg.staging.orders --target dev']
-    assert by_key['customers_model']['dbt_task']['commands'] == ['dbt run --select pkg.staging.customers --target dev']
-
-
-def test_select_of_nested_node_itself_stays_unpinned(dbt_factory):
-    # Only the *ancestor* needs pinning. `items` has nothing beneath it, so its own selector is
-    # already unambiguous and stays plain.
-    nodes = dict(
-        [
-            _model('pkg', 'orders', fqn=['pkg', 'staging', 'orders']),
-            _model('pkg', 'items', fqn=['pkg', 'staging', 'orders', 'items']),
-        ]
-    )
-
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
-    by_key = {t['task_key']: t for t in tasks}
-
-    assert by_key['items_model']['dbt_task']['commands'] == ['dbt run --select pkg.staging.orders.items --target dev']
-
-
-def test_select_does_not_match_models_nested_under_a_sibling_name(dbt_factory):
-    # `models/staging/orders.sql` (fqn pkg.staging.orders) and `models/staging/orders/items.sql`
-    # (fqn pkg.staging.orders.items). dbt matches an fqn selector as a positional *prefix*, so a
-    # bare `pkg.staging.orders` selects `items` too — building it inside the wrong task, ahead of
-    # its own upstreams. Intersecting with the leaf name pins the selector to one node.
-    nodes = dict(
-        [
-            _model('pkg', 'orders', fqn=['pkg', 'staging', 'orders']),
-            _model('pkg', 'items', fqn=['pkg', 'staging', 'orders', 'items']),
-        ]
-    )
-
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
-    by_key = {t['task_key']: t for t in tasks}
-
-    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select orders,pkg.staging.orders --target dev']
-
-
-def test_bundled_test_select_does_not_match_models_nested_under_a_sibling_name(dbt_factory_bundled):
-    # Same prefix-overlap hazard for the bundled `<model>_test` task: without the leaf-name
-    # intersection, `orders_test` would sweep in `items`' tests as well.
-    nodes = dict(
-        [
-            _model('pkg', 'orders', fqn=['pkg', 'staging', 'orders']),
-            _model('pkg', 'items', fqn=['pkg', 'staging', 'orders', 'items']),
-            _test('pkg', 'unique_orders_id', ['model.pkg.orders']),
-        ]
-    )
-
-    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
-    by_key = {t['task_key']: t for t in tasks}
-
-    assert by_key['orders_test']['dbt_task']['commands'] == [
-        'dbt test --select orders,pkg.staging.orders --indirect-selection cautious --target dev'
-    ]
-
-
 def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):
     # dbt rewrites a unit test on a versioned model to `unit_test.<pkg>.<model>.<name>_v<N>` with
     # depends_on.nodes[0] = model.<pkg>.<model>.v<N>, while leaving `model` as the bare name. The
@@ -679,14 +608,14 @@ def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):
                 'pkg',
                 'dim',
                 'ut_a_v1',
-                fqn=['pkg', 'marts', 'dim', 'ut_a_v1'],
+                fqn=['pkg', 'models', 'marts', 'dim', 'ut_a'],
                 depends_on=['model.pkg.dim.v1'],
             ),
             _unit_test(
                 'pkg',
                 'dim',
                 'ut_a_v2',
-                fqn=['pkg', 'marts', 'dim', 'ut_a_v2'],
+                fqn=['pkg', 'models', 'marts', 'dim', 'ut_a'],
                 depends_on=['model.pkg.dim.v2'],
             ),
         ]
@@ -698,6 +627,14 @@ def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):
     # Each versioned unit test gets its own task, gated on the matching model version.
     assert by_key['unit_test_pkg_dim_ut_a_v1']['depends_on'] == [{'task_key': 'dim_v1_model'}]
     assert by_key['unit_test_pkg_dim_ut_a_v2']['depends_on'] == [{'task_key': 'dim_v2_model'}]
+    # Known limitation: dbt clones a versioned unit test's fqn verbatim (it rewrites only
+    # `unique_id`, `depends_on.nodes[0]` and `version` — see the `# fqn?` comment in dbt's
+    # `process_models_for_unit_test`), so both tasks necessarily select the same thing and each
+    # runs both versions' assertions. Emitting the tasks at all is the fix here; isolating them
+    # needs a version-aware selector, which the fqn cannot express.
+    v1_select = by_key['unit_test_pkg_dim_ut_a_v1']['dbt_task']['commands']
+    v2_select = by_key['unit_test_pkg_dim_ut_a_v2']['dbt_task']['commands']
+    assert v1_select == v2_select == ['dbt test --select pkg.models.marts.dim.ut_a --target dev']
 
 
 def test_bundled_mode_unit_test_on_versioned_model_emits_bundled_task(dbt_factory_bundled):
@@ -715,7 +652,7 @@ def test_bundled_mode_unit_test_on_versioned_model_emits_bundled_task(dbt_factor
                 'pkg',
                 'dim',
                 'ut_a_v2',
-                fqn=['pkg', 'marts', 'dim', 'ut_a_v2'],
+                fqn=['pkg', 'models', 'marts', 'dim', 'ut_a'],
                 depends_on=['model.pkg.dim.v2'],
             ),
         ]

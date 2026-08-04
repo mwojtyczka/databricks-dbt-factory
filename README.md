@@ -343,23 +343,27 @@ custom test name on two models — the colliding keys are disambiguated with the
 dbt's test hash (e.g. `pkg_a_customers_model` / `pkg_b_customers_model`). Keys are therefore always
 unique, so a valid dbt project can never fail to deploy on a duplicate task key. Keys are also
 bounded to Databricks' 100-character limit (long test names are truncated with a hash suffix).
-Every key is a function of the dbt node id alone, never of the manifest's ordering, so adding or
-renaming an unrelated model leaves other nodes' keys — and their run history and alerts — untouched.
+Key assignment does not depend on the manifest's ordering, so merely reordering nodes never
+reshuffles keys. Note that it does still depend on the *set* of nodes: introducing a model whose
+key collides with an existing disambiguated key can shift that key (e.g. to a `_2` suffix), which
+repoints that task's run history and alerts.
 
 ## Handling dbt tests
 
 The factory produces tasks for dbt tests (both data tests and unit tests) from the manifest by
 default (pass `--no-run-tests` to skip them). Selectors are each node's full dot-separated FQN
-(e.g. `my_project.staging.stg_orders`). dbt matches an FQN selector as a *prefix*, so for the rare
-node that has another node nested beneath it — `models/staging/orders.sql` alongside
-`models/staging/orders/items.sql` — the plain FQN would select both. Those selectors, and only
-those, are pinned with the node's bare name (`orders,my_project.staging.orders`, a dbt selector
-intersection) so they match exactly one node. Two modes are available, controlled by
+(e.g. `my_project.staging.stg_orders`), which scopes the selector to one package so a model name
+reused across packages still resolves to a single node. Two modes are available, controlled by
 `--bundle-tests`:
+
+> **Known limitation.** dbt matches an FQN selector as a *prefix*, so a node that has another node
+> nested beneath it also selects that descendant. If you have both `models/orders.sql` and
+> `models/orders/items.sql`, the `orders` task also builds `items` (and in bundled mode sweeps
+> `items`' tests into `orders_test`). Avoid naming a model directory after a sibling model.
 
 ### Per-test (default)
 
-One Databricks task per dbt test node, running `dbt test --select <name>,<fqn>`. Each test task's
+One Databricks task per dbt test node, running `dbt test --select <fqn>`. Each test task's
 `depends_on` includes every model/seed/snapshot the test references, so multi-model tests
 (e.g. `relationships`) only run after all their endpoints are built. **Downstream models are
 gated only on error-severity tests**: every model/seed/snapshot task depends on the
@@ -369,9 +373,10 @@ kept out of downstream `depends_on`** — they surface findings without clutteri
 blocking anything.
 
 Unit tests get one task each, selected by the unit test's FQN and gated on the model under
-test — resolved from the manifest's `depends_on`, so unit tests on versioned models target the right
-version. They have no severity and always fail the run when they fail, so they gate downstream
-models like error-severity data tests.
+test — resolved from the manifest's `depends_on`, so a unit test on a versioned model gates on the
+right version instead of being dropped. (dbt gives every version's copy of a unit test the same
+FQN, so each such task still runs all of that test's versions.) They have no severity and always
+fail the run when they fail, so they gate downstream models like error-severity data tests.
 
 - **Pros:** per-test failures are individually visible in the Databricks UI; downstream
   execution halts on error-severity test failure just like `dbt build`; cross-model tests wait

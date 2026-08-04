@@ -349,11 +349,13 @@ renaming an unrelated model leaves other nodes' keys — and their run history a
 ## Handling dbt tests
 
 The factory produces tasks for dbt tests (both data tests and unit tests) from the manifest by
-default (pass `--no-run-tests` to skip them). Selectors intersect each node's bare name with its
-full dot-separated FQN (e.g. `stg_orders,my_project.staging.stg_orders`) so they match exactly one
-node: the FQN scopes the package and directory, while the name pins the match to that node. The FQN
-alone would not — dbt matches an FQN selector as a *prefix*, so `my_project.staging.orders` also
-selects `models/staging/orders/items.sql`. Two modes are available, controlled by `--bundle-tests`:
+default (pass `--no-run-tests` to skip them). Selectors are each node's full dot-separated FQN
+(e.g. `my_project.staging.stg_orders`). dbt matches an FQN selector as a *prefix*, so for the rare
+node that has another node nested beneath it — `models/staging/orders.sql` alongside
+`models/staging/orders/items.sql` — the plain FQN would select both. Those selectors, and only
+those, are pinned with the node's bare name (`orders,my_project.staging.orders`, a dbt selector
+intersection) so they match exactly one node. Two modes are available, controlled by
+`--bundle-tests`:
 
 ### Per-test (default)
 
@@ -366,7 +368,7 @@ the downstream task. This matches `dbt build` semantics. **`severity: warn` test
 kept out of downstream `depends_on`** — they surface findings without cluttering the DAG or
 blocking anything.
 
-Unit tests get one task each, selected by the unit test's name and FQN and gated on the model under
+Unit tests get one task each, selected by the unit test's FQN and gated on the model under
 test — resolved from the manifest's `depends_on`, so unit tests on versioned models target the right
 version. They have no severity and always fail the run when they fail, so they gate downstream
 models like error-severity data tests.
@@ -404,7 +406,7 @@ The factory classifies each dbt test node into one of two buckets based on its `
   references. These run in parallel with the bundled tasks; they don't fit inside a bundle
   because their correctness requires all their endpoints to be built first.
 
-A resource's `<resource>_test` task selects the resource by its name and full FQN with
+A resource's `<resource>_test` task selects the resource by its full FQN with
 `--indirect-selection cautious`, which also runs the resource's unit tests. A model whose only
 test is a unit test still gets a `<resource>_test` task so its unit test is not dropped.
 

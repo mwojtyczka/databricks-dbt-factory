@@ -21,25 +21,25 @@ resources:
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select diamonds_list_colors,dbt_demo.sql_model1.diamonds_list_colors
+          - dbt run --select dbt_demo.sql_model1.diamonds_list_colors
       - task_key: diamonds_prices_model
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select diamonds_prices,dbt_demo.sql_model1.diamonds_prices
+          - dbt run --select dbt_demo.sql_model1.diamonds_prices
       - task_key: diamonds_four_cs_model
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select diamonds_four_cs,dbt_demo.sql_model1.diamonds_four_cs
+          - dbt run --select dbt_demo.sql_model1.diamonds_four_cs
       - task_key: zzz_game_details_model
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select zzz_game_details,dbt_demo.sql_model1.zzz_game_details
+          - dbt run --select dbt_demo.sql_model1.zzz_game_details
       - task_key: second_dbt_model_model
         depends_on:
         - task_key: first_dbt_model_model
@@ -48,180 +48,180 @@ resources:
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select second_dbt_model,dbt_demo.sql_model2.second_dbt_model
+          - dbt run --select dbt_demo.sql_model2.second_dbt_model
       - task_key: first_dbt_model_model
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select first_dbt_model,dbt_demo.sql_model2.first_dbt_model
+          - dbt run --select dbt_demo.sql_model2.first_dbt_model
       - task_key: zzz_game_details_check_scores_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select zzz_game_details_check_scores,dbt_demo.data_tests.zzz_game_details_check_scores
+          - dbt test --select dbt_demo.data_tests.zzz_game_details_check_scores
       - task_key: zzz_game_details_check_dates_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select zzz_game_details_check_dates,dbt_demo.data_tests.zzz_game_details_check_dates
+          - dbt test --select dbt_demo.data_tests.zzz_game_details_check_dates
       - task_key: zzz_win_loss_records_check_records_test
         depends_on:
         - task_key: zzz_win_loss_records_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select zzz_win_loss_records_check_records,dbt_demo.data_tests.zzz_win_loss_records_check_records
+          - dbt test --select dbt_demo.data_tests.zzz_win_loss_records_check_records
       - task_key: diamonds_list_colors_test_test
         depends_on:
         - task_key: diamonds_list_colors_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select diamonds_list_colors_test,dbt_demo.data_tests.diamonds_list_colors_test
+          - dbt test --select dbt_demo.data_tests.diamonds_list_colors_test
       - task_key: country_codes_seed
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
-          - dbt seed --select country_codes,dbt_demo.country_codes
+          - dbt seed --select dbt_demo.country_codes
       - task_key: unique_zzz_game_details_game_id_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select unique_zzz_game_details_game_id,dbt_demo.models.sql_model1.unique_zzz_game_details_game_id
+          - dbt test --select dbt_demo.models.sql_model1.unique_zzz_game_details_game_id
       - task_key: not_null_zzz_game_details_game_id_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_game_details_game_id,dbt_demo.models.sql_model1.not_null_zzz_game_details_game_id
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_game_details_game_id
       - task_key: not_null_zzz_game_details_home_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_game_details_home,dbt_demo.models.sql_model1.not_null_zzz_game_details_home
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_game_details_home
       - task_key: accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle,dbt_demo.models.sql_model1.accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle
+          - dbt test --select dbt_demo.models.sql_model1.accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle
       - task_key: not_null_zzz_game_details_visitor_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_game_details_visitor,dbt_demo.models.sql_model1.not_null_zzz_game_details_visitor
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_game_details_visitor
       - task_key: accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle,dbt_demo.models.sql_model1.accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle
+          - dbt test --select dbt_demo.models.sql_model1.accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle
       - task_key: not_null_zzz_game_details_home_score_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_game_details_home_score,dbt_demo.models.sql_model1.not_null_zzz_game_details_home_score
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_game_details_home_score
       - task_key: not_null_zzz_game_details_visitor_score_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_game_details_visitor_score,dbt_demo.models.sql_model1.not_null_zzz_game_details_visitor_score
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_game_details_visitor_score
       - task_key: not_null_zzz_game_details_winner_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_game_details_winner,dbt_demo.models.sql_model1.not_null_zzz_game_details_winner
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_game_details_winner
       - task_key: accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle,dbt_demo.models.sql_model1.accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle
+          - dbt test --select dbt_demo.models.sql_model1.accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle
       - task_key: not_null_zzz_game_details_date_test
         depends_on:
         - task_key: zzz_game_details_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_game_details_date,dbt_demo.models.sql_model1.not_null_zzz_game_details_date
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_game_details_date
       - task_key: unique_first_dbt_model_id_test
         depends_on:
         - task_key: first_dbt_model_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select unique_first_dbt_model_id,dbt_demo.models.sql_model2.unique_first_dbt_model_id
+          - dbt test --select dbt_demo.models.sql_model2.unique_first_dbt_model_id
       - task_key: not_null_first_dbt_model_id_test
         depends_on:
         - task_key: first_dbt_model_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_first_dbt_model_id,dbt_demo.models.sql_model2.not_null_first_dbt_model_id
+          - dbt test --select dbt_demo.models.sql_model2.not_null_first_dbt_model_id
       - task_key: unique_second_dbt_model_id_test
         depends_on:
         - task_key: second_dbt_model_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select unique_second_dbt_model_id,dbt_demo.models.sql_model2.unique_second_dbt_model_id
+          - dbt test --select dbt_demo.models.sql_model2.unique_second_dbt_model_id
       - task_key: not_null_second_dbt_model_id_test
         depends_on:
         - task_key: second_dbt_model_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_second_dbt_model_id,dbt_demo.models.sql_model2.not_null_second_dbt_model_id
+          - dbt test --select dbt_demo.models.sql_model2.not_null_second_dbt_model_id
       - task_key: not_null_second_dbt_model_amount_usd_test
         depends_on:
         - task_key: second_dbt_model_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_second_dbt_model_amount_usd,dbt_demo.models.sql_model2.not_null_second_dbt_model_amount_usd
+          - dbt test --select dbt_demo.models.sql_model2.not_null_second_dbt_model_amount_usd
       - task_key: changed_country_model
         depends_on:
         - task_key: country_snapshot_snapshot
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select changed_country,dbt_demo.sql_model1.changed_country
+          - dbt run --select dbt_demo.sql_model1.changed_country
       - task_key: dbt_demo_country_model
         depends_on:
         - task_key: country_codes_seed
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select country,dbt_demo.sql_model1.country
+          - dbt run --select dbt_demo.sql_model1.country
       - task_key: country_snapshot_snapshot
         depends_on:
         - task_key: dbt_demo_country_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt snapshot --select country_snapshot,dbt_demo.country_snapshot.country_snapshot
+          - dbt snapshot --select dbt_demo.country_snapshot.country_snapshot
       - task_key: zzz_win_loss_records_model
         depends_on:
         - task_key: zzz_game_details_model
@@ -241,45 +241,45 @@ resources:
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select zzz_win_loss_records,dbt_demo.sql_model1.zzz_win_loss_records
+          - dbt run --select dbt_demo.sql_model1.zzz_win_loss_records
       - task_key: unique_zzz_win_loss_records_team_test
         depends_on:
         - task_key: zzz_win_loss_records_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select unique_zzz_win_loss_records_team,dbt_demo.models.sql_model1.unique_zzz_win_loss_records_team
+          - dbt test --select dbt_demo.models.sql_model1.unique_zzz_win_loss_records_team
       - task_key: not_null_zzz_win_loss_records_team_test
         depends_on:
         - task_key: zzz_win_loss_records_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_win_loss_records_team,dbt_demo.models.sql_model1.not_null_zzz_win_loss_records_team
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_win_loss_records_team
       - task_key: not_null_zzz_win_loss_records_wins_test
         depends_on:
         - task_key: zzz_win_loss_records_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_win_loss_records_wins,dbt_demo.models.sql_model1.not_null_zzz_win_loss_records_wins
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_win_loss_records_wins
       - task_key: not_null_zzz_win_loss_records_losses_test
         depends_on:
         - task_key: zzz_win_loss_records_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select not_null_zzz_win_loss_records_losses,dbt_demo.models.sql_model1.not_null_zzz_win_loss_records_losses
+          - dbt test --select dbt_demo.models.sql_model1.not_null_zzz_win_loss_records_losses
       - task_key: dbt_util_country_model
         depends_on: []
         environment_key: Default
         dbt_task:
           commands:
-          - dbt run --select country,dbt_util.country
+          - dbt run --select dbt_util.country
       - task_key: unit_test_dbt_demo_diamonds_list_colors_test_get_distinct_colors
         depends_on:
         - task_key: diamonds_list_colors_model
         environment_key: Default
         dbt_task:
           commands:
-          - dbt test --select test_get_distinct_colors,dbt_demo.models.sql_model1.diamonds_list_colors.test_get_distinct_colors
+          - dbt test --select dbt_demo.models.sql_model1.diamonds_list_colors.test_get_distinct_colors

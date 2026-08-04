@@ -112,10 +112,10 @@ def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(db
     assert 'pkg_a_customers_test' in by_key
     assert 'pkg_b_customers_test' in by_key
     assert by_key['pkg_a_customers_test']['dbt_task']['commands'] == [
-        'dbt test --select customers,pkg_a.customers --indirect-selection cautious --target dev'
+        'dbt test --select pkg_a.customers --indirect-selection cautious --target dev'
     ]
     assert by_key['pkg_b_customers_test']['dbt_task']['commands'] == [
-        'dbt test --select customers,pkg_b.customers --indirect-selection cautious --target dev'
+        'dbt test --select pkg_b.customers --indirect-selection cautious --target dev'
     ]
     assert by_key['pkg_a_customers_test']['depends_on'] == [{'task_key': 'pkg_a_customers_model'}]
     assert by_key['pkg_b_customers_test']['depends_on'] == [{'task_key': 'pkg_b_customers_model'}]
@@ -158,7 +158,7 @@ def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory_bundled):
 
     assert 'countries_test' in by_key
     assert by_key['countries_test']['dbt_task']['commands'] == [
-        'dbt test --select countries,pkg.countries --indirect-selection cautious --target dev'
+        'dbt test --select pkg.countries --indirect-selection cautious --target dev'
     ]
     assert by_key['countries_test']['depends_on'] == [{'task_key': 'countries_seed'}]
     assert by_key['enriched_model']['depends_on'] == [{'task_key': 'countries_test'}]
@@ -178,7 +178,7 @@ def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory_bundled)
 
     assert 'orders_snap_test' in by_key
     assert by_key['orders_snap_test']['dbt_task']['commands'] == [
-        'dbt test --select orders_snap,pkg.orders_snap --indirect-selection cautious --target dev'
+        'dbt test --select pkg.orders_snap --indirect-selection cautious --target dev'
     ]
     assert by_key['orders_snap_test']['depends_on'] == [{'task_key': 'orders_snap_snapshot'}]
     assert by_key['orders_history_model']['depends_on'] == [{'task_key': 'orders_snap_test'}]
@@ -222,7 +222,7 @@ def test_flat_mode_emits_one_task_per_test_node_and_gates_downstream(dbt_factory
     assert 'customers_test' not in by_key
 
     assert by_key['unique_customers_id_test']['dbt_task']['commands'] == [
-        'dbt test --select unique_customers_id,pkg.unique_customers_id --target dev'
+        'dbt test --select pkg.unique_customers_id --target dev'
     ]
     assert by_key['unique_customers_id_test']['depends_on'] == [{'task_key': 'customers_model'}]
     # orders depends on customers AND every test attached to customers
@@ -372,14 +372,14 @@ def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_fact
     # Single-model test → bundled with cautious selection (relationship test is excluded by dbt)
     assert 'team_cities_test' in by_key
     assert by_key['team_cities_test']['dbt_task']['commands'] == [
-        'dbt test --select team_cities,pkg.team_cities --indirect-selection cautious --target dev'
+        'dbt test --select pkg.team_cities --indirect-selection cautious --target dev'
     ]
 
     # Cross-model test → its own task, gated on BOTH referenced models
     cross_test_key = 'relationships_game_details_winner__team_city__ref_team_cities__test'
     assert cross_test_key in by_key
     assert by_key[cross_test_key]['dbt_task']['commands'] == [
-        'dbt test --select relationships_game_details_winner__team_city__ref_team_cities_,pkg.relationships_game_details_winner__team_city__ref_team_cities_ --target dev'
+        'dbt test --select pkg.relationships_game_details_winner__team_city__ref_team_cities_ --target dev'
     ]
     assert {dep['task_key'] for dep in by_key[cross_test_key]['depends_on']} == {
         'team_cities_model',
@@ -404,7 +404,7 @@ def test_single_package_bundled_test_uses_qualified_select(dbt_factory_bundled):
 
     assert 'customers_test' in by_key
     assert by_key['customers_test']['dbt_task']['commands'] == [
-        'dbt test --select customers,pkg_a.customers --indirect-selection cautious --target dev'
+        'dbt test --select pkg_a.customers --indirect-selection cautious --target dev'
     ]
     assert by_key['orders_model']['depends_on'] == [{'task_key': 'customers_test'}]
 
@@ -423,12 +423,8 @@ def test_duplicate_model_name_across_packages_selects_by_distinct_fqn(dbt_factor
     tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
-    assert by_key['pkg_a_customers_model']['dbt_task']['commands'] == [
-        'dbt run --select customers,pkg_a.customers --target dev'
-    ]
-    assert by_key['pkg_b_customers_model']['dbt_task']['commands'] == [
-        'dbt run --select customers,pkg_b.customers --target dev'
-    ]
+    assert by_key['pkg_a_customers_model']['dbt_task']['commands'] == ['dbt run --select pkg_a.customers --target dev']
+    assert by_key['pkg_b_customers_model']['dbt_task']['commands'] == ['dbt run --select pkg_b.customers --target dev']
 
 
 def test_flat_mode_downstream_dep_rewired_to_disambiguated_collided_key(dbt_factory):
@@ -457,7 +453,7 @@ def test_model_in_subdirectory_selects_by_full_fqn_flat_mode(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['stg_orders_model']['dbt_task']['commands'] == [
-        'dbt run --select stg_orders,pkg.staging.stg_orders --target dev'
+        'dbt run --select pkg.staging.stg_orders --target dev'
     ]
 
 
@@ -476,7 +472,7 @@ def test_model_in_subdirectory_bundled_test_selects_by_full_fqn(dbt_factory_bund
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['stg_orders_test']['dbt_task']['commands'] == [
-        'dbt test --select stg_orders,pkg.staging.stg_orders --indirect-selection cautious --target dev'
+        'dbt test --select pkg.staging.stg_orders --indirect-selection cautious --target dev'
     ]
 
 
@@ -496,7 +492,7 @@ def test_flat_mode_unit_test_emits_task_and_gates_downstream(dbt_factory):
 
     unit_test_key = 'unit_test_pkg_orders_test_totals'
     assert by_key[unit_test_key]['dbt_task']['commands'] == [
-        'dbt test --select test_totals,pkg.staging.orders.test_totals --target dev'
+        'dbt test --select pkg.staging.orders.test_totals --target dev'
     ]
     assert by_key[unit_test_key]['depends_on'] == [{'task_key': 'orders_model'}]
     # summary (downstream of orders) gates on the unit test as well as the model
@@ -595,6 +591,40 @@ def test_resolver_uses_task_keys_map():
     assert DbtDependencyResolver.resolve(node, ["model"], task_keys) == ["a_orders_model"]
 
 
+def test_select_is_plain_fqn_when_no_node_is_nested_beneath_it(dbt_factory):
+    # The name pin is only needed to separate a node from nodes nested *beneath* its fqn. When no
+    # such node exists — the overwhelmingly common case — the plain fqn already matches exactly one
+    # node, so the selector stays unpinned and readable.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'staging', 'orders']),
+            _model('pkg', 'customers', fqn=['pkg', 'staging', 'customers']),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select pkg.staging.orders --target dev']
+    assert by_key['customers_model']['dbt_task']['commands'] == ['dbt run --select pkg.staging.customers --target dev']
+
+
+def test_select_of_nested_node_itself_stays_unpinned(dbt_factory):
+    # Only the *ancestor* needs pinning. `items` has nothing beneath it, so its own selector is
+    # already unambiguous and stays plain.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'staging', 'orders']),
+            _model('pkg', 'items', fqn=['pkg', 'staging', 'orders', 'items']),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['items_model']['dbt_task']['commands'] == ['dbt run --select pkg.staging.orders.items --target dev']
+
+
 def test_select_does_not_match_models_nested_under_a_sibling_name(dbt_factory):
     # `models/staging/orders.sql` (fqn pkg.staging.orders) and `models/staging/orders/items.sql`
     # (fqn pkg.staging.orders.items). dbt matches an fqn selector as a positional *prefix*, so a
@@ -611,9 +641,6 @@ def test_select_does_not_match_models_nested_under_a_sibling_name(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == ['dbt run --select orders,pkg.staging.orders --target dev']
-    assert by_key['items_model']['dbt_task']['commands'] == [
-        'dbt run --select items,pkg.staging.orders.items --target dev'
-    ]
 
 
 def test_bundled_test_select_does_not_match_models_nested_under_a_sibling_name(dbt_factory_bundled):

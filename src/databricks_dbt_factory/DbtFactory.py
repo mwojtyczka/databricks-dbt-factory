@@ -27,6 +27,9 @@ class DbtFactory:
         """
         self.task_factories = task_factories
         self.bundle_tests = bundle_tests
+        # fqns with another node nested beneath them, so `_fqn_select` knows which selectors need
+        # pinning. Populated per manifest at the start of `_create_tasks`.
+        self._fqn_prefixes: frozenset[tuple[str, ...]] = frozenset()
 
     def create_tasks(self, dbt_manifest: dict) -> list[dict]:
         """
@@ -45,19 +48,21 @@ class DbtFactory:
     _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
     _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
-    @staticmethod
-    def _fqn_select(node_info: dict) -> str:
+    def _fqn_select(self, node_info: dict) -> str:
         """
-        Returns the dbt `--select` argument that matches exactly one node: the intersection
-        (`,`) of the node's bare name and its full dot-joined fqn.
+        Returns the dbt `--select` argument for a node: its full dot-joined fqn, pinned with the
+        node's bare name (`<name>,<fqn>`, a dbt selector intersection) only when the plain fqn
+        would be ambiguous.
 
-        Neither half is exact on its own. dbt matches an fqn selector as a positional *prefix* of
-        the node's fqn, so the full fqn alone also selects every node nested beneath it —
-        `pkg.staging.orders` matches both `models/staging/orders.sql` and
-        `models/staging/orders/items.sql`, which would build `items` inside `orders`' task,
-        ignoring its own dependency wiring. The bare name alone matches the fqn leaf exactly but
-        collides when two packages share a model name. Intersected, the fqn scopes the package and
-        directory while the leaf-name match pins the selector to a single node.
+        dbt matches an fqn selector as a positional *prefix* of a node's fqn, so a plain fqn also
+        selects every node nested beneath it: `pkg.staging.orders` matches both
+        `models/staging/orders.sql` and `models/staging/orders/items.sql`, which would build
+        `items` inside `orders`' task, ignoring its own dependency wiring. Intersecting with the
+        bare name — which dbt matches against the fqn leaf — pins the selector to one node.
+
+        The pin is only emitted for the nodes that need it, i.e. those with another node nested
+        beneath their fqn. That shape is rare, so nearly every project keeps plain, readable
+        selectors, and only the genuinely ambiguous ones pay for the disambiguation.
 
         Falls back to the bare `name` if the manifest node has no fqn.
         """
@@ -65,10 +70,33 @@ class DbtFactory:
         fqn = node_info.get('fqn')
         if not fqn:
             return name
+        select = '.'.join(fqn)
+        if tuple(fqn) not in self._fqn_prefixes:
+            return select
         # dbt matches the bare `name` against the fqn leaf, or — for a versioned model, whose fqn
         # leaf is its version — against the name segment preceding it. Either way `name` is the
         # spelling that matches, so it is used rather than `fqn[-1]`.
-        return f"{name},{'.'.join(fqn)}"
+        return f'{name},{select}'
+
+    @staticmethod
+    def _compute_fqn_prefixes(dbt_manifest: dict) -> frozenset[tuple[str, ...]]:
+        """
+        The fqns that are a strict prefix of some other node's fqn — i.e. the nodes that have
+        another node nested beneath them, whose selectors `_fqn_select` must therefore pin.
+
+        Every fqn in the manifest is considered, not just the task-producing ones: a plain fqn
+        selector matches by prefix regardless of whether the extra node became a task, so a nested
+        node still pollutes its ancestor's selection.
+        """
+        fqns = {
+            tuple(info['fqn'])
+            for group in ('nodes', 'sources', 'unit_tests')
+            for info in dbt_manifest.get(group, {}).values()
+            if info.get('fqn')
+        }
+        # An fqn needs pinning iff some other fqn extends it, so it suffices to collect every
+        # proper ancestor of each fqn that is itself a node's fqn.
+        return frozenset(fqn[:i] for fqn in fqns for i in range(1, len(fqn)) if fqn[:i] in fqns)
 
     def _create_tasks(self, dbt_manifest: dict) -> list[DbtTask]:
         """
@@ -83,6 +111,7 @@ class DbtFactory:
         dbt_nodes = dbt_manifest.get('nodes', {})
         dbt_sources = dbt_manifest.get('sources', {})
         dbt_unit_tests = dbt_manifest.get('unit_tests', {})
+        self._fqn_prefixes = self._compute_fqn_prefixes(dbt_manifest)
 
         bundle = 'test' in self.task_factories and self.bundle_tests
         single_model_tested: set[str] = set()

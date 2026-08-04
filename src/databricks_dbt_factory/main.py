@@ -210,7 +210,7 @@ def parse_args():
         action="store_true",
         help=(
             "Bundle single-model tests for a given resource into one "
-            "`dbt test --select <name>,<resource_fqn> --indirect-selection cautious` task (default: "
+            "`dbt test --select <resource_fqn> --indirect-selection cautious` task (default: "
             "one task per test node). The cautious selector also sweeps in the resource's unit "
             "tests. Cross-model tests (e.g. `relationships`) are detected from the manifest and "
             "emitted as their own tasks gated on every referenced resource, so no tests are "

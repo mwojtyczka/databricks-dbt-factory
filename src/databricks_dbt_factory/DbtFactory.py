@@ -58,7 +58,10 @@ class DbtFactory:
 
     @classmethod
     def _node_select(
-        cls, node_info: dict, source_info: dict | None = None, nodes_per_file: dict[str, int] | None = None
+        cls,
+        node_info: dict,
+        source_info: dict | None = None,
+        resources_per_file: dict[tuple[str, str], int] | None = None,
     ) -> str:
         """
         Returns the dbt `--select` argument addressing exactly one node.
@@ -88,14 +91,15 @@ class DbtFactory:
 
         Raises:
             ValueError: when the surviving terms cannot single the node out — no term at all, only
-                `package:`, or a `package:`/`file:` pair whose file holds more than one resource.
+                `package:`, or a `package:`/`file:` pair matching more than one resource (see
+                `_count_resources_per_file` for what "more than one" counts).
                 Emitting such a selector would run every resource in the package or every test in one
                 `schema.yml`, so generation fails loudly at build time instead of doing the wrong
                 thing at run time.
 
-        `nodes_per_file` counts how many manifest resources share each `original_file_path`, which is
-        what makes the `file:`-only case decidable: a file holding a single resource is addressed
-        exactly by `package:`+`file:`, so a name dbt cannot express costs nothing there. Absent the
+        `resources_per_file` counts how many manifest resources each `package:`+`file:` pair matches,
+        which is what makes the `file:`-only case decidable: a file holding a single resource is
+        addressed exactly by that pair, so a name dbt cannot express costs nothing there. Absent the
         count (an unfiltered direct call) a shared file is assumed, the conservative reading.
         """
         if source_info is not None:
@@ -120,15 +124,16 @@ class DbtFactory:
             discriminating = True
 
         package = node_info.get('package_name') or ''
-        if cls._is_usable_component(package):
+        package_usable = cls._is_usable_component(package)
+        if package_usable:
             terms.append(f'package:{package}')
 
-        file_path = node_info.get('original_file_path') or ''
-        file_name = PurePosixPath(file_path).name
+        file_name = PurePosixPath(node_info.get('original_file_path') or '').name
         if cls._is_usable_component(file_name):
             terms.append(f'file:{file_name}')
-            # A file holding exactly one resource pins it as tightly as its name would.
-            if nodes_per_file is not None and nodes_per_file.get(file_path) == 1:
+            # A file holding exactly one resource pins it as tightly as its name would — but only
+            # together with `package:`, since `file:` matches a base name across the whole project.
+            if package_usable and resources_per_file is not None and resources_per_file.get((package, file_name)) == 1:
                 discriminating = True
 
         test_name = (node_info.get('test_metadata') or {}).get('name') or ''
@@ -227,7 +232,7 @@ class DbtFactory:
         dbt_nodes = self._enabled_only(dbt_manifest.get('nodes', {}))
         dbt_sources = self._enabled_only(dbt_manifest.get('sources', {}))
         dbt_unit_tests = self._enabled_only(dbt_manifest.get('unit_tests', {}))
-        nodes_per_file = self._count_nodes_per_file(dbt_nodes, dbt_unit_tests)
+        resources_per_file = self._count_resources_per_file(dbt_nodes, dbt_unit_tests, dbt_sources)
 
         bundle = 'test' in self.task_factories and self.bundle_tests
         single_model_tested: set[str] = set()
@@ -265,7 +270,7 @@ class DbtFactory:
             bundled_test_keys,
             tests_by_resource,
             ancestors,
-            nodes_per_file,
+            resources_per_file,
         )
 
         if bundle:
@@ -276,31 +281,58 @@ class DbtFactory:
                     single_model_tested,
                     task_keys,
                     bundled_test_keys,
-                    nodes_per_file,
+                    resources_per_file,
                 )
             )
-            tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys, nodes_per_file))
+            tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys, resources_per_file))
         elif 'test' in self.task_factories:
-            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys, nodes_per_file))
+            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys, resources_per_file))
 
         return tasks
 
     @staticmethod
-    def _count_nodes_per_file(*entry_groups: dict) -> dict[str, int]:
+    def _count_resources_per_file(*entry_groups: dict) -> dict[tuple[str, str], int]:
         """
-        Counts the resources declared in each `original_file_path`.
+        Counts the resources a `package:`+`file:` pair matches, keyed by `(package, file base name)`.
 
-        A `schema.yml` holds every test and unit test declared in it, and two snapshots can share one
-        `.sql` — but most files hold exactly one resource, and there `file:` is as precise as the
-        resource's own name. `_node_select` needs the distinction to tell an exact `package:`+`file:`
-        pair from one that would sweep in a sibling. Unit tests are counted alongside nodes because
-        they share the same `.yml` files.
+        A `schema.yml` holds every test, unit test and source declared in it, and two snapshots can
+        share one `.sql` — but most files hold exactly one resource, and there `file:` is as precise as
+        the resource's own name. `_node_select` needs the distinction to tell an exact
+        `package:`+`file:` pair from one that would sweep in a sibling.
+
+        The key mirrors what dbt actually matches, each half confirmed with `dbt ls` on dbt 1.12.0:
+
+        * **the base name, not the path** — `file:schema.yml` selects every `schema.yml` in the
+          project, while `file:models/my dir/schema.yml` selects nothing. Counting per path would call
+          each of two colliding `schema.yml` files a single-resource file and emit a selector matching
+          both. (`path:` is no way out: a directory containing a space matches nothing, since dbt
+          splits the raw spec on spaces.)
+        * **per package** — `package:` does separate two packages' identically-named files, so a base
+          name shared only *across* packages stays exact. Counting base names globally would refuse a
+          project dbt builds fine. dbt constrains package names to `^[^\\d\\W]\\w*$`, so `package:` is
+          always expressible and this always holds.
+
+        Unit tests and sources are counted alongside nodes. Unit tests share `.yml` files with the
+        models they test and are executed by `dbt test`, so they collide directly. A source is never
+        executed by any command this factory emits, but it still has to be counted: a task's
+        `dbt test` carries no `--indirect-selection`, so dbt's default *eager* applies and adds the
+        tests of every selected non-test resource. Selecting a source through a shared `file:`
+        therefore drags in tests that merely reference it — including tests declared in *other* files,
+        which no file count could ever notice. Confirmed with `dbt ls` on dbt 1.12.0, where moving the
+        source out to its own `.yml` removed the extra test.
+
+        The manifest's other keys are deliberately left out. `exposures`, `metrics` and
+        `semantic_models` are matched by `file:` too, but nothing tests them, so eager pulls nothing in
+        for them — verified the same way. `disabled` is never read, and `_enabled_only` has already
+        dropped anything dbt left in `nodes` with `enabled` false, so a disabled resource does not make
+        its file look shared.
         """
-        counts: dict[str, int] = {}
+        counts: dict[tuple[str, str], int] = {}
         for entries in entry_groups:
             for info in entries.values():
-                path = info.get('original_file_path') or ''
-                counts[path] = counts.get(path, 0) + 1
+                file_name = PurePosixPath(info.get('original_file_path') or '').name
+                key = (info.get('package_name') or '', file_name)
+                counts[key] = counts.get(key, 0) + 1
         return counts
 
     @staticmethod
@@ -541,7 +573,7 @@ class DbtFactory:
         bundled_test_keys: dict[str, str],
         tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
         ancestors_by_node: dict[str, set[str]],
-        nodes_per_file: dict[str, int],
+        resources_per_file: dict[tuple[str, str], int],
     ) -> list[DbtTask]:
         """Builds tasks for every non-test resource (plus per-test tasks when not bundling)."""
         # Maps a tested resource's task key (what `depends_on` holds) to its gating bundled test
@@ -560,7 +592,7 @@ class DbtFactory:
             task_key = task_keys[node_full_name]
             factory = self.task_factories[resource_type]
             task = factory.create_task(
-                self._node_select(node_info, nodes_per_file=nodes_per_file),
+                self._node_select(node_info, resources_per_file=resources_per_file),
                 node_info['name'],
                 node_info,
                 task_key,
@@ -593,7 +625,7 @@ class DbtFactory:
         nodes_with_tests: set[str],
         task_keys: dict[str, str],
         bundled_test_keys: dict[str, str],
-        nodes_per_file: dict[str, int],
+        resources_per_file: dict[tuple[str, str], int],
     ) -> list[DbtTask]:
         """Emits one bundled `<resource>_test` task per tested resource via `TestTaskFactory.create_bundled_task`."""
         test_factory = self.task_factories['test']
@@ -602,7 +634,9 @@ class DbtFactory:
             is_source = full_name.startswith('source.')
             info = dbt_sources[full_name] if is_source else dbt_nodes[full_name]
             bare_name = info['name']
-            select = self._node_select(info, source_info=info if is_source else None, nodes_per_file=nodes_per_file)
+            select = self._node_select(
+                info, source_info=info if is_source else None, resources_per_file=resources_per_file
+            )
             tasks.append(
                 test_factory.create_bundled_task(
                     task_key=bundled_test_keys[full_name],
@@ -617,7 +651,7 @@ class DbtFactory:
         self,
         standalone_tests: list[tuple[str, dict]],
         task_keys: dict[str, str],
-        nodes_per_file: dict[str, int],
+        resources_per_file: dict[tuple[str, str], int],
     ) -> list[DbtTask]:
         """
         Emits one task per standalone test — cross-model tests (e.g. `relationships`) gated on
@@ -629,7 +663,7 @@ class DbtFactory:
             test_task_key = task_keys[test_full_name]
             tasks.append(
                 test_factory.create_task(
-                    self._node_select(test_info, nodes_per_file=nodes_per_file),
+                    self._node_select(test_info, resources_per_file=resources_per_file),
                     test_info['name'],
                     test_info,
                     test_task_key,
@@ -642,7 +676,7 @@ class DbtFactory:
         self,
         dbt_unit_tests: dict,
         task_keys: dict[str, str],
-        nodes_per_file: dict[str, int],
+        resources_per_file: dict[tuple[str, str], int],
     ) -> list[DbtTask]:
         """
         Emits one task per unit test, selected by its full FQN and gated on the model it tests.
@@ -658,7 +692,7 @@ class DbtFactory:
                 continue
             tasks.append(
                 test_factory.create_task(
-                    self._node_select(unit_test_info, nodes_per_file=nodes_per_file),
+                    self._node_select(unit_test_info, resources_per_file=resources_per_file),
                     unit_test_info['name'],
                     unit_test_info,
                     task_keys[unit_test_full_name],

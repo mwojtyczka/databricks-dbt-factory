@@ -394,6 +394,16 @@ of them alone is precise: a resource whose name and FQN are both unusable and th
 `schema.yml` with a sibling cannot be addressed, and generation fails with an error naming it rather
 than emitting a task that would run the sibling too.
 
+"A file it has to itself" is judged per package and by base name, because that is what dbt matches:
+`file:` takes a *base name*, not a path, so two `schema.yml` files in different directories are one
+selector to dbt, while `package:` does keep two packages' identically-named files apart.
+
+Sources count towards a file's occupants even though no task ever runs one. A task's `dbt test` uses
+dbt's default `--indirect-selection eager`, which adds the tests of every selected non-test resource,
+so a source sharing the file drags in tests that merely reference it — including tests declared in
+other files. Exposures, metrics and semantic models are matched by `file:` too but are *not* counted:
+nothing tests them, so they pull nothing in, and counting them would refuse projects dbt builds fine.
+
 Sources are addressed by `source:<package>.<source>.<table>`, dbt's own form for them. That form
 takes at most three parts, so a source or table name containing a `.` cannot be addressed at all —
 dbt rejects a four-part selector outright — and generation fails for it rather than emitting a task

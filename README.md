@@ -378,9 +378,17 @@ Tests get the extra `test_name:` part, because all the tests declared in one `sc
 file and so cannot be told apart by `file:` alone.
 
 A part is left out if dbt would not read it literally — for example a name containing a space, comma
-or colon, which dbt treats as selector syntax. Leaving one out costs precision but not correctness:
-the remaining parts still identify the resource. If nothing usable is left, task generation fails
-with an error naming the resource, rather than emitting a selector that would run the whole package.
+or colon, which dbt treats as selector syntax, or an FQN ending in something dbt reads as one of its
+`+`/`@` graph operators. Leaving a part out costs precision but not correctness: the remaining parts
+still identify the resource. Where the FQN has to be dropped, the resource's own name takes its place
+(dbt matches a bare name against the last part of the FQN):
+
+```
+dbt run --select stg_orders,package:my_project,file:stg_orders.sql
+```
+
+If nothing usable is left, task generation fails with an error naming the resource, rather than
+emitting a selector that would run the whole package.
 
 Sources are addressed by `source:<package>.<source>.<table>`, dbt's own form for them.
 

@@ -740,19 +740,17 @@ def test_unusable_fqn_segment_is_dropped_but_other_terms_remain(dbt_factory, bad
     ]
 
 
-def test_fqn_ending_in_a_graph_operator_is_dropped(dbt_factory):
+def test_fqn_ending_in_a_graph_operator_is_refused(dbt_factory):
     # dbt reads a trailing `+N` as child depth, so `pkg.orders+1` selects `pkg.orders` and its
     # children — the wrong model entirely. The bare name `orders+1` is no better: on its own it *is*
-    # the whole raw selector, so it trips the same rule and selects nothing. Both are dropped, and
-    # `package:`/`file:` still address the node.
+    # the whole raw selector, so it trips the same rule and selects nothing. That leaves only
+    # `package:`/`file:`, which address groups, so the resource cannot be addressed and generation
+    # refuses. `package:pkg,file:orders+1.sql` happens to resolve to one node here — see
+    # `test_file_name_alone_never_addresses_a_resource` for why we do not rely on that.
     nodes = dict([_model('pkg', 'orders+1', fqn=['pkg', 'orders+1'], path='models/orders+1.sql')])
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
-    by_key = {t['task_key']: t for t in tasks}
-
-    assert by_key['orders+1_model']['dbt_task']['commands'] == [
-        'dbt run --select package:pkg,file:orders+1.sql --target dev'
-    ]
+    with pytest.raises(ValueError, match='Rename'):
+        dbt_factory.create_tasks({'nodes': nodes})
 
 
 def test_fqn_starting_with_a_numeric_graph_operator_is_dropped(dbt_factory):
@@ -800,18 +798,19 @@ def test_name_fallback_starting_with_a_numeric_graph_operator_is_refused(dbt_fac
         dbt_factory.create_tasks({'nodes': nodes})
 
 
-def test_name_fallback_with_an_operator_is_kept_when_the_file_is_its_own(dbt_factory):
-    # The mirror image: the same unusable name, but the resource has its file to itself, so
-    # `package:`+`file:` addresses it exactly (`package:probe,file:orders+1.sql` -> one node,
-    # confirmed with `dbt ls` on dbt 1.12.0). Refusing here would reject a project dbt handles.
+def test_file_name_alone_never_addresses_a_resource(dbt_factory):
+    # `file:` never counts as addressing a resource, even when the file holds exactly one. dbt has no
+    # `unique_id:` selector, so exactness has to be established per node; "this file holds one resource"
+    # is a property of the surrounding project, and `file:` matches a base name rather than a path, so
+    # it is not one the manifest states directly. The rule is therefore: the fqn or the name must
+    # survive.
+    #
+    # Deliberately stricter than dbt requires — `package:pkg,file:2+orders.sql` does resolve to one
+    # node, confirmed with `dbt ls` on dbt 1.12.0 — and the error says to rename the file.
     nodes = dict([_model('pkg', '2+orders', fqn=['pkg', 'my dir', '2+orders'], path='models/my dir/2+orders.sql')])
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
-    by_key = {t['task_key']: t for t in tasks}
-
-    assert by_key['2+orders_model']['dbt_task']['commands'] == [
-        'dbt run --select package:pkg,file:2+orders.sql --target dev'
-    ]
+    with pytest.raises(ValueError, match='Rename'):
+        dbt_factory.create_tasks({'nodes': nodes})
 
 
 def test_source_selector_with_a_graph_operator_is_refused(dbt_factory_bundled):
@@ -873,129 +872,17 @@ def test_generation_fails_when_only_non_discriminating_terms_survive(dbt_factory
         dbt_factory.create_tasks({'nodes': nodes})
 
 
-def test_same_file_name_in_two_directories_is_not_exact(dbt_factory):
-    # `file:` matches a *base name*, not a path — confirmed with `dbt ls` on dbt 1.12.0, where
-    # `file:schema.yml` selected tests from `models/my dir/` and `models/other dir/` alike, and
-    # `file:models/my dir/schema.yml` selected nothing. So a resource is pinned by `package:`+`file:`
-    # only when it is alone among every resource sharing that base name in its package; counting per
-    # full path calls each of two colliding `schema.yml` files a single-resource file and emits a
-    # selector matching both. `path:` is no escape either: the space makes it match nothing.
-    nodes = dict(
-        [
-            _test(
-                'pkg',
-                'check[a]orders',
-                ['model.pkg.orders'],
-                fqn=['pkg', 'my dir', 'check[a]orders'],
-                path='models/my dir/schema.yml',
-                test_name='not_null',
-            ),
-            _test(
-                'pkg',
-                'check[b]items',
-                ['model.pkg.items'],
-                fqn=['pkg', 'other dir', 'check[b]items'],
-                path='models/other dir/schema.yml',
-                test_name='not_null',
-            ),
-        ]
-    )
-
-    with pytest.raises(ValueError, match='no selector can address'):
-        dbt_factory.create_tasks({'nodes': nodes})
-
-
-def test_a_source_in_the_same_file_makes_it_ambiguous(dbt_factory):
-    # Sources are filed under the manifest's `sources` key but declared in the same `.yml`, and dbt
-    # matches them by `file:` alongside nodes, so counting only `nodes` and `unit_tests` undercounts.
-    #
-    # The harm needs dbt's default to see: a per-test `dbt test` carries no `--indirect-selection`, so
-    # *eager* applies and adds the tests of any selected non-test node. Confirmed with `dbt ls` on dbt
-    # 1.12.0 — selecting the source via `package:pkg,file:schema.yml` swept in a singular test living
-    # in `tests/`, a file the count never looks at, while the same selector under `empty` was exact.
-    # So the unit test's task would have run that singular test as well as its own.
-    nodes = dict(
-        [
-            # The unit test is only emitted when its target model is in the manifest.
-            _model('pkg', 'orders', fqn=['pkg', 'my dir', 'orders'], path='models/my dir/orders.sql'),
-            _test(
-                'pkg',
-                'singular_on_source',
-                ['source.pkg.raw.ord'],
-                fqn=['pkg', 'singular_on_source'],
-                path='tests/singular_on_source.sql',
-            ),
-        ]
-    )
-    unit_tests = dict(
-        [
-            _unit_test(
-                'pkg',
-                'orders',
-                'ut[a]orders',
-                fqn=['pkg', 'my dir', 'orders', 'ut[a]orders'],
-                path='models/my dir/schema.yml',
-            ),
-        ]
-    )
-    sources = dict([_source('pkg', 'raw', 'ord', path='models/my dir/schema.yml')])
-
-    with pytest.raises(ValueError, match='no selector can address'):
-        dbt_factory.create_tasks({'nodes': nodes, 'sources': sources, 'unit_tests': unit_tests})
-
-
-def test_an_analysis_sharing_a_file_name_does_not_make_it_ambiguous(dbt_factory):
-    # `nodes` holds analyses and operations as well as the resources we run, but dbt's default
-    # selection excludes both, so neither can collide with anything a task selects. Confirmed with
-    # `dbt ls` on dbt 1.12.0: `package:probe,file:2+x.sql` selected the *model* alone, and the analysis
-    # appeared only with an explicit `--resource-type analysis`, which no emitted command passes.
-    # (`--resource-type operation` is not even accepted.) Counting them would refuse this project,
-    # whose model has no usable fqn or name and so rests entirely on the file being its own.
-    nodes = dict(
-        [
-            _model('pkg', '2+x', fqn=['pkg', 'my dir', '2+x'], path='models/my dir/2+x.sql'),
-            _analysis('pkg', '2+x', fqn=['pkg', 'analysis', '2+x'], path='analyses/2+x.sql'),
-        ]
-    )
+def test_a_usable_name_still_rescues_an_unusable_fqn(dbt_factory):
+    # The boundary of the refusal above: only the fqn *or* the name has to survive. A space in the
+    # directory kills the fqn, but `orders` is a fine selector and dbt matches a bare name against the
+    # fqn's leaf, so these projects keep working — refusing them would reject any project with a space
+    # in a directory name.
+    nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'my dir', 'orders'], path='models/my dir/orders.sql')])
 
     tasks = dbt_factory.create_tasks({'nodes': nodes})
 
-    assert [t['dbt_task']['commands'][0] for t in tasks] == ['dbt run --select package:pkg,file:2+x.sql --target dev']
-
-
-def test_a_file_name_shared_across_packages_stays_exact(dbt_factory):
-    # The over-rejection guard: `package:` does separate packages, so a base name shared *across*
-    # packages is exact once `package:` is intersected in — `package:probe,file:schema.yml,
-    # test_name:not_null` selected one test where bare `file:schema.yml` selected two, confirmed with
-    # `dbt ls`. Counting base names globally would refuse a project dbt builds fine. dbt constrains
-    # package names to `^[^\d\W]\w*$`, so `package:` is always usable and this holds generally.
-    nodes = dict(
-        [
-            _test(
-                'pkg',
-                'check[a]alpha',
-                ['model.pkg.alpha'],
-                fqn=['pkg', 'my dir', 'check[a]alpha'],
-                path='models/my dir/schema.yml',
-                test_name='not_null',
-            ),
-            _test(
-                'other',
-                'check[b]beta',
-                ['model.other.beta'],
-                fqn=['other', 'my dir', 'check[b]beta'],
-                path='models/my dir/schema.yml',
-                test_name='not_null',
-            ),
-        ]
-    )
-
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
-    selects = sorted(t['dbt_task']['commands'][0] for t in tasks)
-
-    assert selects == [
-        'dbt test --select package:other,file:schema.yml,test_name:not_null --target dev',
-        'dbt test --select package:pkg,file:schema.yml,test_name:not_null --target dev',
+    assert [t['dbt_task']['commands'][0] for t in tasks] == [
+        'dbt run --select orders,package:pkg,file:orders.sql --target dev'
     ]
 
 

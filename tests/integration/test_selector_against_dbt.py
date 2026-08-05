@@ -275,7 +275,6 @@ def test_package_node_matched_by_package_stripped_fqn_is_still_exact(tmp_path):
 @pytest.mark.parametrize(
     ('file_name', 'note'),
     [
-        pytest.param('orders+1.sql', 'a trailing +N is read as child depth', id='numeric-graph-operator'),
         pytest.param('+leading.sql', 'an operator inside a segment is harmless', id='embedded-operator'),
         pytest.param("customer's.sql", 'a quote breaks shlex in the notebook runner', id='apostrophe'),
     ],
@@ -284,6 +283,10 @@ def test_awkward_file_names_still_resolve_to_one_node(tmp_path, file_name, note)
     """
     Names that trip dbt's selector grammar or the notebook runner's tokenisation must still address
     exactly one node — by dropping only the unusable term. (`note` records what each name trips.)
+
+    A name dbt reads as a graph operator at the *boundary* (`orders+1`) is not here: it leaves nothing
+    that pins the node, so it is refused. See
+    `test_a_file_name_alone_is_not_enough_to_address_a_resource`.
     """
     assert note
     _write_project(tmp_path, {file_name: MODEL_SQL, 'orders.sql': MODEL_SQL})
@@ -520,230 +523,42 @@ def test_tests_sharing_a_file_with_no_usable_name_are_refused(tmp_path):
         _resource_selectors(manifest, bundle_tests=False)
 
 
-def test_single_resource_file_addresses_it_without_a_usable_name(tmp_path):
+def test_a_file_name_alone_is_not_enough_to_address_a_resource(tmp_path):
     """
-    The counterpart: an unusable name costs nothing when the resource has its file to itself, since
-    `package:`+`file:` then resolves to exactly one node. The refusal above must not generalise to
-    this, or an awkward file name would fail a project dbt builds fine.
+    `file:` never counts as addressing a resource by itself, even when the file holds exactly one.
+
+    dbt has no `unique_id:` selector — confirmed by brute-forcing every method name it accepts — so a
+    selector is always a predicate that may match several nodes, and exactness has to be established per
+    node. "This file holds one resource" is instead a property of the surrounding project, and `file:`
+    matches a *base name* rather than a path, so it is not one the manifest states directly. A resource
+    whose fqn and name are both unusable is therefore refused, with an error naming the remedy.
+
+    `models/orders+1.sql` is the shape that pays for it: the fqn `probe.orders+1` and the bare name both
+    end in `+1`, which dbt reads as child depth. `package:probe,file:orders+1.sql` does resolve to
+    exactly one node — verified here — so this refusal is deliberately stricter than dbt requires.
     """
-    _write_project(tmp_path, {'my dir/2+orders.sql': MODEL_SQL, 'my dir/orders.sql': MODEL_SQL})
+    _write_project(tmp_path, {'orders+1.sql': MODEL_SQL, 'orders.sql': MODEL_SQL})
+    manifest = _parse(tmp_path)
+
+    # dbt would accept it: the selector we no longer emit is exact.
+    assert _selected_ids(tmp_path, 'package:probe,file:orders+1.sql', 'model') == ('probe.orders+1',)
+
+    with pytest.raises(ValueError, match='Rename'):
+        _resource_selectors(manifest, bundle_tests=False)
+
+
+def test_a_usable_name_still_rescues_an_unusable_fqn(tmp_path):
+    """
+    The boundary of the refusal above: only the *name* has to survive, not the fqn. A space in the
+    directory makes the fqn unusable, but `orders` is a fine selector and dbt matches it against the
+    fqn's leaf, so these projects keep working. Refusing them too would reject any project with a
+    space in a directory name.
+    """
+    _write_project(tmp_path, {'my dir/orders.sql': MODEL_SQL, 'my dir/items.sql': MODEL_SQL})
     manifest = _parse(tmp_path)
 
     for task_key, select, _verb in _resource_selectors(manifest, bundle_tests=False):
-        selected = _selected_ids(tmp_path, select, 'model', indirect=False)
-        assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one node'
-
-
-def test_same_file_name_in_two_directories_is_not_treated_as_exact(tmp_path):
-    """
-    `file:` matches a *base name*, not a path, so two `schema.yml` files in different directories are
-    one selector to dbt. A resource is only pinned by `package:`+`file:` when it is alone among every
-    resource sharing that base name in its package — counting per directory says "alone" for each of
-    two colliding files and emits a selector matching both.
-
-    Both tests here have an unusable fqn (a space in the directory) and an unusable name (fnmatch
-    brackets), so `package:`+`file:`+`test_name:` is all that survives and the file count is the only
-    thing deciding whether that is exact.
-    """
-    _write_project(tmp_path, {'my dir/orders.sql': MODEL_SQL, 'other dir/items.sql': MODEL_SQL})
-    (tmp_path / 'models' / 'my dir' / 'schema.yml').write_text(
-        'models:\n'
-        '  - name: orders\n'
-        '    columns:\n'
-        '      - name: id\n'
-        '        data_tests:\n'
-        '          - not_null: {name: "check[a]orders"}\n',
-        encoding='utf-8',
-    )
-    (tmp_path / 'models' / 'other dir' / 'schema.yml').write_text(
-        'models:\n'
-        '  - name: items\n'
-        '    columns:\n'
-        '      - name: id\n'
-        '        data_tests:\n'
-        '          - not_null: {name: "check[b]items"}\n',
-        encoding='utf-8',
-    )
-    manifest = _parse(tmp_path)
-
-    # dbt's verdict on the selector a per-directory count would call exact: it matches both tests.
-    assert len(_selected_ids(tmp_path, 'package:probe,file:schema.yml,test_name:not_null', 'test', indirect=False)) == 2
-
-    with pytest.raises(ValueError, match='no selector can address'):
-        _resource_selectors(manifest, bundle_tests=False)
-
-
-def test_a_source_sharing_a_yml_makes_a_test_file_ambiguous(tmp_path):
-    """
-    Sources are filed under the manifest's `sources` key, but they are declared in the same `.yml` and
-    dbt matches them by `file:` alongside nodes, so a count that reads only `nodes` and `unit_tests`
-    undercounts and calls the file exact.
-
-    The harm is indirect and needs the real default to see. A per-test task's `dbt test` carries no
-    `--indirect-selection`, so dbt's default *eager* applies, which adds the tests of any selected
-    non-test node. Selecting the source therefore drags in tests that merely *reference* it — here a
-    singular test in `tests/`, a different file entirely, so no file count could ever notice it. The
-    unit test's task would run that singular test too, and so would the singular test's own task.
-
-    Under `empty` the same selector is exact, which is why the sweep has to be checked against the
-    default the emitted command actually uses.
-    """
-    _write_project(tmp_path, {'my dir/orders.sql': MODEL_SQL})
-    (tmp_path / 'models' / 'my dir' / 'schema.yml').write_text(
-        'sources:\n'
-        '  - name: raw\n'
-        '    schema: default\n'
-        '    tables:\n'
-        '      - name: ord\n'
-        'models:\n'
-        '  - name: orders\n'
-        '    columns:\n'
-        '      - name: id\n'
-        'unit_tests:\n'
-        '  - name: "ut[a]orders"\n'
-        '    model: orders\n'
-        '    given: []\n'
-        '    expect:\n'
-        '      rows: [{id: 1}]\n',
-        encoding='utf-8',
-    )
-    tests_dir = tmp_path / 'tests'
-    tests_dir.mkdir()
-    (tests_dir / 'singular_on_source.sql').write_text(
-        "select * from {{ source('raw','ord') }} where false\n", encoding='utf-8'
-    )
-    manifest = _parse(tmp_path)
-
-    # dbt's verdict on the selector an uncounted source would call exact. Eager is the default the
-    # emitted `dbt test` runs under, and it sweeps in the singular test from `tests/`.
-    eager = _selected_ids(tmp_path, 'package:probe,file:schema.yml', 'test', indirect_selection='eager')
-    assert 'probe.singular_on_source' in eager
-    # The source in the file is what causes it: under `empty` nothing extra is pulled in.
-    assert not _selected_ids(tmp_path, 'package:probe,file:schema.yml', 'test', indirect_selection='empty')
-
-    with pytest.raises(ValueError, match='no selector can address'):
-        _resource_selectors(manifest, bundle_tests=False)
-
-
-def test_an_analysis_sharing_a_file_name_does_not_make_it_ambiguous(tmp_path):
-    """
-    `nodes` is not only the resources we run: dbt files `analysis` and `operation` entries there too,
-    and its default selection reaches neither. So counting them would refuse a project dbt addresses
-    exactly — here a model with no usable fqn (a space in the directory) and no usable name (a leading
-    `2+` graph operator), resting entirely on the file being its own.
-
-    Swept for completeness rather than assumed: of every type dbt accepts for `--resource-type`,
-    `analysis` is the only one in `nodes` that a bare `package:probe` does not return, and `operation`
-    and `sql_operation` are rejected as selector values outright.
-    """
-    _write_project(tmp_path, {'my dir/2+x.sql': MODEL_SQL})
-    analyses = tmp_path / 'analyses'
-    analyses.mkdir()
-    (analyses / '2+x.sql').write_text('select 1\n', encoding='utf-8')
-    manifest = _parse(tmp_path)
-
-    # The analysis is in `nodes` and shares the base name, yet the model's selector is exact.
-    assert 'analysis.probe.2+x' in manifest['nodes']
-    assert _selected_ids(tmp_path, 'package:probe,file:2+x.sql', None) == ('probe.my dir.2+x',)
-    # It takes an explicit `--resource-type analysis` to reach it, which no emitted command passes.
-    assert _selected_ids(tmp_path, 'package:probe,file:2+x.sql', 'analysis') == ('probe.analysis.2+x',)
-
-    selects = [select for _key, select, _verb in _resource_selectors(manifest, bundle_tests=False)]
-    assert selects == ['package:probe,file:2+x.sql']
-
-
-def test_an_exposure_sharing_a_yml_does_not_make_it_ambiguous(tmp_path):
-    """
-    The boundary on which manifest keys have to be counted. `exposures` (like `metrics` and
-    `semantic_models`) are matched by `file:` just as sources are, but nothing *tests* an exposure, so
-    eager indirect selection pulls nothing extra in for one — confirmed with `dbt ls` on dbt 1.12.0,
-    where the same selector returned the unit test alone under eager and empty alike, even with the
-    exposure's `ref()` target carrying a test of its own in another file.
-
-    Counting them would refuse this project, which dbt builds fine. Sources are counted because they
-    do sweep; these are not because they do not.
-    """
-    _write_project(tmp_path, {'my dir/orders.sql': MODEL_SQL, 'my dir/orders2.sql': MODEL_SQL})
-    # `orders` is tested in a *different* file — what eager would sweep in if exposures behaved like
-    # sources.
-    (tmp_path / 'models' / 'my dir' / 'tests.yml').write_text(
-        'models:\n'
-        '  - name: orders\n'
-        '    columns:\n'
-        '      - name: id\n'
-        '        data_tests:\n'
-        '          - not_null: {name: chk_orders}\n',
-        encoding='utf-8',
-    )
-    (tmp_path / 'models' / 'my dir' / 'schema.yml').write_text(
-        'models:\n'
-        '  - name: orders2\n'
-        '    columns:\n'
-        '      - name: id\n'
-        'unit_tests:\n'
-        '  - name: "ut[a]"\n'
-        '    model: orders2\n'
-        '    given: []\n'
-        '    expect:\n'
-        '      rows: [{id: 1}]\n'
-        'exposures:\n'
-        '  - name: my_dash\n'
-        '    type: dashboard\n'
-        "    owner: {name: x, email: x@example.com}\n"
-        "    depends_on: [ref('orders')]\n",
-        encoding='utf-8',
-    )
-    manifest = _parse(tmp_path)
-
-    # The exposure is in the file and dbt matches it by `file:` — yet the selector stays exact.
-    assert 'exposure:probe.my_dash' in _selected_ids(tmp_path, 'package:probe,file:schema.yml', None)
-
-    # Generation succeeds, and under the eager default the emitted command actually uses, the unit
-    # test's task runs that unit test and nothing else. `dbt test` executes only tests, so the two
-    # resource types it can reach are checked separately — the exposure is not one of them.
-    selectors_by_key = {key: select for key, select, _verb in _resource_selectors(manifest, bundle_tests=False)}
-    unit_test_select = selectors_by_key['unit_test_probe_orders2_ut[a]']
-    assert _selected_ids(tmp_path, unit_test_select, 'unit_test', indirect_selection='eager') == (
-        'unit_test:probe.ut[a]',
-    )
-    assert not _selected_ids(tmp_path, unit_test_select, 'test', indirect_selection='eager')
-
-
-def test_a_file_name_unique_within_its_package_stays_exact(tmp_path):
-    """
-    The over-rejection guard for the two tests above: `package:` does separate packages, confirmed
-    with `dbt ls`, so a base name shared *across* packages is still exact once `package:` is
-    intersected in. Counting base names globally would refuse this project, which dbt builds fine.
-    """
-    _write_project(
-        tmp_path,
-        {'my dir/alpha.sql': MODEL_SQL},
-        package_model_paths={'beta.sql': MODEL_SQL},
-    )
-    (tmp_path / 'models' / 'my dir' / 'schema.yml').write_text(
-        'models:\n'
-        '  - name: alpha\n'
-        '    columns:\n'
-        '      - name: id\n'
-        '        data_tests:\n'
-        '          - not_null: {name: "check[a]alpha"}\n',
-        encoding='utf-8',
-    )
-    package_schema = tmp_path / 'libs' / 'other' / 'models' / 'schema.yml'
-    package_schema.write_text(
-        'models:\n'
-        '  - name: beta\n'
-        '    columns:\n'
-        '      - name: id\n'
-        '        data_tests:\n'
-        '          - not_null: {name: "check[b]beta"}\n',
-        encoding='utf-8',
-    )
-    manifest = _parse(tmp_path)
-
-    for task_key, select, verb in _resource_selectors(manifest, bundle_tests=False):
-        resource_type = {'run': 'model'}.get(verb, 'test')
-        selected = _selected_ids(tmp_path, select, resource_type, indirect=False)
+        selected = _selected_ids(tmp_path, select, 'model')
         assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one node'
 
 

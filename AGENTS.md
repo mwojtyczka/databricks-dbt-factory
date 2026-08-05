@@ -40,6 +40,19 @@ you, dropping only terms its grammar cannot express — rather than a decision t
 rounds of per-case branching each shipped a new blind spot. If you find yourself adding a branch for
 a newly-discovered layout, prefer strengthening the uniform rule.
 
+**And a harder lesson: a rule that keeps needing repair is the wrong rule, however uniform.** dbt has
+no `unique_id:` selector, so every selector is a predicate whose exactness must be established. An
+earlier revision established it for `package:`+`file:` by counting the resources per file — which meant
+encoding that dbt's `file:` matches a base name rather than a path, that `package:` scopes it, which
+manifest sections `file:` reaches, that sources count because `--indirect-selection` defaults to eager,
+and that `analysis`/`operation` entries do not count at all. Three review rounds each found a fresh
+defect in that bookkeeping, and all of it existed to support file names containing a graph operator.
+
+It was replaced by "the fqn or the name must survive, or refuse." Before adding machinery that models
+dbt's matching semantics, ask which project shapes it actually buys and whether refusing them is
+cheaper. Prefer a guarantee that holds per node over one that depends on the rest of the project, and
+accept being stricter than dbt when the alternative cannot be verified by reading it.
+
 Practically:
 
 - **Prefer `dbt ls`** (or `dbt parse` plus the resulting `target/manifest.json`) over reading

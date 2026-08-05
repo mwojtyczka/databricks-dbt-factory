@@ -388,21 +388,36 @@ place (dbt matches a bare name against the last part of the FQN):
 dbt run --select stg_orders,package:my_project,file:stg_orders.sql
 ```
 
-Something has to single the resource out, though — either its FQN, its name, or a file it has to
-itself. `package:`, a *shared* `file:` and `test_name:` each address a whole group, so no combination
-of them alone is precise: a resource whose name and FQN are both unusable and that shares a
-`schema.yml` with a sibling cannot be addressed, and generation fails with an error naming it rather
-than emitting a task that would run the sibling too.
+**Either the FQN or the name must survive.** Those two are the only parts that identify a single
+resource; `package:`, `file:` and `test_name:` each address a whole group, so no combination of them is
+precise on its own. If both the FQN and the name are unusable, generation fails with an error naming
+the resource and telling you to rename it, rather than emitting a task that might run another task's
+resource as well.
 
-"A file it has to itself" is judged per package and by base name, because that is what dbt matches:
-`file:` takes a *base name*, not a path, so two `schema.yml` files in different directories are one
-selector to dbt, while `package:` does keep two packages' identically-named files apart.
+In practice this costs you nothing unless a *file name* trips dbt's selector syntax, since a resource
+name that is fine in dbt is normally fine as a selector. The shape it rejects is a file like
+`models/orders+1.sql`, where the trailing `+1` reads as "children, one level deep".
 
-Sources count towards a file's occupants even though no task ever runs one. A task's `dbt test` uses
-dbt's default `--indirect-selection eager`, which adds the tests of every selected non-test resource,
-so a source sharing the file drags in tests that merely reference it — including tests declared in
-other files. Exposures, metrics and semantic models are matched by `file:` too but are *not* counted:
-nothing tests them, so they pull nothing in, and counting them would refuse projects dbt builds fine.
+<details>
+<summary>Why isn't <code>package:</code>+<code>file:</code> enough when the file holds only one resource?</summary>
+
+Because dbt offers no way to name a resource outright — there is no `unique_id:` selector method. Every
+selector is a *predicate*, so the factory can only emit one it can show matches a single resource.
+
+"This file holds one resource" is not something the manifest states; it would have to be derived, and
+`file:` makes that derivation subtle. It matches a *base name* rather than a path, so
+`models/a/schema.yml` and `models/b/schema.yml` are the same selector, while `package:` does keep two
+packages' identically-named files apart. The resources sharing a base name also span several manifest
+sections — `nodes`, `unit_tests` and `sources` are matched by `file:`, `analysis` and `operation`
+entries are not reachable by default, and sources count even though no task runs one, because a task's
+`dbt test` defaults to `--indirect-selection eager` and so picks up tests that merely *reference* a
+selected source.
+
+Requiring the FQN or the name instead is stricter than dbt strictly needs — `package:pkg,file:orders+1.sql`
+does resolve to exactly one node — but it makes the guarantee legible: a task's selector is exact
+because it names its resource, not because of a property of the surrounding project.
+
+</details>
 
 Sources are addressed by `source:<package>.<source>.<table>`, dbt's own form for them. That form
 takes at most three parts, so a source or table name containing a `.` cannot be addressed at all —

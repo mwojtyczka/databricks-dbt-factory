@@ -338,15 +338,15 @@ resource type as a suffix:
 | `test.my_project.unique_customers_id` | `unique_customers_id_test` |
 | `source.my_project.raw.customers` | `raw_customers_test` |
 
-When two nodes would produce the same key — a model name reused across packages, or the same
-custom test name on two models — the colliding keys are disambiguated with the package name or
-dbt's test hash (e.g. `pkg_a_customers_model` / `pkg_b_customers_model`). Keys are therefore always
-unique, so a valid dbt project can never fail to deploy on a duplicate task key. Keys are also
-bounded to Databricks' 100-character limit (long test names are truncated with a hash suffix).
-Key assignment does not depend on the manifest's ordering, so merely reordering nodes never
-reshuffles keys. Note that it does still depend on the *set* of nodes: introducing a model whose
-key collides with an existing disambiguated key can shift that key (e.g. to a `_2` suffix), which
-repoints that task's run history and alerts.
+When two nodes would produce the same key — a model name reused across packages, or the same custom
+test name on two models — the colliding keys are disambiguated with the package name or dbt's test
+hash (e.g. `pkg_a_customers_model` / `pkg_b_customers_model`), and long keys are truncated to
+Databricks' 100-character limit. Keys are always unique, so a valid dbt project can never fail to
+deploy on a duplicate task key.
+
+Keys are stable as long as the set of resources is. Adding a resource whose key collides with an
+existing disambiguated key can shift that key (e.g. to a `_2` suffix), which repoints that task's run
+history and alerts.
 
 ## Handling dbt tests
 
@@ -356,79 +356,33 @@ default (pass `--no-run-tests` to skip them). Two modes are available, controlle
 
 ### How resources are addressed
 
-Each task selects its resource by several things at once, joined with commas:
+Each task selects its resource by several facts at once, joined with commas (dbt reads a comma as
+AND), so that exactly one resource matches:
 
 ```
-dbt run --select my_project.staging.stg_orders,package:my_project,file:stg_orders.sql
+dbt run  --select my_project.sql_model1.zzz_game_details,package:my_project,file:zzz_game_details.sql
+dbt test --select my_project.models.sql_model1.unique_zzz_game_details_game_id,package:my_project,file:schemas.yml,test_name:unique
 ```
 
-A comma means AND in dbt, so this reads: *the node at this FQN, **and** in this package, **and** from
-this file.* Only one node satisfies all three.
+Sources use dbt's own form for them, `source:<package>.<source>.<table>`.
 
-Each part on its own is too broad, which is why they are combined:
+Resources dbt has disabled are skipped, including the few that stay in `nodes` with `enabled: false`
+rather than moving to the manifest's `disabled` section.
 
-| Part | Reads as | But on its own also matches |
-|---|---|---|
-| `my_project.staging.stg_orders` | this FQN | anything nested under it — dbt treats an FQN as a path prefix, so this alone would also match `staging/stg_orders/lines.sql` |
-| `package:my_project` | in this package | every resource in the package |
-| `file:stg_orders.sql` | from this file | a file of the same name in another package |
-| `test_name:not_null` | a generic test of this type | every `not_null` test in the project |
+#### When generation fails
 
-Tests get the extra `test_name:` part, because all the tests declared in one `schema.yml` share a
-file and so cannot be told apart by `file:` alone.
+A name that dbt would not read literally cannot be used to select a resource. That means a name
+containing a space, comma, colon or one of `*?[]`, or one that starts or ends with something dbt reads
+as a graph operator — a trailing `+2`, or a leading `2+`, which means "two levels of parents". Sources
+additionally cannot contain a `.`, since dbt's `source:` form uses it as its own separator.
 
-A part is left out if dbt would not read it literally — for example a name containing a space, comma
-or colon, which dbt treats as selector syntax, or an FQN starting or ending with something dbt reads
-as one of its `+`/`@` graph operators (a trailing `+2`, or a leading `2+`, which means "two levels of
-parents" rather than a name). Leaving a part out costs precision but not correctness: the remaining
-parts still identify the resource. Where the FQN has to be dropped, the resource's own name takes its
-place (dbt matches a bare name against the last part of the FQN):
+Generation fails, naming the resource and asking you to rename it, when nothing usable is left to
+single that resource out. The remaining facts — its package, its file, a test's type — each match a
+*group*, so a task built from those alone could run another task's resource.
 
-```
-dbt run --select stg_orders,package:my_project,file:stg_orders.sql
-```
-
-**Either the FQN or the name must survive.** Those two are the only parts that identify a single
-resource; `package:`, `file:` and `test_name:` each address a whole group, so no combination of them is
-precise on its own. If both the FQN and the name are unusable, generation fails with an error naming
-the resource and telling you to rename it, rather than emitting a task that might run another task's
-resource as well.
-
-In practice this costs you nothing unless a *file name* trips dbt's selector syntax, since a resource
-name that is fine in dbt is normally fine as a selector. The shape it rejects is a file like
-`models/orders+1.sql`, where the trailing `+1` reads as "children, one level deep".
-
-<details>
-<summary>Why isn't <code>package:</code>+<code>file:</code> enough when the file holds only one resource?</summary>
-
-Because dbt offers no way to name a resource outright — there is no `unique_id:` selector method. Every
-selector is a *predicate*, so the factory can only emit one it can show matches a single resource.
-
-"This file holds one resource" is not something the manifest states; it would have to be derived, and
-`file:` makes that derivation subtle. It matches a *base name* rather than a path, so
-`models/a/schema.yml` and `models/b/schema.yml` are the same selector, while `package:` does keep two
-packages' identically-named files apart. The resources sharing a base name also span several manifest
-sections — `nodes`, `unit_tests` and `sources` are matched by `file:`, `analysis` and `operation`
-entries are not reachable by default, and sources count even though no task runs one, because a task's
-`dbt test` defaults to `--indirect-selection eager` and so picks up tests that merely *reference* a
-selected source.
-
-Requiring the FQN or the name instead is stricter than dbt strictly needs — `package:pkg,file:orders+1.sql`
-does resolve to exactly one node — but it makes the guarantee legible: a task's selector is exact
-because it names its resource, not because of a property of the surrounding project.
-
-</details>
-
-Sources are addressed by `source:<package>.<source>.<table>`, dbt's own form for them. That form
-takes at most three parts, so a source or table name containing a `.` cannot be addressed at all —
-dbt rejects a four-part selector outright — and generation fails for it rather than emitting a task
-that would error at run time. The assembled string is one selector, so it is subject to the same
-graph-operator rule as a bare name.
-
-Resources dbt has disabled are skipped. Most land in the manifest's separate `disabled` section,
-but a few stay in `nodes` with `enabled: false` (a test belonging to a declared model version that
-has no file, for instance); dbt selects nothing for those, so a task would report success without
-running anything.
+Almost always the resource's own name is fine and there is nothing to do. The case to know about is a
+**file** name that trips the rules above, such as `models/orders+1.sql`: rename the file (the model's
+name in `schema.yml` can stay as it is).
 
 ### Per-test (default)
 
@@ -441,11 +395,10 @@ the downstream task. This matches `dbt build` semantics. **`severity: warn` test
 kept out of downstream `depends_on`** — they surface findings without cluttering the DAG or
 blocking anything.
 
-Unit tests get one task each, selected by the unit test's FQN and gated on the model under
-test — resolved from the manifest's `depends_on`, so a unit test on a versioned model gates on the
-right version instead of being dropped. (dbt gives every version's copy of a unit test the same
-FQN, so each such task still runs all of that test's versions.) They have no severity and always
-fail the run when they fail, so they gate downstream models like error-severity data tests.
+Unit tests get one task each, gated on the model under test. They have no severity and always fail
+the run when they fail, so they gate downstream models like error-severity data tests. On a
+*versioned* model, note that dbt gives every version's copy of a unit test the same FQN, so each
+version's task runs all of that test's versions.
 
 - **Pros:** per-test failures are individually visible in the Databricks UI; downstream
   execution halts on error-severity test failure just like `dbt build`; cross-model tests wait
@@ -489,11 +442,8 @@ the upstream's `<resource>_test` task, so data only flows downstream after its u
 single-model tests pass. Cross-model test tasks don't gate downstream execution — they run
 as leaf assertions.
 
-Severity handling: warn-severity test failures exit 0 in dbt, so the bundled `<resource>_test`
-task is green and downstream still runs. Error-severity failures exit non-zero, the
-`<resource>_test` task goes red, and downstream is skipped. Same end result as per-test mode
-(warn ≠ blocking, error = blocking), just via dbt's exit code rather than our dep-graph
-filtering.
+Severity behaves the same as in per-test mode — warn never blocks, error does — here because dbt
+itself exits 0 on a warn-severity failure and non-zero on an error-severity one.
 
 - **Pros:** **faster** — fewer task startups and fewer dbt invocations translate directly into
   shorter end-to-end run times; smaller, cleaner DAG in the UI.

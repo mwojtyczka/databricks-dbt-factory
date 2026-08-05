@@ -378,7 +378,13 @@ additionally cannot contain a `.`, since dbt's `source:` form uses it as its own
 
 Generation fails, naming the resource and asking you to rename it, when nothing usable is left to
 single that resource out. The remaining facts — its package, its file, a test's type — each match a
-*group*, so a task built from those alone could run another task's resource.
+*group*, so a task built from those alone could run another task's resource. The CLI exits 1 with the
+message and writes no output file, so a partly-generated spec can never be deployed:
+
+```
+$ databricks_dbt_factory --dbt-manifest-path target/manifest.json ...
+error: Cannot generate a task for 'orders+1' (models/orders+1.sql): dbt cannot select it uniquely. Rename ...
+```
 
 Almost always the resource's own name is fine and there is nothing to do. The case to know about is a
 **file** name that trips the rules above, such as `models/orders+1.sql`: rename the file (the model's

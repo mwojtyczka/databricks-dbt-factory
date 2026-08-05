@@ -749,7 +749,7 @@ def test_fqn_ending_in_a_graph_operator_is_refused(dbt_factory):
     # `test_file_name_alone_never_addresses_a_resource` for why we do not rely on that.
     nodes = dict([_model('pkg', 'orders+1', fqn=['pkg', 'orders+1'], path='models/orders+1.sql')])
 
-    with pytest.raises(ValueError, match='Rename'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         dbt_factory.create_tasks({'nodes': nodes})
 
 
@@ -794,7 +794,7 @@ def test_name_fallback_starting_with_a_numeric_graph_operator_is_refused(dbt_fac
         ]
     )
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         dbt_factory.create_tasks({'nodes': nodes})
 
 
@@ -809,7 +809,7 @@ def test_file_name_alone_never_addresses_a_resource(dbt_factory):
     # node, confirmed with `dbt ls` on dbt 1.12.0 — and the error says to rename the file.
     nodes = dict([_model('pkg', '2+orders', fqn=['pkg', 'my dir', '2+orders'], path='models/my dir/2+orders.sql')])
 
-    with pytest.raises(ValueError, match='Rename'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         dbt_factory.create_tasks({'nodes': nodes})
 
 
@@ -821,7 +821,7 @@ def test_source_selector_with_a_graph_operator_is_refused(dbt_factory_bundled):
     nodes = dict([_test('pkg', 'source_not_null_raw_orders_id', ['source.pkg.raw.orders+1'])])
     sources = dict([_source('pkg', 'raw', 'orders+1')])
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         dbt_factory_bundled.create_tasks({'nodes': nodes, 'sources': sources})
 
 
@@ -868,7 +868,7 @@ def test_generation_fails_when_only_non_discriminating_terms_survive(dbt_factory
         ]
     )
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         dbt_factory.create_tasks({'nodes': nodes})
 
 
@@ -905,7 +905,7 @@ def test_generation_fails_when_no_term_can_address_the_node(dbt_factory):
     # model in the package, so generation fails loudly with the node and the remedy named.
     nodes = dict([_model('pkg', 'or[der]s', fqn=['pkg', 'or[der]s'], path='models/or[der]s.sql')])
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         dbt_factory.create_tasks({'nodes': nodes})
 
 
@@ -1030,7 +1030,7 @@ def test_bundled_source_selector_is_validated(dbt_factory_bundled):
     nodes = dict([_test('pkg', 'unique_raw_customers_id', ['source.pkg.raw,archive.customers'])])
     sources = dict([_source('pkg', 'raw,archive', 'customers')])
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         dbt_factory_bundled.create_tasks({'nodes': nodes, 'sources': sources})
 
 
@@ -1051,7 +1051,7 @@ def test_bundled_source_selector_rejects_a_dotted_part(dbt_factory_bundled, sour
     nodes = dict([_test('pkg', 'unique_raw_orders_id', [f"source.pkg.{source_name}.{table}"])])
     sources = dict([_source('pkg', source_name, table)])
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         dbt_factory_bundled.create_tasks({'nodes': nodes, 'sources': sources})
 
 

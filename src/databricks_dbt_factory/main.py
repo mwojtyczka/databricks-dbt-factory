@@ -66,8 +66,15 @@ def main():
         task_factories['test'] = TestTaskFactory(resolver, task_options, dbt_options)
 
     factory = DbtFactory(task_factories, bundle_tests=args.bundle_tests)
-    manifest = read_dbt_manifest(args.dbt_manifest_path)
-    tasks = factory.create_tasks(manifest)
+    # These failures are all conditions the user fixes in their own project — an unreadable manifest,
+    # or a resource whose name or path dbt cannot select uniquely — so report the message and stop
+    # rather than letting a traceback bury it. `SystemExit` exits 1 without writing a partial spec.
+    # The library API still raises, so callers embedding `DbtFactory` keep the exception.
+    try:
+        manifest = read_dbt_manifest(args.dbt_manifest_path)
+        tasks = factory.create_tasks(manifest)
+    except (ValueError, FileNotFoundError) as error:
+        raise SystemExit(f"error: {error}") from error
     if args.dry_run:
         print(tasks)
     else:

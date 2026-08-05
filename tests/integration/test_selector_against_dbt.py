@@ -434,7 +434,7 @@ def test_leading_numeric_graph_operator_in_a_name_is_refused(tmp_path):
     # dbt's own reading of the name we would have fallen back to: not this node.
     assert not _selected_ids(tmp_path, '2+check', 'test', indirect=False)
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         _resource_selectors(manifest, bundle_tests=False)
 
 
@@ -462,7 +462,7 @@ def test_source_with_a_trailing_graph_operator_is_refused(tmp_path):
     # The selector we would otherwise have emitted matches nothing, and dbt still exits 0 for it.
     assert not _selected_ids(tmp_path, 'source:probe.raw.orders+1', None, indirect=True)
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         _resource_selectors(manifest, bundle_tests=True)
 
 
@@ -519,7 +519,7 @@ def test_tests_sharing_a_file_with_no_usable_name_are_refused(tmp_path):
     # What the un-guarded selector resolved to: two tests, so two tasks would both run not_null_b_id.
     assert len(_selected_ids(tmp_path, 'package:probe,file:schema.yml,test_name:not_null', 'test', indirect=False)) == 2
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         _resource_selectors(manifest, bundle_tests=False)
 
 
@@ -543,7 +543,7 @@ def test_a_file_name_alone_is_not_enough_to_address_a_resource(tmp_path):
     # dbt would accept it: the selector we no longer emit is exact.
     assert _selected_ids(tmp_path, 'package:probe,file:orders+1.sql', 'model') == ('probe.orders+1',)
 
-    with pytest.raises(ValueError, match='Rename'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         _resource_selectors(manifest, bundle_tests=False)
 
 
@@ -597,7 +597,7 @@ def test_dotted_source_part_is_refused_rather_than_emitted(tmp_path, source_name
     rejected = _dbt(tmp_path, 'ls', '--quiet', '--select', f'source:probe.{source_name}.{table}')
     assert not rejected.success, 'dbt accepted a four-part source selector; this test is no longer meaningful'
 
-    with pytest.raises(ValueError, match='no selector can address'):
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
         _resource_selectors(manifest, bundle_tests=True)
 
 

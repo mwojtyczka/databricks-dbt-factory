@@ -209,16 +209,20 @@ class DbtFactory:
 
     @staticmethod
     def _unaddressable(node_info: dict) -> ValueError:
-        """Builds the error raised when no selector can address a node, naming the remedy."""
+        """
+        Builds the error raised when no selector can address a node.
+
+        This message is the whole of what a CLI user sees (`main` reports it without a traceback), so
+        it leads with the resource and the remedy and keeps the reasoning to one closing line.
+        """
+        name = node_info.get('name')
+        path = node_info.get('original_file_path')
         return ValueError(
-            f'Cannot generate a task for {node_info.get("name")!r}: no selector can address it uniquely. '
-            f'Neither its dbt name nor its path is usable as a selector, and every other term dbt offers '
-            f'addresses a group of resources rather than one, so any selector built from them could run '
-            f'another task\'s resource. A name or path is unusable when it contains a space, comma, colon '
-            f'or one of *?[], when it starts or ends with something dbt reads as a graph operator '
-            f'(a leading @ or N+, a trailing +N), or — for a source — when it contains a dot, which dbt '
-            f'takes as the source selector\'s own separator. '
-            'Rename the resource, its file, or its directory.'
+            f'Cannot generate a task for {name!r} ({path}): dbt cannot select it uniquely. '
+            f'Rename the resource or its file so that neither starts nor ends with a dbt graph '
+            f'operator (a leading @ or N+, a trailing +N) and neither contains a space, comma, colon '
+            f"or one of *?[] — or, for a source, a dot. Without a usable name or path, the only terms "
+            f"left match a group of resources, so the task could run another task's resource."
         )
 
     def _create_tasks(self, dbt_manifest: dict) -> list[DbtTask]:

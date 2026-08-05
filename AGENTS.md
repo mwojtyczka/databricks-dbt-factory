@@ -18,7 +18,9 @@ this way, and each had already survived a reading of dbt's own source:
 
 - An fqn selector was believed to match a node's fqn. It does — but `QualifiedNameSelectorMethod`
   *also* matches the fqn with its package stripped, so a fix verified against the inner
-  `is_selected_node` helper looked correct and was wrong end-to-end.
+  `is_selected_node` helper looked correct and was wrong end-to-end. The layout that exposes it needs
+  an *installed package* (`libs/pkg/models/<root-pkg-name>/x.sql`), so a root-only fixture cannot
+  reach it — check whether the shape you are testing can actually occur in the project layout.
 - A selector believed to isolate one node was confirmed with `dbt ls` to select two, which is
   how a duplicate-build bug surfaced.
 - `path:` selectors were assumed to be literal paths. dbt resolves them through `Path.glob`, so a
@@ -32,6 +34,11 @@ dbt is a declared test dependency, so it writes real projects, has dbt parse the
 over the real manifest, and feeds every emitted selector back through `dbt ls`. It also generates
 randomised layouts, so a shape nobody enumerated still gets checked. Add a regression layout there
 whenever you touch selector construction.
+
+A related lesson: selector construction is now *one* rule — intersect every discriminator dbt gives
+you, dropping only terms its grammar cannot express — rather than a decision tree per shape. Several
+rounds of per-case branching each shipped a new blind spot. If you find yourself adding a branch for
+a newly-discovered layout, prefer strengthening the uniform rule.
 
 Practically:
 

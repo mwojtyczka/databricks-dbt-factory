@@ -351,35 +351,38 @@ repoints that task's run history and alerts.
 ## Handling dbt tests
 
 The factory produces tasks for dbt tests (both data tests and unit tests) from the manifest by
-default (pass `--no-run-tests` to skip them). Selectors are each node's full dot-separated FQN
-(e.g. `my_project.staging.stg_orders`), which scopes the selector to one package so a model name
-reused across packages still resolves to a single node. Two modes are available, controlled by
-`--bundle-tests`:
+default (pass `--no-run-tests` to skip them). Two modes are available, controlled by
+`--bundle-tests`.
 
-> **Note on FQN selection.** FQN selectors are hierarchical by design: dbt matches them as a path
-> *prefix*, which is what lets `--select staging` build everything under `staging/`. Tasks inherit
-> that behaviour, and it is what you want almost always — including for a model and its unit tests,
-> since the model task is restricted by resource type and a bundled test task is meant to sweep its
-> resource's unit tests in.
->
-> The exception is naming a model directory after a sibling model in the same directory
-> (`models/marts/orders.sql` next to `models/marts/orders/items.sql`). There `orders`' FQN is a
-> prefix of `items`' FQN, so a plain selector would build `items` inside `orders`' task — ignoring
-> `items`' own dependencies — as well as concurrently in its own task, writing the same table twice.
-> For those nodes only, the selector is intersected with `file:<name>`
-> (`pkg.marts.orders,file:orders.sql`), which pins it to the single node. Every other selector stays
-> a plain FQN. The same applies when the sibling's *name* contains a dot
-> (`models/marts/orders.items.sql`), since dbt treats dots in names as path separators too.
->
-> **Avoid spaces in model file and directory names.** dbt reads a space in a selector as its union
-> separator, so an FQN containing one can never match — and its leading fragment may match a
-> different model instead. Such nodes are selected by file name and package instead
-> (`file:orders.sql,package:mypkg`); if the file name is also unusable, generation fails rather than
-> emit a selector that could build the wrong model.
+### How resources are addressed
+
+Every task addresses its resource the same way: the intersection (`,`, dbt's AND) of every
+independent fact the manifest records about it.
+
+```
+dbt run --select my_project.staging.stg_orders,package:my_project,file:stg_orders.sql
+```
+
+No single term is exact, which is why they are combined rather than chosen between:
+
+| Term | Narrows to | On its own it also matches |
+|---|---|---|
+| `<fqn>` | package + directory path + name | nodes *nested beneath* it (dbt matches an FQN as a path prefix), and a package's node via its package-stripped FQN |
+| `package:` | the owning package | every resource in that package |
+| `file:` | one source file | that base name in other packages, and every test sharing a `schema.yml` |
+| `test_name:` | a generic test's type (`not_null`, …) | every test of that type |
+
+A term is left out when dbt's own selector grammar cannot express it literally — a name containing
+a space, comma, colon or one of `*?[]`, or an FQN whose ends look like dbt's `@`/`+` graph
+operators. An awkward directory name therefore costs one term rather than the whole selector, and
+generation only fails when nothing usable is left (which would mean running the whole package). The
+selector is shell-quoted, so names containing quotes survive the notebook runner's tokenisation.
+
+Sources are addressed by `source:<package>.<source>.<table>`, dbt's own form for them.
 
 ### Per-test (default)
 
-One Databricks task per dbt test node, running `dbt test --select <fqn>`. Each test task's
+One Databricks task per dbt test node, running `dbt test --select <selector>`. Each test task's
 `depends_on` includes every model/seed/snapshot the test references, so multi-model tests
 (e.g. `relationships`) only run after all their endpoints are built. **Downstream models are
 gated only on error-severity tests**: every model/seed/snapshot task depends on the
@@ -427,7 +430,7 @@ The factory classifies each dbt test node into one of two buckets based on its `
   references. These run in parallel with the bundled tasks; they don't fit inside a bundle
   because their correctness requires all their endpoints to be built first.
 
-A resource's `<resource>_test` task selects the resource by its full FQN with
+A resource's `<resource>_test` task selects the resource by the same selector with
 `--indirect-selection cautious`, which also runs the resource's unit tests. A model whose only
 test is a unit test still gets a `<resource>_test` task so its unit test is not dropped.
 

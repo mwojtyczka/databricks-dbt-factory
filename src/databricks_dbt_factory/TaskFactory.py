@@ -1,3 +1,4 @@
+import shlex
 from abc import ABC, abstractmethod
 from enum import Enum
 
@@ -119,7 +120,9 @@ class ModelTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt run --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+        commands.append(
+            f"dbt run --select {shlex.quote(select)}" + (f" {self.dbt_options}" if self.dbt_options else "")
+        )
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -148,7 +151,9 @@ class SnapshotTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt snapshot --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+        commands.append(
+            f"dbt snapshot --select {shlex.quote(select)}" + (f" {self.dbt_options}" if self.dbt_options else "")
+        )
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -178,7 +183,9 @@ class SeedTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt seed --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+        commands.append(
+            f"dbt seed --select {shlex.quote(select)}" + (f" {self.dbt_options}" if self.dbt_options else "")
+        )
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -212,7 +219,9 @@ class TestTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        commands.append(f"dbt test --select {select}" + (f" {self.dbt_options}" if self.dbt_options else ""))
+        commands.append(
+            f"dbt test --select {shlex.quote(select)}" + (f" {self.dbt_options}" if self.dbt_options else "")
+        )
 
         return DbtTask(task_key, commands, self.task_options, depends_on)
 
@@ -236,7 +245,7 @@ class TestTaskFactory(TaskFactory):
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
         commands.append(
-            f"dbt test --select {select} --indirect-selection cautious"
+            f"dbt test --select {shlex.quote(select)} --indirect-selection cautious"
             + (f" {self.dbt_options}" if self.dbt_options else "")
         )
 

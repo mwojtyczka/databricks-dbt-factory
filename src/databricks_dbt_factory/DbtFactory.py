@@ -1,25 +1,9 @@
-from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import PurePosixPath
 
 from databricks_dbt_factory.TaskFactory import TaskFactory
 from databricks_dbt_factory.DbtTask import DbtTask
 from databricks_dbt_factory.Utils import build_task_key_maps
-
-
-@dataclass(frozen=True)
-class SelectorFacts:
-    """
-    The manifest-wide facts `DbtFactory._fqn_select` needs to build an unambiguous `--select`.
-
-    Computed once per manifest and passed down, rather than held as factory state, so selector
-    construction never depends on the order in which the task builders run.
-    """
-
-    # Flattened fqns that a plain selector would match for more than one node.
-    ambiguous_fqns: frozenset[tuple[str, ...]]
-    # Base file names claimed by exactly one node, so `file:<name>` identifies that node alone.
-    unique_file_names: frozenset[str]
 
 
 class DbtFactory:
@@ -62,160 +46,114 @@ class DbtFactory:
     _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
     _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
-    # Characters that change how dbt parses a selector component, so a component containing one
-    # cannot be used to identify a node. Derived from dbt's own grammar and each confirmed against
-    # dbt 1.12.0 with `dbt ls`:
-    #   ' '    union separator (`graph/cli.py` splits the raw spec on spaces), and the fragments are
-    #          matched independently, so a leading fragment can select an unrelated node
+    # Characters that change how dbt parses a selector *component*, so a component containing one
+    # cannot be used to address a node. Derived from dbt's grammar, each confirmed against dbt 1.12.0
+    # with `dbt ls`:
+    #   ' '    union separator (`graph/cli.py` splits the raw spec on spaces); the fragments then
+    #          match independently, so a leading fragment can select an unrelated node
     #   ','    intersection separator — the component is read as two, matching zero nodes
     #   '*?[]' `fnmatch` pattern syntax — `*` pulls in other nodes, `[...]` matches nothing
     #   ':'    method prefix (`RAW_SELECTOR_PATTERN`) — dbt raises InvalidSelectorError
-    # `@` and `+` are graph operators but only at the very start/end, so they are checked separately.
     _SELECTOR_METACHARACTERS = frozenset(' ,*?[]:')
 
-    @staticmethod
-    def _flat_fqn(fqn: list[str]) -> tuple[str, ...]:
-        """
-        The fqn as dbt compares it: each segment re-split on dots, since dbt treats a dot inside a
-        resource name as a namespace separator (`is_selected_node` flattens before matching). So
-        `models/marts/orders.items.sql` has fqn `[pkg, marts, 'orders.items']` but is matched as
-        `(pkg, marts, orders, items)` — and is therefore selected by `pkg.marts.orders`.
-        """
-        return tuple(part for segment in fqn for part in segment.split('.'))
-
     @classmethod
-    def _fqn_select(cls, node_info: dict, facts: 'SelectorFacts') -> str:
+    def _node_select(cls, node_info: dict, source_info: dict | None = None) -> str:
         """
-        Returns the dbt `--select` argument for a node: its fully qualified name (fqn) joined by
-        dots, intersected with a `file:` selector when the plain fqn would over-select.
+        Returns the dbt `--select` argument addressing exactly one node.
 
-        `facts` carries the manifest-wide information this needs (see `SelectorFacts`), passed in
-        rather than held as state so this never depends on call order.
+        Every node is addressed the same way — the intersection (`,`, dbt's AND) of every independent
+        fact the manifest gives us about it:
 
-        fqn selection is hierarchical by design: dbt matches a selector as a positional path
-        *prefix* — of the fqn, or per `QualifiedNameSelectorMethod` of the fqn with its package
-        stripped — which is what makes `--select staging` build everything under `staging/`. That is
-        the desired behaviour nearly everywhere, including for a model and its unit tests (whose fqn
-        nests under the model's): a resource task is filtered by resource type, and a bundled test
-        task is meant to sweep its resource's unit tests in.
+            <fqn>,package:<package>,file:<file name>[,test_name:<generic test>]
 
-        The exception is a model directory named after a sibling model (`models/marts/orders.sql`
-        beside `models/marts/orders/items.sql`, or beside `models/marts/orders.items.sql`). There
-        `orders`' fqn is a prefix of the sibling's, so the plain selector builds it inside `orders`'
-        task — ignoring its own dependency wiring — as well as in its own task, concurrently: two
-        dbt runs writing one table. For those nodes only, the selector is intersected with
-        `file:<file name>`, which pins it to the one node.
+        No term is exact alone, which is why they are combined rather than chosen between:
 
-        `file:` rather than `path:`, because `path:` is resolved by globbing the *root project's*
-        directory while a package node's `original_file_path` is relative to the *package* root — so
-        `path:` selects nothing at all for package nodes, and `dbt run` then exits 0 having built
-        nothing. `file:` matches the base name only, so it behaves the same either way. And not a
-        bare-name intersection, since dbt also matches the package-stripped fqn, which the
-        descendant satisfies too.
+        * the **fqn** is matched as a positional path *prefix*, so it also selects nodes nested
+          beneath it — and dbt compares a node's fqn with its package stripped too, so a package's
+          `models/probe/alpha.sql` is matched by the root project's `pkg.alpha` as well;
+        * **`package:`** narrows to the owning package, but matches all of it;
+        * **`file:`** narrows to one source file, but matches that base name in every package, and a
+          `schema.yml` is shared by every test declared in it;
+        * **`test_name:`** narrows a generic test to its type (`not_null`, `unique`), separating tests
+          that share a `schema.yml`.
 
-        Every component is validated with `_is_usable_component` before use, and a `file:` term is
-        only used when it identifies exactly one node.
+        A term is omitted when dbt's own grammar cannot express it literally — see
+        `_is_usable_component` — so an awkward directory name costs one term rather than the whole
+        selector. `source_info` addresses a source's tests, which dbt selects by
+        `source:<package>.<source>.<table>` rather than by fqn.
 
         Raises:
-            ValueError: when no combination of components can isolate the node. Generation fails
-                loudly rather than emit a selector that would silently select nothing, or the wrong
-                node, at run time.
+            ValueError: when no term survives, or only `package:` does. Emitting `package:<pkg>` alone
+                would run every resource in the package, so generation fails loudly at build time
+                instead of doing the wrong thing at run time.
         """
-        fqn = node_info.get('fqn')
-        if not fqn:
-            return node_info['name']
+        if source_info is not None:
+            return cls._source_select(source_info)
 
-        fqn_usable = all(cls._is_usable_component(segment) for segment in fqn)
-        file_name = PurePosixPath(node_info.get('original_file_path') or '').name
-        # A `file:` term only identifies the node if no other node shares the file: every test in one
-        # `schema.yml` shares its path, so `file:schema.yml` would select all of them.
-        file_usable = cls._is_usable_component(file_name) and file_name in facts.unique_file_names
+        terms: list[str] = []
+        fqn = node_info.get('fqn') or []
+        if fqn and cls._is_usable_selector('.'.join(fqn)) and all(cls._is_usable_component(part) for part in fqn):
+            terms.append('.'.join(fqn))
 
-        if fqn_usable:
-            if cls._flat_fqn(fqn) not in facts.ambiguous_fqns:
-                return '.'.join(fqn)
-            if file_usable:
-                return f'{".".join(fqn)},file:{file_name}'
-            raise cls._unisolable(node_info, fqn, file_name, 'its fqn is ambiguous with a nested node')
-
-        if not file_usable:
-            raise cls._unisolable(node_info, fqn, file_name, 'its fqn cannot be used in a selector')
-        # Without the fqn there is no package scoping, and `file:` matches base names in every
-        # package — two packages may each have an `orders.sql` — so `package:` restores it.
         package = node_info.get('package_name') or ''
         if cls._is_usable_component(package):
-            return f'file:{file_name},package:{package}'
-        return f'file:{file_name}'
+            terms.append(f'package:{package}')
+
+        file_name = PurePosixPath(node_info.get('original_file_path') or '').name
+        if cls._is_usable_component(file_name):
+            terms.append(f'file:{file_name}')
+
+        test_name = (node_info.get('test_metadata') or {}).get('name') or ''
+        if cls._is_usable_component(test_name):
+            terms.append(f'test_name:{test_name}')
+
+        # `package:` on its own matches every resource in the package, so it cannot address a node.
+        if not terms or all(term.startswith('package:') for term in terms):
+            raise cls._unaddressable(node_info, terms)
+        return ','.join(terms)
+
+    @classmethod
+    def _source_select(cls, source_info: dict) -> str:
+        """
+        Returns the `source:<package>.<source>.<table>` selector for a source's tests.
+
+        A source has no fqn selector of its own, so all three parts must be usable: unlike a node
+        there is no other term to fall back on.
+        """
+        package = source_info.get('package_name') or ''
+        source_name = source_info.get('source_name') or ''
+        table = source_info.get('name') or ''
+        if not all(cls._is_usable_component(part) for part in (package, source_name, table)):
+            raise cls._unaddressable(source_info, [])
+        return f'source:{package}.{source_name}.{table}'
 
     @classmethod
     def _is_usable_component(cls, value: str) -> bool:
-        """
-        Whether `value` can appear in a `--select` component and still mean itself.
-
-        Rejects the empty string, anything containing `_SELECTOR_METACHARACTERS`, and a leading `@`
-        or `+N` / trailing `+N`, which dbt's `RAW_SELECTOR_PATTERN` reads as graph operators
-        (`@model` = model and its parents' children, `model+` = model and its children).
-        """
-        if not value:
-            return False
-        if cls._SELECTOR_METACHARACTERS & set(value):
-            return False
-        return not (value.startswith(('@', '+')) or value.endswith('+'))
+        """Whether `value` can appear inside a selector component and still mean itself."""
+        return bool(value) and not cls._SELECTOR_METACHARACTERS & set(value)
 
     @staticmethod
-    def _unisolable(node_info: dict, fqn: list[str], file_name: str, reason: str) -> ValueError:
-        """Builds the error raised when no selector can identify a node, naming the remedy."""
+    def _is_usable_selector(value: str) -> bool:
+        """
+        Whether `value` is safe as a whole raw selector, i.e. carries no graph operator at its
+        boundary.
+
+        dbt's `RAW_SELECTOR_PATTERN` reads a leading `@` or `N+` and a trailing `+N` as graph
+        operators, so `pkg.orders+1` means "pkg.orders and its children one level deep" and selects
+        the wrong model. Only the boundary matters: `pkg.+leading` is exact, confirmed with `dbt ls`,
+        so an operator character inside a segment is left alone.
+        """
+        return not (value.startswith(('@', '+')) or value.rstrip('0123456789').endswith('+'))
+
+    @staticmethod
+    def _unaddressable(node_info: dict, terms: list[str]) -> ValueError:
+        """Builds the error raised when no selector can address a node, naming the remedy."""
         return ValueError(
-            f'Cannot generate a task for {node_info.get("name")!r}: no selector can isolate it, because {reason} '
-            f'and its file name {file_name!r} is unusable (empty, shared with another node, or containing characters '
-            f'dbt reads as selector syntax). dbt fqn: {fqn!r}. Rename the file, its directory, or the resource.'
+            f'Cannot generate a task for {node_info.get("name")!r}: no selector can address it uniquely. '
+            f'Its dbt name, path and package all contain characters dbt reads as selector syntax '
+            f'(space, comma, colon, or one of *?[]), leaving only {terms or ["nothing"]}. '
+            'Rename the resource, its file, or its directory.'
         )
-
-    @classmethod
-    def _unique_file_names(cls, dbt_manifest: dict) -> frozenset[str]:
-        """
-        Base file names that exactly one node in the manifest claims, so a `file:` term naming one
-        selects a single node.
-
-        dbt points every schema test at the `.yml` that declares it, so a shared `schema.yml` cannot
-        identify any of them; `file:` also matches on the name alone, so two packages each having an
-        `orders.sql` makes that name ambiguous too.
-        """
-        counts: Counter[str] = Counter()
-        for group in ('nodes', 'sources', 'unit_tests'):
-            for info in dbt_manifest.get(group, {}).values():
-                name = PurePosixPath(info.get('original_file_path') or '').name
-                if name:
-                    counts[name] += 1
-        return frozenset(name for name, count in counts.items() if count == 1)
-
-    @classmethod
-    def _compute_ambiguous_fqns(cls, dbt_manifest: dict) -> frozenset[tuple[str, ...]]:
-        """
-        The flattened fqns whose plain selector would also match a *buildable* node nested beneath
-        them, and which `_fqn_select` therefore pins.
-
-        Only models, seeds and snapshots count as the nested node here — those are the resources a
-        selector would wrongly build a second time. A unit test's fqn also nests under its model's
-        (`pkg.marts.orders.ut_orders` under `pkg.marts.orders`), but sweeping it in is exactly what
-        a bundled test task is for, and a resource task is filtered by resource type so it can never
-        run one. Counting unit tests would pin nearly every unit-tested model in a conventional
-        project for no benefit.
-        """
-        nodes = dbt_manifest.get('nodes', {})
-        flat_fqns = {unique_id: cls._flat_fqn(info['fqn']) for unique_id, info in nodes.items() if info.get('fqn')}
-        buildable = []
-        for unique_id, fqn in flat_fqns.items():
-            if nodes[unique_id].get('resource_type') in cls._GATEABLE_TYPES:
-                buildable.append(fqn)
-        counts = Counter(flat_fqns.values())
-        all_fqns = set(counts)
-        # Two nodes can flatten to the *same* tuple (`orders.items.sql` and `orders/items.sql`), which
-        # a plain selector matches for both, so an fqn claimed more than once is ambiguous in itself.
-        ambiguous = {fqn for fqn, count in counts.items() if count > 1}
-        # Otherwise an fqn needs pinning iff a buildable node's fqn strictly extends it.
-        ambiguous.update(fqn[:i] for fqn in buildable for i in range(1, len(fqn)) if fqn[:i] in all_fqns)
-        return frozenset(ambiguous)
 
     def _create_tasks(self, dbt_manifest: dict) -> list[DbtTask]:
         """
@@ -230,10 +168,6 @@ class DbtFactory:
         dbt_nodes = dbt_manifest.get('nodes', {})
         dbt_sources = dbt_manifest.get('sources', {})
         dbt_unit_tests = dbt_manifest.get('unit_tests', {})
-        facts = SelectorFacts(
-            ambiguous_fqns=self._compute_ambiguous_fqns(dbt_manifest),
-            unique_file_names=self._unique_file_names(dbt_manifest),
-        )
 
         bundle = 'test' in self.task_factories and self.bundle_tests
         single_model_tested: set[str] = set()
@@ -271,7 +205,6 @@ class DbtFactory:
             bundled_test_keys,
             tests_by_resource,
             ancestors,
-            facts,
         )
 
         if bundle:
@@ -282,12 +215,11 @@ class DbtFactory:
                     single_model_tested,
                     task_keys,
                     bundled_test_keys,
-                    facts,
                 )
             )
-            tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys, facts))
+            tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys))
         elif 'test' in self.task_factories:
-            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys, facts))
+            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys))
 
         return tasks
 
@@ -510,7 +442,6 @@ class DbtFactory:
         bundled_test_keys: dict[str, str],
         tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
         ancestors_by_node: dict[str, set[str]],
-        facts: SelectorFacts,
     ) -> list[DbtTask]:
         """Builds tasks for every non-test resource (plus per-test tasks when not bundling)."""
         # Maps a tested resource's task key (what `depends_on` holds) to its gating bundled test
@@ -529,7 +460,7 @@ class DbtFactory:
             task_key = task_keys[node_full_name]
             factory = self.task_factories[resource_type]
             task = factory.create_task(
-                self._fqn_select(node_info, facts),
+                self._node_select(node_info),
                 node_info['name'],
                 node_info,
                 task_key,
@@ -562,7 +493,6 @@ class DbtFactory:
         nodes_with_tests: set[str],
         task_keys: dict[str, str],
         bundled_test_keys: dict[str, str],
-        facts: SelectorFacts,
     ) -> list[DbtTask]:
         """Emits one bundled `<resource>_test` task per tested resource via `TestTaskFactory.create_bundled_task`."""
         test_factory = self.task_factories['test']
@@ -571,10 +501,7 @@ class DbtFactory:
             is_source = full_name.startswith('source.')
             info = dbt_sources[full_name] if is_source else dbt_nodes[full_name]
             bare_name = info['name']
-            if is_source:
-                select = f"source:{info['package_name']}.{info['source_name']}.{bare_name}"
-            else:
-                select = self._fqn_select(info, facts)
+            select = self._node_select(info, source_info=info if is_source else None)
             tasks.append(
                 test_factory.create_bundled_task(
                     task_key=bundled_test_keys[full_name],
@@ -589,7 +516,6 @@ class DbtFactory:
         self,
         standalone_tests: list[tuple[str, dict]],
         task_keys: dict[str, str],
-        facts: SelectorFacts,
     ) -> list[DbtTask]:
         """
         Emits one task per standalone test — cross-model tests (e.g. `relationships`) gated on
@@ -601,7 +527,7 @@ class DbtFactory:
             test_task_key = task_keys[test_full_name]
             tasks.append(
                 test_factory.create_task(
-                    self._fqn_select(test_info, facts),
+                    self._node_select(test_info),
                     test_info['name'],
                     test_info,
                     test_task_key,
@@ -614,7 +540,6 @@ class DbtFactory:
         self,
         dbt_unit_tests: dict,
         task_keys: dict[str, str],
-        facts: SelectorFacts,
     ) -> list[DbtTask]:
         """
         Emits one task per unit test, selected by its full FQN and gated on the model it tests.
@@ -630,7 +555,7 @@ class DbtFactory:
                 continue
             tasks.append(
                 test_factory.create_task(
-                    self._fqn_select(unit_test_info, facts),
+                    self._node_select(unit_test_info),
                     unit_test_info['name'],
                     unit_test_info,
                     task_keys[unit_test_full_name],

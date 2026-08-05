@@ -22,6 +22,7 @@ import functools
 import itertools
 import json
 import random
+import shlex
 from pathlib import Path
 
 import pytest
@@ -44,12 +45,34 @@ probe:
 MODEL_SQL = 'select 1 as id\n'
 
 
-def _write_project(root: Path, model_paths: dict[str, str], schema_yml: str | None = None) -> None:
-    """Writes a minimal dbt project: `model_paths` maps a path under `models/` to its SQL."""
-    (root / 'dbt_project.yml').write_text(
-        'name: probe\nprofile: probe\nversion: "1.0"\nconfig-version: 2\nmodel-paths: ["models"]\n',
-        encoding='utf-8',
-    )
+def _write_project(
+    root: Path,
+    model_paths: dict[str, str],
+    schema_yml: str | None = None,
+    package_model_paths: dict[str, str] | None = None,
+) -> None:
+    """
+    Writes a minimal dbt project.
+
+    `model_paths` maps a path under `models/` to its SQL. `package_model_paths` does the same for an
+    installed local package named `other`, whose nodes carry package-relative `original_file_path`s
+    and are matched by dbt on their package-stripped fqn — behaviour no root-only layout can exercise.
+    """
+    project = 'name: probe\nprofile: probe\nversion: "1.0"\nconfig-version: 2\nmodel-paths: ["models"]\n'
+    if package_model_paths:
+        # A distinct schema keeps the two packages' relations from colliding, which dbt rejects.
+        project += 'models:\n  other:\n    +schema: otherschema\n'
+        (root / 'packages.yml').write_text('packages:\n  - local: libs/other\n', encoding='utf-8')
+        package_root = root / 'libs' / 'other'
+        package_root.mkdir(parents=True, exist_ok=True)
+        (package_root / 'dbt_project.yml').write_text(
+            'name: other\nversion: "1.0"\nconfig-version: 2\nmodel-paths: ["models"]\n', encoding='utf-8'
+        )
+        for relative_path, sql in package_model_paths.items():
+            target = package_root / 'models' / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(sql, encoding='utf-8')
+    (root / 'dbt_project.yml').write_text(project, encoding='utf-8')
     (root / 'profiles.yml').write_text(PROFILES, encoding='utf-8')
     for relative_path, sql in model_paths.items():
         target = root / 'models' / relative_path
@@ -57,6 +80,9 @@ def _write_project(root: Path, model_paths: dict[str, str], schema_yml: str | No
         target.write_text(sql, encoding='utf-8')
     if schema_yml is not None:
         (root / 'models' / 'schema.yml').write_text(schema_yml, encoding='utf-8')
+    if package_model_paths:
+        result = _dbt(root, 'deps', '--quiet')
+        assert result.success, f'dbt deps failed for the generated project: {result.exception}'
 
 
 def _dbt(root: Path, *args: str) -> dbtRunnerResult:
@@ -105,7 +131,10 @@ def _resource_selectors(manifest: dict, bundle_tests: bool) -> list[tuple[str, s
     """
     selectors = []
     for task in create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest):
-        command = task['dbt_task']['commands'][-1].split()
+        # `shlex.split` rather than `str.split`: the command is a shell string with the selector
+        # quoted, and this is exactly how the notebook runner recovers the original argv value — so
+        # tokenising the same way also proves that round-trip.
+        command = shlex.split(task['dbt_task']['commands'][-1])
         select = command[command.index('--select') + 1]
         selectors.append((task['task_key'], select, command[1]))
     return selectors
@@ -187,11 +216,10 @@ def test_bundled_test_task_sweeps_only_its_own_resources_tests(tmp_path):
     assert 'probe.marts.orders.items' not in selected, f'orders_test would build the sibling model: {selected}'
 
 
-def test_generation_is_rejected_when_tests_share_a_schema_file(tmp_path):
+def test_tests_sharing_a_schema_file_are_separated_by_test_name(tmp_path):
     """
-    Every test in one `schema.yml` shares that path, so a `file:` term cannot single one out. When
-    that term is the only thing left, generation must fail rather than emit a selector that runs a
-    different model's test.
+    Every test in one `schema.yml` shares that path, so `file:` cannot single one out. `test_name:`
+    narrows to the generic test type, which separates a `not_null` from a `unique` in the same file.
     """
     _write_project(
         tmp_path,
@@ -211,8 +239,99 @@ def test_generation_is_rejected_when_tests_share_a_schema_file(tmp_path):
     )
     manifest = _parse(tmp_path)
 
-    with pytest.raises(ValueError, match='no selector can isolate'):
-        _resource_selectors(manifest, bundle_tests=False)
+    selectors = {key: select for key, select, verb in _resource_selectors(manifest, bundle_tests=False)}
+    for task_key, select in selectors.items():
+        if not task_key.endswith('_test'):
+            continue
+        selected = _selected_ids(tmp_path, select, 'test', indirect=False)
+        assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one test'
+
+
+def test_package_node_matched_by_package_stripped_fqn_is_still_exact(tmp_path):
+    """
+    dbt compares a node's fqn with its package stripped, so a package model at
+    `models/probe/alpha.sql` in package `other` (fqn [other, probe, alpha]) is also matched by the
+    root project's `probe.alpha` selector. `package:` is the only term that separates them, since both
+    files are named `alpha.sql`. No root-only layout can reach this, which is why it went unnoticed.
+    """
+    _write_project(
+        tmp_path,
+        {'alpha.sql': MODEL_SQL},
+        package_model_paths={'probe/alpha.sql': MODEL_SQL, 'probe/alpha/nested.sql': MODEL_SQL},
+    )
+    manifest = _parse(tmp_path)
+
+    for task_key, select, verb in _resource_selectors(manifest, bundle_tests=False):
+        if verb != 'run':
+            continue
+        selected = _selected_ids(tmp_path, select, 'model', indirect=False)
+        assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one node'
+
+
+@pytest.mark.parametrize(
+    ('file_name', 'note'),
+    [
+        pytest.param('orders+1.sql', 'a trailing +N is read as child depth', id='numeric-graph-operator'),
+        pytest.param('+leading.sql', 'an operator inside a segment is harmless', id='embedded-operator'),
+        pytest.param("customer's.sql", 'a quote breaks shlex in the notebook runner', id='apostrophe'),
+    ],
+)
+def test_awkward_file_names_still_resolve_to_one_node(tmp_path, file_name, note):
+    """
+    Names that trip dbt's selector grammar or the notebook runner's tokenisation must still address
+    exactly one node — by dropping only the unusable term. (`note` records what each name trips.)
+    """
+    assert note
+    _write_project(tmp_path, {file_name: MODEL_SQL, 'orders.sql': MODEL_SQL})
+    manifest = _parse(tmp_path)
+
+    for task_key, select, verb in _resource_selectors(manifest, bundle_tests=False):
+        if verb != 'run':
+            continue
+        selected = _selected_ids(tmp_path, select, 'model', indirect=False)
+        assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one node'
+
+
+def test_model_and_singular_test_sharing_an_fqn_both_resolve(tmp_path):
+    """
+    `models/beta.sql` and `tests/beta.sql` parse with the same fqn and base name, but each task
+    carries its own verb and dbt's resource-type filtering keeps them apart — so both are exact and
+    neither should be refused.
+    """
+    _write_project(tmp_path, {'beta.sql': MODEL_SQL})
+    tests_dir = tmp_path / 'tests'
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / 'beta.sql').write_text('select 1 as id where false\n', encoding='utf-8')
+    manifest = _parse(tmp_path)
+
+    for task_key, select, verb in _resource_selectors(manifest, bundle_tests=False):
+        resource_type = 'model' if verb == 'run' else 'test'
+        selected = _selected_ids(tmp_path, select, resource_type, indirect=False)
+        assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one node'
+
+
+def test_bundled_source_test_selector_is_exact(tmp_path):
+    """A source's tests are selected by `source:<pkg>.<src>.<table>`; that must resolve exactly."""
+    _write_project(tmp_path, {'downstream.sql': MODEL_SQL})
+    (tmp_path / 'models' / 'sources.yml').write_text(
+        'sources:\n'
+        '  - name: raw\n'
+        '    schema: default\n'
+        '    tables:\n'
+        '      - name: orders\n'
+        '        columns:\n'
+        '          - name: id\n'
+        '            data_tests: [not_null]\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    selectors = [s for _, s, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
+    source_selectors = [s for s in selectors if s.startswith('source:')]
+    assert source_selectors, f'expected a bundled source test task, got {selectors}'
+    for select in source_selectors:
+        selected = _selected_ids(tmp_path, select, 'test', indirect=True)
+        assert len(selected) == 1, f'{select!r} selects {selected}, expected exactly one test'
 
 
 # Building blocks for the generative case: names that collide with directory names, names carrying a
@@ -251,12 +370,10 @@ def test_generated_selectors_are_exact(tmp_path, seed):
     manifest = _parse(tmp_path)
 
     for bundle_tests in (False, True):
-        try:
-            selectors = _resource_selectors(manifest, bundle_tests)
-        except ValueError as error:
-            # Refusing to generate is an acceptable outcome; a wrong selector is not.
-            assert 'no selector can isolate' in str(error)
-            continue
+        # Every layout here is selector-safe and name-deduplicated, so generation must *succeed*.
+        # Tolerating a refusal would let an implementation that rejects everything pass this test;
+        # the unisolable cases are asserted explicitly in their own fixtures instead.
+        selectors = _resource_selectors(manifest, bundle_tests)
         for task_key, select, verb in selectors:
             resource_type = {'run': 'model', 'seed': 'seed', 'snapshot': 'snapshot'}.get(verb)
             if resource_type is None:

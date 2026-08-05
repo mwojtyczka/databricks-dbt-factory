@@ -742,6 +742,124 @@ def test_fqn_ending_in_a_graph_operator_is_dropped(dbt_factory):
     ]
 
 
+def test_fqn_starting_with_a_numeric_graph_operator_is_dropped(dbt_factory):
+    # dbt's `RAW_SELECTOR_PATTERN` reads a *leading* `N+` as parent depth, not just a trailing `+N`.
+    # Confirmed with `dbt ls` on dbt 1.12.0: `2+orders` selects `probe.orders` (the sibling, plus two
+    # levels of its parents) — a wrong-node hit, not an empty one — so the bare name must be dropped.
+    # The fqn `pkg.2+orders` is exact, because the operator is no longer at the selector's boundary.
+    nodes = dict([_model('pkg', '2+orders', fqn=['pkg', '2+orders'], path='models/2+orders.sql')])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['2+orders_model']['dbt_task']['commands'] == [
+        'dbt run --select pkg.2+orders,package:pkg,file:2+orders.sql --target dev'
+    ]
+
+
+def test_name_fallback_starting_with_a_numeric_graph_operator_is_refused(dbt_factory):
+    # The same name with an unusable fqn (a spacey directory) has nothing left to fall back on: the
+    # bare name `2+orders` *is* the whole raw selector, so dbt reads the leading `2+` as parent depth
+    # and selects a different model entirely. Two tests share the schema.yml, so `file:` cannot stand
+    # in for the name either — refuse rather than emit a task that runs the wrong node.
+    nodes = dict(
+        [
+            _test(
+                'pkg',
+                '2+orders',
+                ['model.pkg.a'],
+                fqn=['pkg', 'my dir', '2+orders'],
+                path='models/my dir/schema.yml',
+                test_name='not_null',
+            ),
+            _test(
+                'pkg',
+                'not_null_b_id',
+                ['model.pkg.b'],
+                fqn=['pkg', 'my dir', 'not_null_b_id'],
+                path='models/my dir/schema.yml',
+                test_name='not_null',
+            ),
+        ]
+    )
+
+    with pytest.raises(ValueError, match='no selector can address'):
+        dbt_factory.create_tasks({'nodes': nodes})
+
+
+def test_name_fallback_with_an_operator_is_kept_when_the_file_is_its_own(dbt_factory):
+    # The mirror image: the same unusable name, but the resource has its file to itself, so
+    # `package:`+`file:` addresses it exactly (`package:probe,file:orders+1.sql` -> one node,
+    # confirmed with `dbt ls` on dbt 1.12.0). Refusing here would reject a project dbt handles.
+    nodes = dict([_model('pkg', '2+orders', fqn=['pkg', 'my dir', '2+orders'], path='models/my dir/2+orders.sql')])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['2+orders_model']['dbt_task']['commands'] == [
+        'dbt run --select package:pkg,file:2+orders.sql --target dev'
+    ]
+
+
+def test_source_selector_with_a_graph_operator_is_refused(dbt_factory_bundled):
+    # The whole `source:...` string is one raw selector, so it is subject to the same boundary rule as
+    # a bare name — but `_source_select` only screened metacharacters. Confirmed with `dbt ls` on dbt
+    # 1.12.0: `source:pkg.raw.orders+1` matches nothing and `dbt test` still exits 0, so the source's
+    # tests would silently never run.
+    nodes = dict([_test('pkg', 'source_not_null_raw_orders_id', ['source.pkg.raw.orders+1'])])
+    sources = dict([_source('pkg', 'raw', 'orders+1')])
+
+    with pytest.raises(ValueError, match='no selector can address'):
+        dbt_factory_bundled.create_tasks({'nodes': nodes, 'sources': sources})
+
+
+def test_source_selector_keeps_an_operator_away_from_the_boundary(dbt_factory_bundled):
+    # Only the boundary matters. `source:pkg.raw.2+ord` puts the `2+` mid-string, and dbt resolves it
+    # exactly (verified with `dbt ls` on dbt 1.12.0), so refusing it would reject a working project.
+    nodes = dict([_test('pkg', 'source_not_null_raw_2_ord_id', ['source.pkg.raw.2+ord'])])
+    sources = dict([_source('pkg', 'raw', '2+ord')])
+
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes, 'sources': sources})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert by_key['raw_2+ord_test']['dbt_task']['commands'] == [
+        'dbt test --select source:pkg.raw.2+ord --indirect-selection cautious --target dev'
+    ]
+
+
+def test_generation_fails_when_only_non_discriminating_terms_survive(dbt_factory):
+    # `package:` and `file:` both address *groups* of nodes: a `schema.yml` holds every test declared
+    # in it, so `package:+file:+test_name:` can still match several. Only the fqn or the bare name
+    # picks out one node, so if neither survives the selector cannot be exact regardless of what else
+    # does. Confirmed with `dbt ls` on dbt 1.12.0: a bracketed custom test name alongside a plain
+    # `not_null` in one schema.yml yielded `package:probe,file:schema.yml,test_name:not_null`, which
+    # resolves to *both* tests — so that task and the other one would each run `not_null_b_id`.
+    nodes = dict(
+        [
+            _test(
+                'pkg',
+                'check[a]id',
+                ['model.pkg.a'],
+                fqn=['pkg', 'check[a]id'],
+                path='models/schema.yml',
+                test_name='not_null',
+            ),
+            # The sibling that makes `file:schema.yml` ambiguous, exactly as dbt reports it.
+            _test(
+                'pkg',
+                'not_null_b_id',
+                ['model.pkg.b'],
+                fqn=['pkg', 'not_null_b_id'],
+                path='models/schema.yml',
+                test_name='not_null',
+            ),
+        ]
+    )
+
+    with pytest.raises(ValueError, match='no selector can address'):
+        dbt_factory.create_tasks({'nodes': nodes})
+
+
 def test_graph_operator_inside_a_segment_is_kept(dbt_factory):
     # `@` and `+` are only operators at the selector's start/end. `pkg.+leading` is exact, verified
     # with `dbt ls`, so rejecting it would refuse a project dbt handles fine.

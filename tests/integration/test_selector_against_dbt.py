@@ -402,6 +402,138 @@ def test_same_type_tests_in_one_file_resolve_individually(tmp_path):
         assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one test'
 
 
+def test_leading_numeric_graph_operator_in_a_name_is_refused(tmp_path):
+    """
+    dbt reads a leading `N+` as parent depth, not just a trailing `+N`, so a bare name of `2+check`
+    is not the node's name at all — it means "check, plus two levels of its parents".
+
+    Reaching this needs a name that is *also* stuck sharing a file, since a resource owning its file
+    is addressed by `package:`+`file:` regardless of its name. A custom test name in a `schema.yml`
+    under a spacey directory is that shape: the space kills the fqn, the leading `2+` kills the name,
+    and the shared file kills `file:` — so generation must refuse.
+    """
+    _write_project(tmp_path, {'my dir/a.sql': MODEL_SQL, 'my dir/b.sql': MODEL_SQL})
+    (tmp_path / 'models' / 'my dir' / 'schema.yml').write_text(
+        'models:\n'
+        '  - name: a\n'
+        '    columns:\n'
+        '      - name: id\n'
+        '        data_tests:\n'
+        '          - not_null: {name: "2+check"}\n'
+        '  - name: b\n'
+        '    columns:\n'
+        '      - name: id\n'
+        '        data_tests: [not_null]\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    # dbt's own reading of the name we would have fallen back to: not this node.
+    assert not _selected_ids(tmp_path, '2+check', 'test', indirect=False)
+
+    with pytest.raises(ValueError, match='no selector can address'):
+        _resource_selectors(manifest, bundle_tests=False)
+
+
+def test_source_with_a_trailing_graph_operator_is_refused(tmp_path):
+    """
+    The whole `source:...` string is one raw selector, so a table ending in `+N` is read as a graph
+    operator: `source:probe.raw.orders+1` matches nothing while `dbt test` still exits 0, so the
+    source's tests would silently never run. Generation must refuse.
+    """
+    _write_project(tmp_path, {'downstream.sql': "select * from {{ source('raw','orders+1') }}\n"})
+    (tmp_path / 'models' / 'sources.yml').write_text(
+        'sources:\n'
+        '  - name: raw\n'
+        '    schema: default\n'
+        '    tables:\n'
+        '      - name: "orders+1"\n'
+        '        identifier: ord\n'
+        '        columns:\n'
+        '          - name: id\n'
+        '            data_tests: [not_null]\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    # The selector we would otherwise have emitted matches nothing, and dbt still exits 0 for it.
+    assert not _selected_ids(tmp_path, 'source:probe.raw.orders+1', None, indirect=True)
+
+    with pytest.raises(ValueError, match='no selector can address'):
+        _resource_selectors(manifest, bundle_tests=True)
+
+
+def test_source_keeps_an_operator_away_from_the_boundary(tmp_path):
+    """
+    The mirror image: `2+ord` puts the operator mid-string, where dbt resolves it exactly. Refusing
+    it would reject a working project, so the guard must apply to the boundary only.
+    """
+    _write_project(tmp_path, {'downstream.sql': "select * from {{ source('raw','2+ord') }}\n"})
+    (tmp_path / 'models' / 'sources.yml').write_text(
+        'sources:\n'
+        '  - name: raw\n'
+        '    schema: default\n'
+        '    tables:\n'
+        '      - name: "2+ord"\n'
+        '        identifier: ord\n'
+        '        columns:\n'
+        '          - name: id\n'
+        '            data_tests: [not_null]\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    source_selectors = [s for _, s, verb in _resource_selectors(manifest, bundle_tests=True) if s.startswith('source:')]
+    assert source_selectors, 'expected a bundled source test task'
+    for select in source_selectors:
+        assert _selected_ids(tmp_path, select, 'test', indirect=True), f'{select!r} matched nothing'
+
+
+def test_tests_sharing_a_file_with_no_usable_name_are_refused(tmp_path):
+    """
+    When neither the fqn nor the bare name survives, `package:`+`file:`+`test_name:` is all that is
+    left — and a `schema.yml` holds every test declared in it, so that combination is not exact.
+    Emitting it would make one task run another task's test too, the duplicate-build class of bug.
+
+    A bracketed custom test name kills both the fqn and the name (`[...]` is fnmatch syntax).
+    """
+    _write_project(tmp_path, {'a.sql': MODEL_SQL, 'b.sql': MODEL_SQL})
+    (tmp_path / 'models' / 'schema.yml').write_text(
+        'models:\n'
+        '  - name: a\n'
+        '    columns:\n'
+        '      - name: id\n'
+        '        data_tests:\n'
+        '          - not_null: {name: "check[a]id"}\n'
+        '  - name: b\n'
+        '    columns:\n'
+        '      - name: id\n'
+        '        data_tests: [not_null]\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    # What the un-guarded selector resolved to: two tests, so two tasks would both run not_null_b_id.
+    assert len(_selected_ids(tmp_path, 'package:probe,file:schema.yml,test_name:not_null', 'test', indirect=False)) == 2
+
+    with pytest.raises(ValueError, match='no selector can address'):
+        _resource_selectors(manifest, bundle_tests=False)
+
+
+def test_single_resource_file_addresses_it_without_a_usable_name(tmp_path):
+    """
+    The counterpart: an unusable name costs nothing when the resource has its file to itself, since
+    `package:`+`file:` then resolves to exactly one node. The refusal above must not generalise to
+    this, or an awkward file name would fail a project dbt builds fine.
+    """
+    _write_project(tmp_path, {'my dir/2+orders.sql': MODEL_SQL, 'my dir/orders.sql': MODEL_SQL})
+    manifest = _parse(tmp_path)
+
+    for task_key, select, _verb in _resource_selectors(manifest, bundle_tests=False):
+        selected = _selected_ids(tmp_path, select, 'model', indirect=False)
+        assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one node'
+
+
 @pytest.mark.parametrize(
     ('source_name', 'table'),
     [

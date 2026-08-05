@@ -65,7 +65,10 @@ dependencies = [
   # dbt itself, so tests/integration/test_selector_against_dbt.py can verify every generated
   # `--select` against the real matcher instead of against our model of it. Not a runtime
   # dependency: the factory only reads a manifest dbt has already produced.
-  "dbt-core~=1.12.0",
+  # Deliberately loose: these tests assert what dbt's live matcher does, so running against whatever
+  # current 1.x resolves is the point — a selector that stops being exact in a later dbt should fail
+  # here rather than be masked by a pin. Note the dbt version you verified against in the commit.
+  "dbt-core~=1.12",
   "dbt-databricks~=1.11",
   "types-PyYAML~=6.0.12",
   "types-requests~=2.31.0",

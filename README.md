@@ -378,22 +378,27 @@ Tests get the extra `test_name:` part, because all the tests declared in one `sc
 file and so cannot be told apart by `file:` alone.
 
 A part is left out if dbt would not read it literally — for example a name containing a space, comma
-or colon, which dbt treats as selector syntax, or an FQN ending in something dbt reads as one of its
-`+`/`@` graph operators. Leaving a part out costs precision but not correctness: the remaining parts
-still identify the resource. Where the FQN has to be dropped, the resource's own name takes its place
-(dbt matches a bare name against the last part of the FQN):
+or colon, which dbt treats as selector syntax, or an FQN starting or ending with something dbt reads
+as one of its `+`/`@` graph operators (a trailing `+2`, or a leading `2+`, which means "two levels of
+parents" rather than a name). Leaving a part out costs precision but not correctness: the remaining
+parts still identify the resource. Where the FQN has to be dropped, the resource's own name takes its
+place (dbt matches a bare name against the last part of the FQN):
 
 ```
 dbt run --select stg_orders,package:my_project,file:stg_orders.sql
 ```
 
-If nothing usable is left, task generation fails with an error naming the resource, rather than
-emitting a selector that would run the whole package.
+Something has to single the resource out, though — either its FQN, its name, or a file it has to
+itself. `package:`, a *shared* `file:` and `test_name:` each address a whole group, so no combination
+of them alone is precise: a resource whose name and FQN are both unusable and that shares a
+`schema.yml` with a sibling cannot be addressed, and generation fails with an error naming it rather
+than emitting a task that would run the sibling too.
 
 Sources are addressed by `source:<package>.<source>.<table>`, dbt's own form for them. That form
 takes at most three parts, so a source or table name containing a `.` cannot be addressed at all —
 dbt rejects a four-part selector outright — and generation fails for it rather than emitting a task
-that would error at run time.
+that would error at run time. The assembled string is one selector, so it is subject to the same
+graph-operator rule as a bare name.
 
 Resources dbt has disabled are skipped. Most land in the manifest's separate `disabled` section,
 but a few stay in `nodes` with `enabled: false` (a test belonging to a declared model version that

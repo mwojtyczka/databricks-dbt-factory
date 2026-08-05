@@ -356,27 +356,31 @@ default (pass `--no-run-tests` to skip them). Two modes are available, controlle
 
 ### How resources are addressed
 
-Every task addresses its resource the same way: the intersection (`,`, dbt's AND) of every
-independent fact the manifest records about it.
+Each task selects its resource by several things at once, joined with commas:
 
 ```
 dbt run --select my_project.staging.stg_orders,package:my_project,file:stg_orders.sql
 ```
 
-No single term is exact, which is why they are combined rather than chosen between:
+A comma means AND in dbt, so this reads: *the node at this FQN, **and** in this package, **and** from
+this file.* Only one node satisfies all three.
 
-| Term | Narrows to | On its own it also matches |
+Each part on its own is too broad, which is why they are combined:
+
+| Part | Reads as | But on its own also matches |
 |---|---|---|
-| `<fqn>` | package + directory path + name | nodes *nested beneath* it (dbt matches an FQN as a path prefix), and a package's node via its package-stripped FQN |
-| `package:` | the owning package | every resource in that package |
-| `file:` | one source file | that base name in other packages, and every test sharing a `schema.yml` |
-| `test_name:` | a generic test's type (`not_null`, …) | every test of that type |
+| `my_project.staging.stg_orders` | this FQN | anything nested under it — dbt treats an FQN as a path prefix, so this alone would also match `staging/stg_orders/lines.sql` |
+| `package:my_project` | in this package | every resource in the package |
+| `file:stg_orders.sql` | from this file | a file of the same name in another package |
+| `test_name:not_null` | a generic test of this type | every `not_null` test in the project |
 
-A term is left out when dbt's own selector grammar cannot express it literally — a name containing
-a space, comma, colon or one of `*?[]`, or an FQN whose ends look like dbt's `@`/`+` graph
-operators. An awkward directory name therefore costs one term rather than the whole selector, and
-generation only fails when nothing usable is left (which would mean running the whole package). The
-selector is shell-quoted, so names containing quotes survive the notebook runner's tokenisation.
+Tests get the extra `test_name:` part, because all the tests declared in one `schema.yml` share a
+file and so cannot be told apart by `file:` alone.
+
+A part is left out if dbt would not read it literally — for example a name containing a space, comma
+or colon, which dbt treats as selector syntax. Leaving one out costs precision but not correctness:
+the remaining parts still identify the resource. If nothing usable is left, task generation fails
+with an error naming the resource, rather than emitting a selector that would run the whole package.
 
 Sources are addressed by `source:<package>.<source>.<table>`, dbt's own form for them.
 

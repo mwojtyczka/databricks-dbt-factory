@@ -104,7 +104,9 @@ def _parse(root: Path) -> dict:
 
 
 @functools.lru_cache(maxsize=None)
-def _selected_ids(root: Path, select: str, resource_type: str | None, indirect: bool) -> tuple[str, ...]:
+def _selected_ids(
+    root: Path, select: str, resource_type: str | None, indirect: bool = False, indirect_selection: str | None = None
+) -> tuple[str, ...]:
     """
     Returns the unique IDs dbt resolves `select` to, as `dbt ls` reports them.
 
@@ -116,6 +118,8 @@ def _selected_ids(root: Path, select: str, resource_type: str | None, indirect: 
         args += ['--resource-type', resource_type]
     if indirect:
         args += ['--indirect-selection', 'cautious']
+    elif indirect_selection:
+        args += ['--indirect-selection', indirect_selection]
     result = _dbt(root, *args)
     assert result.success, f'dbt ls failed for {select!r}: {result.exception}'
     # `dbt ls` returns a list of unique-id strings; the runner's result type is a union across every
@@ -332,6 +336,70 @@ def test_bundled_source_test_selector_is_exact(tmp_path):
     for select in source_selectors:
         selected = _selected_ids(tmp_path, select, 'test', indirect=True)
         assert len(selected) == 1, f'{select!r} selects {selected}, expected exactly one test'
+
+
+def test_every_task_selector_resolves_to_one_node(tmp_path):
+    """
+    Every generated task — models, data tests and unit tests alike — must select exactly one node.
+
+    `--indirect-selection empty` stands in for the resource-type filter each task actually carries:
+    without it dbt eagerly adds a selected model's attached tests, which is desirable when the task
+    runs but would obscure whether the selector itself is exact. It also avoids guessing dbt's type
+    name — a unit test is `unit_test`, not `test`, and a naive mapping filters it out and reports
+    zero, which is how an earlier version of this check hid a passing case as a failure.
+    """
+    _write_project(
+        tmp_path,
+        {'marts/orders.sql': MODEL_SQL, 'marts/orders/items.sql': MODEL_SQL},
+        schema_yml=(
+            'models:\n'
+            '  - name: orders\n'
+            '    columns:\n'
+            '      - name: id\n'
+            '        data_tests: [unique, not_null]\n'
+            'unit_tests:\n'
+            '  - name: ut_orders\n'
+            '    model: orders\n'
+            '    given: []\n'
+            '    expect: {rows: [{id: 1}]}\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    for task_key, select, _verb in _resource_selectors(manifest, bundle_tests=False):
+        selected = _selected_ids(tmp_path, select, resource_type=None, indirect_selection='empty')
+        assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one node'
+
+
+def test_same_type_tests_in_one_file_resolve_individually(tmp_path):
+    """
+    Two `not_null` tests in one `schema.yml` share a package, a file *and* a test type, so
+    `test_name:` cannot separate them. Under a spacey directory the fqn is unusable too, leaving the
+    bare resource name as the only discriminator — verified here against dbt rather than asserted.
+    """
+    _write_project(tmp_path, {'my tests/a.sql': MODEL_SQL, 'my tests/b.sql': MODEL_SQL})
+    (tmp_path / 'models' / 'my tests' / 'schema.yml').write_text(
+        'models:\n'
+        '  - name: a\n'
+        '    columns:\n'
+        '      - name: id\n'
+        '        data_tests: [not_null]\n'
+        '  - name: b\n'
+        '    columns:\n'
+        '      - name: id\n'
+        '        data_tests: [not_null]\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    selectors = _resource_selectors(manifest, bundle_tests=False)
+    test_selectors = {key: select for key, select, verb in selectors if verb == 'test'}
+    assert len(set(test_selectors.values())) == len(
+        test_selectors
+    ), f'the two same-type tests share a selector: {test_selectors}'
+    for task_key, select in test_selectors.items():
+        selected = _selected_ids(tmp_path, select, 'test', indirect=False)
+        assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one test'
 
 
 # Building blocks for the generative case: names that collide with directory names, names carrying a

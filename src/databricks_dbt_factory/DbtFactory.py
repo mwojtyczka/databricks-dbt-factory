@@ -75,7 +75,9 @@ class DbtFactory:
         * **`file:`** narrows to one source file, but matches that base name in every package, and a
           `schema.yml` is shared by every test declared in it;
         * **`test_name:`** narrows a generic test to its type (`not_null`, `unique`), separating tests
-          that share a `schema.yml`.
+          that share a `schema.yml` — but only when their types differ, so two `not_null` tests in one
+          file still need the bare **name**, which dbt matches against the fqn's leaf. The name stands
+          in for the fqn when the fqn itself is unusable.
 
         A term is omitted when dbt's own grammar cannot express it literally — see
         `_is_usable_component` — so an awkward directory name costs one term rather than the whole
@@ -94,6 +96,16 @@ class DbtFactory:
         fqn = node_info.get('fqn') or []
         if fqn and cls._is_usable_selector('.'.join(fqn)) and all(cls._is_usable_component(part) for part in fqn):
             terms.append('.'.join(fqn))
+        elif cls._is_usable_component(name := node_info.get('name') or '') and cls._is_usable_selector(name):
+            # The fqn is unusable, so fall back to the bare resource name, which dbt matches against
+            # the fqn's leaf. It is the only term that tells apart two nodes sharing a package, a
+            # file and a test type — two `not_null` tests in one `schema.yml`, say. Not used *with* a
+            # usable fqn, whose leaf already carries it.
+            #
+            # `_is_usable_selector` applies here too: unlike an fqn segment, a bare name *is* the
+            # whole raw selector, so a name like `orders+1` would be read as a graph operator and
+            # select the wrong node (or none). An fqn segment is shielded by the package prefix.
+            terms.append(name)
 
         package = node_info.get('package_name') or ''
         if cls._is_usable_component(package):

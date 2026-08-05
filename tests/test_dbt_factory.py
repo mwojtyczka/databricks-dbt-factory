@@ -723,13 +723,15 @@ def test_unusable_fqn_segment_is_dropped_but_other_terms_remain(dbt_factory, bad
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select package:pkg,file:orders.sql --target dev'
+        'dbt run --select orders,package:pkg,file:orders.sql --target dev'
     ]
 
 
 def test_fqn_ending_in_a_graph_operator_is_dropped(dbt_factory):
     # dbt reads a trailing `+N` as child depth, so `pkg.orders+1` selects `pkg.orders` and its
-    # children — the wrong model entirely. The fqn term is unusable; the rest still addresses it.
+    # children — the wrong model entirely. The bare name `orders+1` is no better: on its own it *is*
+    # the whole raw selector, so it trips the same rule and selects nothing. Both are dropped, and
+    # `package:`/`file:` still address the node.
     nodes = dict([_model('pkg', 'orders+1', fqn=['pkg', 'orders+1'], path='models/orders+1.sql')])
 
     tasks = dbt_factory.create_tasks({'nodes': nodes})
@@ -761,6 +763,43 @@ def test_generation_fails_when_no_term_can_address_the_node(dbt_factory):
 
     with pytest.raises(ValueError, match='no selector can address'):
         dbt_factory.create_tasks({'nodes': nodes})
+
+
+def test_same_type_tests_in_one_file_get_distinct_selectors(dbt_factory):
+    # `test_name:` narrows to the generic test *type*, so two `not_null` tests declared in one
+    # `schema.yml` share it. With a spacey directory making the fqn unusable too, both tasks would
+    # otherwise emit the same selector and each run the other's test — before the other's model is
+    # built, since each task depends only on its own. The node's own `name` separates them.
+    nodes = dict(
+        [
+            _model('pkg', 'a', fqn=['pkg', 'my tests', 'a'], path='models/my tests/a.sql'),
+            _model('pkg', 'b', fqn=['pkg', 'my tests', 'b'], path='models/my tests/b.sql'),
+            _test(
+                'pkg',
+                'not_null_a_id',
+                ['model.pkg.a'],
+                fqn=['pkg', 'my tests', 'not_null_a_id'],
+                path='models/my tests/schema.yml',
+                test_name='not_null',
+            ),
+            _test(
+                'pkg',
+                'not_null_b_id',
+                ['model.pkg.b'],
+                fqn=['pkg', 'my tests', 'not_null_b_id'],
+                path='models/my tests/schema.yml',
+                test_name='not_null',
+            ),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    commands = {t['task_key']: t['dbt_task']['commands'][0] for t in tasks}
+
+    assert commands['not_null_a_id_test'] != commands['not_null_b_id_test']
+    assert commands['not_null_a_id_test'] == (
+        'dbt test --select not_null_a_id,package:pkg,file:schema.yml,test_name:not_null --target dev'
+    )
 
 
 def test_data_test_selector_includes_its_test_name(dbt_factory):
@@ -836,7 +875,7 @@ def test_select_falls_back_to_the_bare_name_when_the_node_has_no_fqn(dbt_factory
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select package:pkg,file:orders.sql --target dev'
+        'dbt run --select orders,package:pkg,file:orders.sql --target dev'
     ]
 
 

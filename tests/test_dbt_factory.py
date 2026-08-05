@@ -93,6 +93,19 @@ def _snapshot(
     }
 
 
+def _analysis(package: str, name: str, fqn: list[str] | None = None, path: str | None = None) -> tuple[str, dict]:
+    # dbt files analyses under `nodes` alongside models, but nothing selects them by default.
+    full_name = f"analysis.{package}.{name}"
+    return full_name, {
+        'resource_type': 'analysis',
+        'name': name,
+        'package_name': package,
+        'fqn': fqn or [package, 'analysis', name],
+        'original_file_path': path or f"analyses/{name}.sql",
+        'depends_on': {'nodes': []},
+    }
+
+
 def _source(package: str, source_name: str, table: str, path: str | None = None) -> tuple[str, dict]:
     full_name = f"source.{package}.{source_name}.{table}"
     return full_name, {
@@ -929,6 +942,25 @@ def test_a_source_in_the_same_file_makes_it_ambiguous(dbt_factory):
 
     with pytest.raises(ValueError, match='no selector can address'):
         dbt_factory.create_tasks({'nodes': nodes, 'sources': sources, 'unit_tests': unit_tests})
+
+
+def test_an_analysis_sharing_a_file_name_does_not_make_it_ambiguous(dbt_factory):
+    # `nodes` holds analyses and operations as well as the resources we run, but dbt's default
+    # selection excludes both, so neither can collide with anything a task selects. Confirmed with
+    # `dbt ls` on dbt 1.12.0: `package:probe,file:2+x.sql` selected the *model* alone, and the analysis
+    # appeared only with an explicit `--resource-type analysis`, which no emitted command passes.
+    # (`--resource-type operation` is not even accepted.) Counting them would refuse this project,
+    # whose model has no usable fqn or name and so rests entirely on the file being its own.
+    nodes = dict(
+        [
+            _model('pkg', '2+x', fqn=['pkg', 'my dir', '2+x'], path='models/my dir/2+x.sql'),
+            _analysis('pkg', '2+x', fqn=['pkg', 'analysis', '2+x'], path='analyses/2+x.sql'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+
+    assert [t['dbt_task']['commands'][0] for t in tasks] == ['dbt run --select package:pkg,file:2+x.sql --target dev']
 
 
 def test_a_file_name_shared_across_packages_stays_exact(dbt_factory):

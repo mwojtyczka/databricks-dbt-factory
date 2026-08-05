@@ -625,6 +625,33 @@ def test_a_source_sharing_a_yml_makes_a_test_file_ambiguous(tmp_path):
         _resource_selectors(manifest, bundle_tests=False)
 
 
+def test_an_analysis_sharing_a_file_name_does_not_make_it_ambiguous(tmp_path):
+    """
+    `nodes` is not only the resources we run: dbt files `analysis` and `operation` entries there too,
+    and its default selection reaches neither. So counting them would refuse a project dbt addresses
+    exactly — here a model with no usable fqn (a space in the directory) and no usable name (a leading
+    `2+` graph operator), resting entirely on the file being its own.
+
+    Swept for completeness rather than assumed: of every type dbt accepts for `--resource-type`,
+    `analysis` is the only one in `nodes` that a bare `package:probe` does not return, and `operation`
+    and `sql_operation` are rejected as selector values outright.
+    """
+    _write_project(tmp_path, {'my dir/2+x.sql': MODEL_SQL})
+    analyses = tmp_path / 'analyses'
+    analyses.mkdir()
+    (analyses / '2+x.sql').write_text('select 1\n', encoding='utf-8')
+    manifest = _parse(tmp_path)
+
+    # The analysis is in `nodes` and shares the base name, yet the model's selector is exact.
+    assert 'analysis.probe.2+x' in manifest['nodes']
+    assert _selected_ids(tmp_path, 'package:probe,file:2+x.sql', None) == ('probe.my dir.2+x',)
+    # It takes an explicit `--resource-type analysis` to reach it, which no emitted command passes.
+    assert _selected_ids(tmp_path, 'package:probe,file:2+x.sql', 'analysis') == ('probe.analysis.2+x',)
+
+    selects = [select for _key, select, _verb in _resource_selectors(manifest, bundle_tests=False)]
+    assert selects == ['package:probe,file:2+x.sql']
+
+
 def test_an_exposure_sharing_a_yml_does_not_make_it_ambiguous(tmp_path):
     """
     The boundary on which manifest keys have to be counted. `exposures` (like `metrics` and

@@ -46,6 +46,12 @@ class DbtFactory:
     _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
     _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
+    # Resource types dbt files under `nodes` but never selects by default, so they cannot collide with
+    # anything a generated task selects. Confirmed with `dbt ls` on dbt 1.12.0: a bare `package:probe`
+    # returns neither, an analysis needs an explicit `--resource-type analysis`, and
+    # `--resource-type operation` is rejected outright.
+    _UNSELECTABLE_TYPES = frozenset({'analysis', 'operation', 'sql_operation'})
+
     # Characters that change how dbt parses a selector *component*, so a component containing one
     # cannot be used to address a node. Derived from dbt's grammar, each confirmed against dbt 1.12.0
     # with `dbt ls`:
@@ -290,8 +296,8 @@ class DbtFactory:
 
         return tasks
 
-    @staticmethod
-    def _count_resources_per_file(*entry_groups: dict) -> dict[tuple[str, str], int]:
+    @classmethod
+    def _count_resources_per_file(cls, *entry_groups: dict) -> dict[tuple[str, str], int]:
         """
         Counts the resources a `package:`+`file:` pair matches, keyed by `(package, file base name)`.
 
@@ -321,6 +327,14 @@ class DbtFactory:
         which no file count could ever notice. Confirmed with `dbt ls` on dbt 1.12.0, where moving the
         source out to its own `.yml` removed the extra test.
 
+        Only resource types dbt's *default* selection can reach are counted, because a resource dbt
+        will not select cannot collide with one it does. `nodes` also holds `analysis` and `operation`
+        entries: confirmed with `dbt ls` on dbt 1.12.0, a bare `package:probe` returns neither, an
+        analysis appears only under an explicit `--resource-type analysis` (which nothing here passes),
+        and `--resource-type operation` is not even accepted. Counting them would refuse a project whose
+        model has no usable fqn or name and merely shares a base name with an analysis, which dbt
+        addresses exactly.
+
         The manifest's other keys are deliberately left out. `exposures`, `metrics` and
         `semantic_models` are matched by `file:` too, but nothing tests them, so eager pulls nothing in
         for them — verified the same way. `disabled` is never read, and `_enabled_only` has already
@@ -330,6 +344,9 @@ class DbtFactory:
         counts: dict[tuple[str, str], int] = {}
         for entries in entry_groups:
             for info in entries.values():
+                # Sources have no `resource_type` in some manifests; they are selectable, so default in.
+                if info.get('resource_type', 'source') in cls._UNSELECTABLE_TYPES:
+                    continue
                 file_name = PurePosixPath(info.get('original_file_path') or '').name
                 key = (info.get('package_name') or '', file_name)
                 counts[key] = counts.get(key, 0) + 1

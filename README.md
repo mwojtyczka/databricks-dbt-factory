@@ -390,7 +390,15 @@ dbt run --select stg_orders,package:my_project,file:stg_orders.sql
 If nothing usable is left, task generation fails with an error naming the resource, rather than
 emitting a selector that would run the whole package.
 
-Sources are addressed by `source:<package>.<source>.<table>`, dbt's own form for them.
+Sources are addressed by `source:<package>.<source>.<table>`, dbt's own form for them. That form
+takes at most three parts, so a source or table name containing a `.` cannot be addressed at all —
+dbt rejects a four-part selector outright — and generation fails for it rather than emitting a task
+that would error at run time.
+
+Resources dbt has disabled are skipped. Most land in the manifest's separate `disabled` section,
+but a few stay in `nodes` with `enabled: false` (a test belonging to a declared model version that
+has no file, for instance); dbt selects nothing for those, so a task would report success without
+running anything.
 
 ### Per-test (default)
 

@@ -402,6 +402,80 @@ def test_same_type_tests_in_one_file_resolve_individually(tmp_path):
         assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one test'
 
 
+@pytest.mark.parametrize(
+    ('source_name', 'table'),
+    [
+        pytest.param('raw.v1', 'ord', id='dotted-source-name'),
+        pytest.param('raw', 'ord.v1', id='dotted-table-name'),
+    ],
+)
+def test_dotted_source_part_is_refused_rather_than_emitted(tmp_path, source_name, table):
+    """
+    `.` delimits dbt's source grammar, which takes at most `pkg.source.table`. A dot inside one part
+    makes four, and dbt rejects the selector with a Runtime Error rather than selecting nothing — so
+    the bundled task would fail at run time. Generation must refuse instead.
+
+    Asserted from both ends: dbt really does reject the naive string, and the factory really does
+    refuse to emit it.
+    """
+    _write_project(tmp_path, {'downstream.sql': f"select * from {{{{ source('{source_name}','{table}') }}}}\n"})
+    (tmp_path / 'models' / 'sources.yml').write_text(
+        f'sources:\n'
+        f'  - name: "{source_name}"\n'
+        f'    schema: default\n'
+        f'    tables:\n'
+        f'      - name: "{table}"\n'
+        f'        identifier: ord\n'
+        f'        columns:\n'
+        f'          - name: id\n'
+        f'            data_tests: [not_null]\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    # dbt's own verdict on the selector we would otherwise have emitted.
+    rejected = _dbt(tmp_path, 'ls', '--quiet', '--select', f'source:probe.{source_name}.{table}')
+    assert not rejected.success, 'dbt accepted a four-part source selector; this test is no longer meaningful'
+
+    with pytest.raises(ValueError, match='no selector can address'):
+        _resource_selectors(manifest, bundle_tests=True)
+
+
+def test_disabled_node_left_in_the_manifest_gets_no_task(tmp_path):
+    """
+    A versioned model whose declared version has no file leaves a *disabled* test node inside the
+    manifest's `nodes` (dbt normally files disabled resources under `disabled`, which we never read).
+    dbt selects nothing for it and `dbt test` still exits 0, so a task for it would go green having
+    asserted nothing. Let dbt build the shape rather than hand-writing the node.
+    """
+    _write_project(
+        tmp_path,
+        {'orders.sql': MODEL_SQL},
+        schema_yml=(
+            'models:\n'
+            '  - name: orders\n'
+            '    latest_version: 2\n'
+            '    columns:\n'
+            '      - name: id\n'
+            '        data_tests: [not_null]\n'
+            '    versions:\n'
+            '      - v: 1\n'
+            '      - v: 2\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    # Guard the fixture: if dbt stops leaking the disabled node, this test proves nothing.
+    disabled = [info for info in manifest['nodes'].values() if info.get('config', {}).get('enabled') is False]
+    assert disabled, 'dbt no longer leaves a disabled node in `nodes`; this test is no longer meaningful'
+    assert not _selected_ids(tmp_path, 'probe.not_null_orders_v1_id', 'test', indirect=False)
+
+    for bundle_tests in (False, True):
+        for task_key, select, _verb in _resource_selectors(manifest, bundle_tests):
+            selected = _selected_ids(tmp_path, select, resource_type=None, indirect_selection='empty')
+            assert selected, f'{task_key} selects nothing via {select!r}; the task would pass having done nothing'
+
+
 # Building blocks for the generative case: names that collide with directory names, names carrying a
 # dot, and nesting, which together reproduce every prefix hazard found so far.
 _NAME_POOL = ('orders', 'items', 'dim', 'orders.items', 'marts')

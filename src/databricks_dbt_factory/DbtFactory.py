@@ -131,11 +131,18 @@ class DbtFactory:
 
         A source has no fqn selector of its own, so all three parts must be usable: unlike a node
         there is no other term to fall back on.
+
+        `.` is disallowed on top of the usual metacharacters. It delimits this grammar, which accepts
+        at most three parts, so a dot inside one makes four and dbt rejects the whole selector with a
+        Runtime Error ("Invalid source selector value") rather than merely selecting nothing —
+        confirmed against dbt 1.12.0 with `dbt ls`. A node's fqn is unaffected: there the dot is the
+        separator we are already building with, and a dotted segment stays addressable.
         """
         package = source_info.get('package_name') or ''
         source_name = source_info.get('source_name') or ''
         table = source_info.get('name') or ''
-        if not all(cls._is_usable_component(part) for part in (package, source_name, table)):
+        parts = (package, source_name, table)
+        if not all(cls._is_usable_component(part) and '.' not in part for part in parts):
             raise cls._unaddressable(source_info, [])
         return f'source:{package}.{source_name}.{table}'
 
@@ -177,9 +184,9 @@ class DbtFactory:
         Returns:
             list[DbtTask]: `DbtTask` instances (not yet rendered to dicts).
         """
-        dbt_nodes = dbt_manifest.get('nodes', {})
-        dbt_sources = dbt_manifest.get('sources', {})
-        dbt_unit_tests = dbt_manifest.get('unit_tests', {})
+        dbt_nodes = self._enabled_only(dbt_manifest.get('nodes', {}))
+        dbt_sources = self._enabled_only(dbt_manifest.get('sources', {}))
+        dbt_unit_tests = self._enabled_only(dbt_manifest.get('unit_tests', {}))
 
         bundle = 'test' in self.task_factories and self.bundle_tests
         single_model_tested: set[str] = set()
@@ -234,6 +241,25 @@ class DbtFactory:
             tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys))
 
         return tasks
+
+    @staticmethod
+    def _enabled_only(entries: dict) -> dict:
+        """
+        Drops entries dbt has disabled.
+
+        dbt normally files an `enabled=false` resource under the manifest's own `disabled` key, which
+        we never read — but not always: a versioned model whose declared version has no file leaves
+        its test in `nodes` with `config.enabled` false. dbt selects nothing for such a node, and
+        `dbt test` on a zero-match selector still exits 0, so a task built from it would go green
+        having asserted nothing. Filtering here rather than at each decision site keeps the task-key
+        map, the bundling classification and the dependency graph working from one view of the
+        manifest. Confirmed against dbt 1.12.0.
+        """
+        return {
+            full_name: info
+            for full_name, info in entries.items()
+            if (info.get('config') or {}).get('enabled') is not False
+        }
 
     def _node_gets_own_task(self, full_name: str, node_info: dict, bundle: bool, standalone_test_ids: set[str]) -> bool:
         """

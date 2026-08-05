@@ -890,6 +890,62 @@ def test_bundled_source_selector_is_validated(dbt_factory_bundled):
         dbt_factory_bundled.create_tasks({'nodes': nodes, 'sources': sources})
 
 
+@pytest.mark.parametrize(
+    ('source_name', 'table'),
+    [
+        pytest.param('raw.v1', 'orders', id='dotted-source-name'),
+        pytest.param('raw', 'orders.v1', id='dotted-table-name'),
+    ],
+)
+def test_bundled_source_selector_rejects_a_dotted_part(dbt_factory_bundled, source_name, table):
+    # `.` is the delimiter of dbt's *source* grammar, which takes at most three parts, so a dot
+    # inside one part pushes the selector to four and dbt refuses it outright:
+    #   source:pkg.raw.v1.orders -> "Invalid source selector value" (a Runtime Error, exit != 0)
+    # Unlike an fqn segment, a dot here is not shielded by a prefix, so `_is_usable_component` --
+    # which only screens dbt's *node* metacharacters -- let it through. Confirmed against dbt 1.12.0
+    # with `dbt ls`; see the integration test of the same shape.
+    nodes = dict([_test('pkg', 'unique_raw_orders_id', [f"source.pkg.{source_name}.{table}"])])
+    sources = dict([_source('pkg', source_name, table)])
+
+    with pytest.raises(ValueError, match='no selector can address'):
+        dbt_factory_bundled.create_tasks({'nodes': nodes, 'sources': sources})
+
+
+def test_disabled_node_in_the_manifest_gets_no_task(dbt_factory):
+    # dbt normally files an `enabled=false` resource under the manifest's `disabled` key, which we
+    # never read. But a versioned model whose declared version has no file leaks a *disabled* test
+    # into `nodes` (config.enabled=False, depends_on.nodes=[]). dbt refuses to select it, and
+    # `dbt test` on a zero-match selector still exits 0 -- so emitting a task for it produces a
+    # green task that asserts nothing. Confirmed against dbt 1.12.0.
+    live_id, live_info = _test('pkg', 'not_null_orders_v2_id', ['model.pkg.orders.v2'], test_name='not_null')
+    dead_id, dead_info = _test('pkg', 'not_null_orders_v1_id', [], test_name='not_null')
+    dead_info['config']['enabled'] = False
+    nodes = dict([_model('pkg', 'orders', version=2), (live_id, live_info), (dead_id, dead_info)])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'not_null_orders_v1_id_test' not in by_key, 'a disabled test must not become a task'
+    assert 'not_null_orders_v2_id_test' in by_key
+    assert 'orders_v2_model' in by_key
+
+
+def test_disabled_node_is_not_a_dependency_or_a_bundled_test(dbt_factory_bundled):
+    # The disabled test must also drop out of the bundling decision: were it counted, its model
+    # would get a bundled `<model>_test` task gating downstream work on a test dbt will not run.
+    dead_id, dead_info = _test('pkg', 'not_null_orders_id', ['model.pkg.orders'], test_name='not_null')
+    dead_info['config']['enabled'] = False
+    nodes = dict(
+        [_model('pkg', 'orders'), _model('pkg', 'downstream', depends_on=['model.pkg.orders']), (dead_id, dead_info)]
+    )
+
+    tasks = dbt_factory_bundled.create_tasks({'nodes': nodes})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert 'orders_test' not in by_key, 'a disabled test must not produce a bundled test task'
+    assert by_key['downstream_model']['depends_on'] == [{'task_key': 'orders_model'}]
+
+
 def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):
     # dbt rewrites a unit test on a versioned model to `unit_test.<pkg>.<model>.<name>_v<N>` with
     # depends_on.nodes[0] = model.<pkg>.<model>.v<N>, while leaving `model` as the bare name. The

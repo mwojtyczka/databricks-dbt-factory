@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from databricks_dbt_factory.DbtFactory import DbtFactory
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
 from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
 from databricks_dbt_factory.Utils import read_dbt_manifest
@@ -125,10 +126,17 @@ def _unit_test(
     fqn: list[str] | None = None,
     depends_on: list[str] | None = None,
     path: str | None = None,
+    version: int | None = None,
 ) -> tuple[str, dict]:
-    full_name = f"unit_test.{package}.{model}.{name}"
-    return full_name, {
+    # `version` reproduces dbt's clone of a unit test onto a versioned model: it appends `_v<N>` to the
+    # `unique_id` and sets `version`, but leaves `name`, `fqn` and `original_file_path` untouched.
+    # Verified on dbt 1.12.0 — a hand-written fixture that varies `name` per version encodes a shape dbt
+    # never produces, and would hide the fact that the clones are indistinguishable to any selector.
+    suffix = f"_v{version}" if version is not None else ""
+    full_name = f"unit_test.{package}.{model}.{name}{suffix}"
+    info = {
         'resource_type': 'unit_test',
+        'unique_id': full_name,
         'name': name,
         'model': model,
         'package_name': package,
@@ -137,6 +145,9 @@ def _unit_test(
         'original_file_path': path or f"models/{model}_unit_tests.yml",
         'depends_on': {'nodes': depends_on or [f"model.{package}.{model}"]},
     }
+    if version is not None:
+        info['version'] = version
+    return full_name, info
 
 
 def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(dbt_factory_bundled):
@@ -156,10 +167,10 @@ def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(db
     assert 'pkg_a_customers_test' in by_key
     assert 'pkg_b_customers_test' in by_key
     assert by_key['pkg_a_customers_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg_a.customers,package:pkg_a,file:customers.sql --indirect-selection cautious --target dev'
+        'dbt test --select pkg_a.customers,package:pkg_a,file:customers.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
     assert by_key['pkg_b_customers_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg_b.customers,package:pkg_b,file:customers.sql --indirect-selection cautious --target dev'
+        'dbt test --select pkg_b.customers,package:pkg_b,file:customers.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
     assert by_key['pkg_a_customers_test']['depends_on'] == [{'task_key': 'pkg_a_customers_model'}]
     assert by_key['pkg_b_customers_test']['depends_on'] == [{'task_key': 'pkg_b_customers_model'}]
@@ -202,7 +213,7 @@ def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory_bundled):
 
     assert 'countries_test' in by_key
     assert by_key['countries_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.countries,package:pkg,file:countries.csv --indirect-selection cautious --target dev'
+        'dbt test --select pkg.countries,package:pkg,file:countries.csv,resource_type:seed --indirect-selection cautious --target dev'
     ]
     assert by_key['countries_test']['depends_on'] == [{'task_key': 'countries_seed'}]
     assert by_key['enriched_model']['depends_on'] == [{'task_key': 'countries_test'}]
@@ -222,7 +233,7 @@ def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory_bundled)
 
     assert 'orders_snap_test' in by_key
     assert by_key['orders_snap_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.orders_snap,package:pkg,file:orders_snap.sql --indirect-selection cautious --target dev'
+        'dbt test --select pkg.orders_snap,package:pkg,file:orders_snap.sql,resource_type:snapshot --indirect-selection cautious --target dev'
     ]
     assert by_key['orders_snap_test']['depends_on'] == [{'task_key': 'orders_snap_snapshot'}]
     assert by_key['orders_history_model']['depends_on'] == [{'task_key': 'orders_snap_test'}]
@@ -266,7 +277,7 @@ def test_flat_mode_emits_one_task_per_test_node_and_gates_downstream(dbt_factory
     assert 'customers_test' not in by_key
 
     assert by_key['unique_customers_id_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.unique_customers_id,package:pkg,file:unique_customers_id.yml --target dev'
+        'dbt test --select pkg.unique_customers_id,package:pkg,file:unique_customers_id.yml,resource_type:test --target dev'
     ]
     assert by_key['unique_customers_id_test']['depends_on'] == [{'task_key': 'customers_model'}]
     # orders depends on customers AND every test attached to customers
@@ -416,14 +427,14 @@ def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_fact
     # Single-model test → bundled with cautious selection (relationship test is excluded by dbt)
     assert 'team_cities_test' in by_key
     assert by_key['team_cities_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.team_cities,package:pkg,file:team_cities.sql --indirect-selection cautious --target dev'
+        'dbt test --select pkg.team_cities,package:pkg,file:team_cities.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
 
     # Cross-model test → its own task, gated on BOTH referenced models
     cross_test_key = 'relationships_game_details_winner__team_city__ref_team_cities__test'
     assert cross_test_key in by_key
     assert by_key[cross_test_key]['dbt_task']['commands'] == [
-        'dbt test --select pkg.relationships_game_details_winner__team_city__ref_team_cities_,package:pkg,file:relationships_game_details_winner__team_city__ref_team_cities_.yml --target dev'
+        'dbt test --select pkg.relationships_game_details_winner__team_city__ref_team_cities_,package:pkg,file:relationships_game_details_winner__team_city__ref_team_cities_.yml,resource_type:test --target dev'
     ]
     assert {dep['task_key'] for dep in by_key[cross_test_key]['depends_on']} == {
         'team_cities_model',
@@ -448,7 +459,7 @@ def test_single_package_bundled_test_uses_qualified_select(dbt_factory_bundled):
 
     assert 'customers_test' in by_key
     assert by_key['customers_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg_a.customers,package:pkg_a,file:customers.sql --indirect-selection cautious --target dev'
+        'dbt test --select pkg_a.customers,package:pkg_a,file:customers.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
     assert by_key['orders_model']['depends_on'] == [{'task_key': 'customers_test'}]
 
@@ -468,10 +479,10 @@ def test_duplicate_model_name_across_packages_selects_by_distinct_fqn(dbt_factor
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['pkg_a_customers_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg_a.customers,package:pkg_a,file:customers.sql --target dev'
+        'dbt run --select pkg_a.customers,package:pkg_a,file:customers.sql,resource_type:model --target dev'
     ]
     assert by_key['pkg_b_customers_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg_b.customers,package:pkg_b,file:customers.sql --target dev'
+        'dbt run --select pkg_b.customers,package:pkg_b,file:customers.sql,resource_type:model --target dev'
     ]
 
 
@@ -501,7 +512,7 @@ def test_model_in_subdirectory_selects_by_full_fqn_flat_mode(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['stg_orders_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.staging.stg_orders,package:pkg,file:stg_orders.sql --target dev'
+        'dbt run --select pkg.staging.stg_orders,package:pkg,file:stg_orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -520,7 +531,7 @@ def test_model_in_subdirectory_bundled_test_selects_by_full_fqn(dbt_factory_bund
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['stg_orders_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.staging.stg_orders,package:pkg,file:stg_orders.sql --indirect-selection cautious --target dev'
+        'dbt test --select pkg.staging.stg_orders,package:pkg,file:stg_orders.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
 
 
@@ -540,7 +551,7 @@ def test_flat_mode_unit_test_emits_task_and_gates_downstream(dbt_factory):
 
     unit_test_key = 'unit_test_pkg_orders_test_totals'
     assert by_key[unit_test_key]['dbt_task']['commands'] == [
-        'dbt test --select pkg.staging.orders.test_totals,package:pkg,file:orders_unit_tests.yml --target dev'
+        'dbt test --select pkg.staging.orders.test_totals,package:pkg,file:orders_unit_tests.yml,resource_type:unit_test --target dev'
     ]
     assert by_key[unit_test_key]['depends_on'] == [{'task_key': 'orders_model'}]
     # summary (downstream of orders) gates on the unit test as well as the model
@@ -562,7 +573,7 @@ def test_bundled_mode_model_with_only_unit_test_emits_bundled_task(dbt_factory_b
 
     assert 'orders_test' in by_key
     assert by_key['orders_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.staging.orders,package:pkg,file:orders.sql --indirect-selection cautious --target dev'
+        'dbt test --select pkg.staging.orders,package:pkg,file:orders.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
     assert by_key['orders_test']['depends_on'] == [{'task_key': 'orders_model'}]
     # No standalone unit-test task in bundled mode — the bundled task covers it.
@@ -651,7 +662,7 @@ def test_select_intersects_fqn_package_and_file(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.marts.orders,package:pkg,file:orders.sql --target dev'
+        'dbt run --select pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -670,10 +681,10 @@ def test_select_of_nested_sibling_is_separated_by_its_file(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.marts.orders,package:pkg,file:orders.sql --target dev'
+        'dbt run --select pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
     assert by_key['items_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.marts.orders.items,package:pkg,file:items.sql --target dev'
+        'dbt run --select pkg.marts.orders.items,package:pkg,file:items.sql,resource_type:model --target dev'
     ]
 
 
@@ -692,9 +703,12 @@ def test_select_of_package_node_is_separated_by_its_package(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes})
     commands = {t['task_key']: t['dbt_task']['commands'][0] for t in tasks}
 
-    assert commands['probe_alpha_model'] == 'dbt run --select probe.alpha,package:probe,file:alpha.sql --target dev'
+    assert (
+        commands['probe_alpha_model']
+        == 'dbt run --select probe.alpha,package:probe,file:alpha.sql,resource_type:model --target dev'
+    )
     assert commands['other_alpha_model'] == (
-        'dbt run --select other.probe.alpha,package:other,file:alpha.sql --target dev'
+        'dbt run --select other.probe.alpha,package:other,file:alpha.sql,resource_type:model --target dev'
     )
 
 
@@ -710,7 +724,7 @@ def test_bundled_test_select_uses_the_same_uniform_form(dbt_factory_bundled):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.marts.orders,package:pkg,file:orders.sql --indirect-selection cautious --target dev'
+        'dbt test --select pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
 
 
@@ -736,7 +750,7 @@ def test_unusable_fqn_segment_is_dropped_but_other_terms_remain(dbt_factory, bad
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select orders,package:pkg,file:orders.sql --target dev'
+        'dbt run --select orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -764,7 +778,7 @@ def test_fqn_starting_with_a_numeric_graph_operator_is_dropped(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['2+orders_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.2+orders,package:pkg,file:2+orders.sql --target dev'
+        'dbt run --select pkg.2+orders,package:pkg,file:2+orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -882,7 +896,7 @@ def test_a_usable_name_still_rescues_an_unusable_fqn(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes})
 
     assert [t['dbt_task']['commands'][0] for t in tasks] == [
-        'dbt run --select orders,package:pkg,file:orders.sql --target dev'
+        'dbt run --select orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -895,7 +909,7 @@ def test_graph_operator_inside_a_segment_is_kept(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['+leading_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.+leading,package:pkg,file:+leading.sql --target dev'
+        'dbt run --select pkg.+leading,package:pkg,file:+leading.sql,resource_type:model --target dev'
     ]
 
 
@@ -942,7 +956,7 @@ def test_same_type_tests_in_one_file_get_distinct_selectors(dbt_factory):
 
     assert commands['not_null_a_id_test'] != commands['not_null_b_id_test']
     assert commands['not_null_a_id_test'] == (
-        'dbt test --select not_null_a_id,package:pkg,file:schema.yml,test_name:not_null --target dev'
+        'dbt test --select not_null_a_id,package:pkg,file:schema.yml,resource_type:test,test_name:not_null --target dev'
     )
 
 
@@ -968,26 +982,36 @@ def test_data_test_selector_includes_its_test_name(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['not_null_a_id_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.marts.not_null_a_id,package:pkg,file:schema.yml,test_name:not_null --target dev'
+        'dbt test --select pkg.marts.not_null_a_id,package:pkg,file:schema.yml,resource_type:test,test_name:not_null --target dev'
     ]
 
 
-def test_model_and_singular_test_sharing_an_fqn_both_generate(dbt_factory):
-    # `models/beta.sql` and `tests/beta.sql` parse with the same fqn and base name. Each task carries
-    # its own `dbt run` / `dbt test` verb, and dbt's resource-type filtering keeps them apart, so
-    # both are addressable and neither should be refused.
-    nodes = dict(
-        [
-            _model('pkg', 'beta', fqn=['pkg', 'beta'], path='models/beta.sql'),
-            _test('pkg', 'beta', [], fqn=['pkg', 'beta'], path='tests/beta.sql'),
-        ]
+def test_singular_test_sharing_a_models_fqn_is_refused_only_if_the_model_has_tests(dbt_factory):
+    # `models/beta.sql` and `tests/beta.sql` parse with the same fqn and base name. `resource_type:` is
+    # intersected *after* dbt expands indirect selection, so the test task's selector also reaches the
+    # model — but reaching it is harmless on its own: dbt will not build it, and with no other tests on
+    # the model the selector resolves to exactly the singular test (verified with `dbt ls` on dbt 1.12.0).
+    #
+    # What leaks is the model's *attached* tests, which the singular test's task would then also run,
+    # before the model that owns them has been built. So the same layout is refused only once the model
+    # carries a test of its own.
+    model = _model('pkg', 'beta', fqn=['pkg', 'beta'], path='models/beta.sql')
+    singular = _test('pkg', 'beta', [], fqn=['pkg', 'beta'], path='tests/beta.sql')
+
+    commands = {
+        t['task_key']: t['dbt_task']['commands'][0]
+        for t in dbt_factory.create_tasks({'nodes': dict([model, singular])})
+    }
+    assert (
+        commands['beta_model'] == 'dbt run --select pkg.beta,package:pkg,file:beta.sql,resource_type:model --target dev'
+    )
+    assert (
+        commands['beta_test'] == 'dbt test --select pkg.beta,package:pkg,file:beta.sql,resource_type:test --target dev'
     )
 
-    tasks = dbt_factory.create_tasks({'nodes': nodes})
-    commands = {t['task_key']: t['dbt_task']['commands'][0] for t in tasks}
-
-    assert commands['beta_model'] == 'dbt run --select pkg.beta,package:pkg,file:beta.sql --target dev'
-    assert commands['beta_test'].startswith('dbt test --select pkg.beta,package:pkg,file:beta.sql')
+    attached = _test('pkg', 'not_null_beta_id', ['model.pkg.beta'], path='models/schema.yml', test_name='not_null')
+    with pytest.raises(ValueError, match='also runs test.pkg.not_null_beta_id'):
+        dbt_factory.create_tasks({'nodes': dict([model, singular, attached])})
 
 
 def test_selector_is_shell_quoted_when_a_name_contains_a_quote(dbt_factory):
@@ -1003,7 +1027,7 @@ def test_selector_is_shell_quoted_when_a_name_contains_a_quote(dbt_factory):
         'dbt',
         'run',
         '--select',
-        "pkg.customer's,package:pkg,file:customer's.sql",
+        "pkg.customer's,package:pkg,file:customer's.sql,resource_type:model",
         '--target',
         'dev',
     ]
@@ -1019,7 +1043,7 @@ def test_select_falls_back_to_the_bare_name_when_the_node_has_no_fqn(dbt_factory
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select orders,package:pkg,file:orders.sql --target dev'
+        'dbt run --select orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -1106,16 +1130,18 @@ def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):
             _unit_test(
                 'pkg',
                 'dim',
-                'ut_a_v1',
+                'ut_a',
                 fqn=['pkg', 'models', 'marts', 'dim', 'ut_a'],
                 depends_on=['model.pkg.dim.v1'],
+                version=1,
             ),
             _unit_test(
                 'pkg',
                 'dim',
-                'ut_a_v2',
+                'ut_a',
                 fqn=['pkg', 'models', 'marts', 'dim', 'ut_a'],
                 depends_on=['model.pkg.dim.v2'],
+                version=2,
             ),
         ]
     )
@@ -1123,21 +1149,24 @@ def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes, 'unit_tests': unit_tests})
     by_key = {t['task_key']: t for t in tasks}
 
-    # Each versioned unit test gets its own task, gated on the matching model version.
-    assert by_key['unit_test_pkg_dim_ut_a_v1']['depends_on'] == [{'task_key': 'dim_v1_model'}]
-    assert by_key['unit_test_pkg_dim_ut_a_v2']['depends_on'] == [{'task_key': 'dim_v2_model'}]
-    # Known limitation: dbt clones a versioned unit test's fqn verbatim (it rewrites only
-    # `unique_id`, `depends_on.nodes[0]` and `version` — see the `# fqn?` comment in dbt's
-    # `process_models_for_unit_test`), so both tasks necessarily select the same thing and each
-    # runs both versions' assertions. Emitting the tasks at all is the fix here; isolating them
-    # needs a version-aware selector, which the fqn cannot express.
-    v1_select = by_key['unit_test_pkg_dim_ut_a_v1']['dbt_task']['commands']
-    v2_select = by_key['unit_test_pkg_dim_ut_a_v2']['dbt_task']['commands']
-    assert (
-        v1_select
-        == v2_select
-        == ['dbt test --select pkg.models.marts.dim.ut_a,package:pkg,file:dim_unit_tests.yml --target dev']
-    )
+    # dbt clones a versioned unit test leaving both clones the same fqn, name and file (it rewrites only
+    # `unique_id`, `depends_on.nodes[0]` and `version`), and `version:` is not a unit-test discriminator
+    # at all — on dbt 1.12.0 it accepts only latest/prerelease/old/none, none of which match a unit test.
+    # So the clones cannot be told apart, and an earlier revision emitting one task per clone gave both
+    # the same selector, making each run every version's assertions while claiming to cover one.
+    # One task for the group is what dbt will actually run.
+    unit_test_keys = sorted(key for key in by_key if key.startswith('unit_test_'))
+    assert unit_test_keys == ['unit_test_pkg_dim_ut_a_v1']
+
+    # It waits for every version's model, since the selector runs every version's assertions.
+    assert by_key['unit_test_pkg_dim_ut_a_v1']['depends_on'] == [
+        {'task_key': 'dim_v1_model'},
+        {'task_key': 'dim_v2_model'},
+    ]
+    assert by_key['unit_test_pkg_dim_ut_a_v1']['dbt_task']['commands'] == [
+        'dbt test --select pkg.models.marts.dim.ut_a,package:pkg,file:dim_unit_tests.yml,'
+        'resource_type:unit_test --target dev'
+    ]
 
 
 def test_bundled_mode_unit_test_on_versioned_model_emits_bundled_task(dbt_factory_bundled):
@@ -1181,3 +1210,115 @@ def test_unit_test_target_falls_back_to_model_field_when_depends_on_absent(dbt_f
     by_key = {t['task_key']: t for t in tasks}
 
     assert 'unit_test_pkg_orders_test_totals' in by_key
+
+
+def test_single_segment_fqn_does_not_crash_generation(dbt_factory):
+    # Matching retries with the node's package stripped, which for a one-segment fqn leaves an empty
+    # list. dbt's `is_selected_node` indexes `fqn[-1]`, so the mirror must handle the empty case rather
+    # than raise — otherwise a manifest holding such a node crashes generation instead of building it.
+    nodes = dict([_model('pkg', 'lonely', fqn=['lonely'])])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+
+    assert [t['dbt_task']['commands'][0] for t in tasks] == [
+        'dbt run --select lonely,package:pkg,file:lonely.sql,resource_type:model --target dev'
+    ]
+
+
+def test_versioned_models_sharing_a_bare_name_still_generate(dbt_factory):
+    # A bare `orders` matches *every* version — confirmed with `dbt ls` on dbt 1.12.0, where `orders`
+    # returns both model.probe.orders.v1 and .v2, while `orders.v1` and `orders_v1` return one each
+    # (dbt lets the last two fqn segments match on either delimiter). Each version's own fqn is exact,
+    # so both tasks must still generate; the mirror seeing only one of them would let a genuine
+    # collision through elsewhere.
+    nodes = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'orders', 'v1'], version=1, path='models/orders_v1.sql'),
+            _model('pkg', 'orders', fqn=['pkg', 'orders', 'v2'], version=2, path='models/orders_v2.sql'),
+        ]
+    )
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    commands = {t['task_key']: t['dbt_task']['commands'][0] for t in tasks}
+
+    assert commands == {
+        'orders_v1_model': 'dbt run --select pkg.orders.v1,package:pkg,file:orders_v1.sql,resource_type:model'
+        ' --target dev',
+        'orders_v2_model': 'dbt run --select pkg.orders.v2,package:pkg,file:orders_v2.sql,resource_type:model'
+        ' --target dev',
+    }
+
+
+def test_windows_manifest_path_yields_the_bare_file_name(dbt_factory):
+    # dbt builds `original_file_path` with os.path.join, so a manifest parsed on Windows carries
+    # backslashes while dbt's own FileSelectorMethod compares `Path(original_file_path).name`. Emitting
+    # the whole backslash path would match nothing, so the task would build nothing and still exit 0.
+    nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'marts', 'orders'], path='models\\marts\\orders.sql')])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+
+    assert [t['dbt_task']['commands'][0] for t in tasks] == [
+        'dbt run --select pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+    ]
+
+
+def test_unit_test_group_is_built_from_emittable_clones_only(dbt_factory):
+    # Grouping runs over the clones whose target model is present, so the representative is always one
+    # that can actually be emitted. Grouping over every clone and filtering afterwards could pick a
+    # representative whose model is absent, and dropping it would drop the whole group.
+    #
+    # dbt itself never produces a half-present group — a disabled version yields no clone at all
+    # (verified on dbt 1.12.0: only `..._v2` appears in `unit_tests`, with `model.probe.orders.v1` in
+    # `disabled`) — so this asserts the single-clone shape dbt really emits, and that it is not
+    # mistaken for a group needing to share a task.
+    nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'orders', 'v2'], version=2, path='models/orders_v2.sql')])
+    unit_tests = dict([_unit_test('pkg', 'orders', 'ut_orders', depends_on=['model.pkg.orders.v2'], version=2)])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes, 'unit_tests': unit_tests})
+    by_key = {t['task_key']: t for t in tasks}
+
+    assert sorted(key for key in by_key if key.startswith('unit_test_')) == ['unit_test_pkg_orders_ut_orders_v2']
+    assert by_key['unit_test_pkg_orders_ut_orders_v2']['depends_on'] == [{'task_key': 'orders_v2_model'}]
+
+
+def test_node_passed_as_a_copy_is_not_its_own_collision(dbt_factory):
+    # `_assert_exact` recognises the node by object identity *or* `unique_id`. Identity alone would make
+    # a node passed as a copy count as colliding with itself, refusing a perfectly addressable resource.
+    # Guards the robustness of that check rather than a dbt behaviour.
+    node_id, node = _model('pkg', 'orders')
+    node['unique_id'] = node_id
+    manifest = {'nodes': {node_id: dict(node)}}  # a *copy* under the same id
+
+    tasks = dbt_factory.create_tasks(manifest)
+
+    assert [t['dbt_task']['commands'][0] for t in tasks] == [
+        'dbt run --select pkg.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+    ]
+
+
+# The only test that reaches into internals: it asserts an *optimisation* is equivalent to the
+# unoptimised path, and "scan every peer" has no public surface to express that through.
+# pylint: disable=protected-access
+def test_selector_index_narrowing_matches_a_full_scan(dbt_factory):
+    # `_SelectorIndex` exists only to keep the exactness check off a full manifest scan, which measured
+    # 90s on a 6,000-node manifest. It is a pure optimisation, so every bucket must be a superset of the
+    # true matches: narrowing may cost time but must never change an answer. Asserted over a layout
+    # holding each hazard the buckets are keyed on — a dotted name, a versioned model, a shared
+    # `schema.yml`, and a file whose stem is another file's name (`a.yml` / `a.yml.yml`).
+    peers = dict(
+        [
+            _model('pkg', 'orders', fqn=['pkg', 'orders', 'v1'], version=1, path='models/orders_v1.sql'),
+            _model('pkg', 'orders.items', fqn=['pkg', 'orders.items'], path='models/a.yml.yml'),
+            _model('pkg', 'items', fqn=['pkg', 'orders', 'items'], path='models/a.yml'),
+            _test('pkg', 'chk', ['model.pkg.items'], path='models/schema.yml', test_name='not_null'),
+            _test('pkg', 'chk.nested', ['model.pkg.orders.items'], path='models/schema.yml', test_name='not_null'),
+        ]
+    )
+    index = DbtFactory._selector_index(peers)
+
+    for info in peers.values():
+        select = DbtFactory._node_select(info)
+        for ignore_resource_type in (False, True):
+            scanned = sorted(DbtFactory._matching_ids(select, peers, ignore_resource_type=ignore_resource_type))
+            narrowed = sorted(DbtFactory._matching_ids(select, index, ignore_resource_type=ignore_resource_type))
+            assert narrowed == scanned, f'{select!r} narrowed to {narrowed}, full scan gives {scanned}'

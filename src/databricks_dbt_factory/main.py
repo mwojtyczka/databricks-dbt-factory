@@ -32,10 +32,15 @@ def main():
 
     notebook_path = args.notebook_path
     effective_project_directory = args.project_directory
+    # Computed but *not* written yet: the runner is copied only once generation has succeeded, below.
+    # Writing it here would leave a runner behind for a run that produced no job spec, and would
+    # overwrite a runner the user had edited, since the copy is unconditional.
+    copy_runner = False
     if args.task_type == "notebook" and notebook_path is None:
         notebook_path, notebook_at_project_root = _copy_runner_notebook(
-            args.target_job_spec_path, args.project_directory, write=not args.dry_run
+            args.target_job_spec_path, args.project_directory, write=False
         )
+        copy_runner = not args.dry_run
         # If the runner landed at the project root, CWD at task runtime already equals the
         # project root. Pass `.` explicitly so the generated spec is self-documenting (and
         # immune to any future change in dbt's default); the user's original `../` would
@@ -78,6 +83,8 @@ def main():
     if args.dry_run:
         print(tasks)
     else:
+        if copy_runner:
+            _copy_runner_notebook(args.target_job_spec_path, args.project_directory, write=True)
         replace_tasks_in_job_spec(args.input_job_spec_path, tasks, args.target_job_spec_path, args.new_job_name)
 
 

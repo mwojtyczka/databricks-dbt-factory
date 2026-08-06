@@ -419,3 +419,63 @@ def update_spec(
         task["dbt_task"]["commands"] = updated_commands
 
     return spec
+
+
+def test_failed_generation_writes_no_runner_notebook(monkeypatch, tmp_path):
+    """
+    In default notebook mode the runner used to be copied *before* the manifest was validated, so a
+    failing run exited 1 having written a 4,239-byte `run_dbt_command.py` and produced no job spec. The
+    copy now happens only after generation succeeds.
+    """
+    target_job_spec_path = tmp_path / "job_definition.yaml"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            str(tmp_path / "does_not_exist.json"),
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target_job_spec_path),
+            "--task-type",
+            "notebook",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        main()
+
+    assert not (tmp_path / "run_dbt_command.py").exists(), "a failed run must not leave a runner notebook behind"
+    assert not target_job_spec_path.exists(), "a failed run must not write a job spec"
+
+
+def test_failed_generation_preserves_an_existing_runner_notebook(monkeypatch, tmp_path):
+    """
+    The copy is unconditional, so the pre-validation write also clobbered a runner the user had edited —
+    losing their changes for a run that produced nothing. Deferring the copy preserves it.
+    """
+    target_job_spec_path = tmp_path / "job_definition.yaml"
+    existing_runner = tmp_path / "run_dbt_command.py"
+    existing_runner.write_text("# edited by the user\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            str(tmp_path / "does_not_exist.json"),
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target_job_spec_path),
+            "--task-type",
+            "notebook",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        main()
+
+    assert existing_runner.read_text(encoding="utf-8") == "# edited by the user\n"

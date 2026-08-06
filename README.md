@@ -360,9 +360,14 @@ Each task selects its resource by several facts at once, joined with commas (dbt
 AND), so that exactly one resource matches:
 
 ```
-dbt run  --select my_project.sql_model1.zzz_game_details,package:my_project,file:zzz_game_details.sql
-dbt test --select my_project.models.sql_model1.unique_zzz_game_details_game_id,package:my_project,file:schemas.yml,test_name:unique
+dbt run  --select my_project.sql_model1.zzz_game_details,package:my_project,file:zzz_game_details.sql,resource_type:model
+dbt test --select my_project.models.sql_model1.unique_zzz_game_details_game_id,package:my_project,file:schemas.yml,resource_type:test,test_name:unique
 ```
+
+Each selector is then checked against the manifest, because an FQN is a *prefix* over dbt's flattened
+FQN rather than an identifier: a test named `check.nested` is also matched by its sibling `check`'s
+selector. Where a collision cannot be broken by any term dbt offers, generation fails rather than
+emitting a task that would run its neighbour's resource.
 
 Sources use dbt's own form for them, `source:<package>.<source>.<table>`.
 
@@ -372,14 +377,21 @@ rather than moving to the manifest's `disabled` section.
 #### When generation fails
 
 A name that dbt would not read literally cannot be used to select a resource. That means a name
-containing a space, comma, colon or one of `*?[]`, or one that starts or ends with something dbt reads
+containing a space, comma, colon, slash, brace or one of `*?[]`; one that ends in `.sql`, `.py` or
+`.csv` (which makes dbt match it as a *file name*); or one that starts or ends with something dbt reads
 as a graph operator — a trailing `+2`, or a leading `2+`, which means "two levels of parents". Sources
-additionally cannot contain a `.`, since dbt's `source:` form uses it as its own separator.
+additionally cannot contain a `.`, since dbt's `source:` form uses it as its own separator. Braces are
+excluded for a non-dbt reason: Databricks substitutes `{{...}}` in a task's commands as plain text
+before the task runs, so a selector containing one resolves locally and matches nothing in the job.
 
-Generation fails, naming the resource and asking you to rename it, when nothing usable is left to
-single that resource out. The remaining facts — its package, its file, a test's type — each match a
-*group*, so a task built from those alone could run another task's resource. The CLI exits 1 with the
-message and writes no output file, so a partly-generated spec can never be deployed:
+Generation also fails when a selector is valid but not *exact* — when two resources cannot be told
+apart by any term dbt has. Two generic tests may share an FQN outright (dbt allows duplicate test
+names), a dotted test name may flatten onto a sibling's FQN, or a singular test may share its model's
+name. In each case the task would run the other resource too, before that resource's own dependencies
+had completed.
+
+Either way the CLI exits 1 naming the resource and the remedy, and writes no output file, so a
+partly-generated spec can never be deployed:
 
 ```
 $ databricks_dbt_factory --dbt-manifest-path target/manifest.json ...
@@ -403,8 +415,9 @@ blocking anything.
 
 Unit tests get one task each, gated on the model under test. They have no severity and always fail
 the run when they fail, so they gate downstream models like error-severity data tests. On a
-*versioned* model, note that dbt gives every version's copy of a unit test the same FQN, so each
-version's task runs all of that test's versions.
+*versioned* model, dbt clones the unit test per version but gives every clone the same FQN, name and
+file, and no dbt selector can tell them apart — so the clones share **one** task, which depends on
+every version's model and runs every version's assertions.
 
 - **Pros:** per-test failures are individually visible in the Databricks UI; downstream
   execution halts on error-severity test failure just like `dbt build`; cross-model tests wait

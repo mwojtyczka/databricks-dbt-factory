@@ -134,7 +134,7 @@ def _unit_test(
     # never produces, and would hide the fact that the clones are indistinguishable to any selector.
     suffix = f"_v{version}" if version is not None else ""
     full_name = f"unit_test.{package}.{model}.{name}{suffix}"
-    info = {
+    info: dict = {
         'resource_type': 'unit_test',
         'unique_id': full_name,
         'name': name,

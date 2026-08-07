@@ -41,17 +41,16 @@ rounds of per-case branching each shipped a new blind spot. If you find yourself
 a newly-discovered layout, prefer strengthening the uniform rule.
 
 **And a harder lesson: a rule that keeps needing repair is the wrong rule, however uniform.** dbt has
-no `unique_id:` selector, so every selector is a predicate whose exactness must be established. An
-earlier revision established it for `package:`+`file:` by counting the resources per file — which meant
-encoding that dbt's `file:` matches a base name rather than a path, that `package:` scopes it, which
-manifest sections `file:` reaches, that sources count because `--indirect-selection` defaults to eager,
-and that `analysis`/`operation` entries do not count at all. Three review rounds each found a fresh
-defect in that bookkeeping, and all of it existed to support file names containing a graph operator.
+no `unique_id:` selector, so every selector is a predicate whose exactness must be established. The rule
+is "the fqn or the name must survive, or refuse" — deliberately stricter than dbt, because establishing
+exactness from `package:`+`file:` instead means modelling dbt's whole matching semantics (which sections
+`file:` reaches, that it matches a base name rather than a path, that sources count because
+`--indirect-selection` defaults to eager), and every such model has needed repair.
 
-It was replaced by "the fqn or the name must survive, or refuse." Before adding machinery that models
-dbt's matching semantics, ask which project shapes it actually buys and whether refusing them is
-cheaper. Prefer a guarantee that holds per node over one that depends on the rest of the project, and
-accept being stricter than dbt when the alternative cannot be verified by reading it.
+Before adding machinery that models dbt's matching semantics, ask which project shapes it actually buys
+and whether refusing them is cheaper. Prefer a guarantee that holds per node over one that depends on the
+rest of the project, and accept being stricter than dbt when the alternative cannot be verified by
+reading it.
 
 **Fail rather than silently weaken a guarantee.** When a property cannot be established — a selector that
 may not be exact, a test gate that cannot be added without creating a cycle — raise, naming the resource
@@ -96,3 +95,19 @@ The golden job definitions under `tests/test_data/` are generated output, never 
 change alters them, regenerate each one by running the CLI with the same options as the test that
 consumes it (see `tests/conftest.py` and `run_job_spec_test`), then confirm the diff contains only
 what you intended. Hand-editing a golden to match new output hides whatever else moved.
+
+## Document the current state, not the history
+
+Docstrings, comments, README and this file describe how the code behaves **now**. Git history records
+what changed and why, so "an earlier revision did X", "three rounds of review found Y", or a narration
+of approaches already discarded does not belong in them — it grows with every fix, goes stale silently,
+and buries the rule a reader came for.
+
+Keep the *constraint* when it stops someone reintroducing a bug, but state it as a rule rather than as a
+story: "read the version from the manifest's `version` field; the id's last segment cannot be told from a
+model name" rather than "an earlier revision compared ids by substring, which broke on `vendors`". One
+clause on the failure mode is usually enough; a test name is a better pointer than a paragraph.
+
+The same applies to error messages: state what the code established and no more. Explaining *why* a
+project is shaped the way it is means inferring something the check never verified, and that inference
+is what turns out to be wrong.

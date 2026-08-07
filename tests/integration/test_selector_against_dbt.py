@@ -1493,17 +1493,13 @@ def test_cross_referencing_versioned_models_are_refused(tmp_path):
     """
     Two versioned models whose later versions reference each other's earlier version.
 
-    This is the version-sibling exemption's *own* case, and it is unsound there too: each model's shared
-    unit-test task waits for both of its versions, so the two gates together close a loop —
-    `alpha_v2_model -> unit_test...beta_v1 -> beta_v2_model -> unit_test...alpha_v1 -> alpha_v2_model`,
-    verified on dbt 1.12.0.
+    Each model's shared unit-test task waits for both of its versions, so the two gates together close a
+    loop — `alpha_v2_model -> unit_test...beta_v1 -> beta_v2_model -> unit_test...alpha_v1 ->
+    alpha_v2_model`, verified on dbt 1.12.0.
 
-    Acyclicity alone can be restored by *dropping* one of the two edges, and an earlier revision did
-    exactly that. But the drop was silent and the gate it removed was real: `beta_v2_model` ended up with
-    no unit-test gate at all, so a failing `ut_beta` assertion no longer blocked it. Generation now
-    refuses instead, the same way `_ambiguous` refuses a selector it cannot prove exact — the project is
-    unrepresentable rather than nearly representable, and a silently ungated model is the one outcome
-    worth failing the build over.
+    Dropping one of the two edges also restores acyclicity, and must not be the answer: the dropped gate is
+    real, so `beta_v2_model` would build with a failing `ut_beta` assertion and nothing said so. Generation
+    refuses instead, as `_ambiguous` does for a selector it cannot prove exact.
     """
     manifest = _cross_referencing_versioned_project(tmp_path)
 
@@ -1515,10 +1511,9 @@ def test_the_refusal_does_not_depend_on_model_naming(tmp_path):
     """
     The same layout with the models renamed so their alphabetical order flips.
 
-    Candidates were considered in sorted order and the first one won, so *which* model lost its gate
-    depended on nothing but its name: renaming `alpha` to `zeta` moved the unguarded model from
-    `beta_v2` to `zeta_v2`. A cosmetic rename silently relocating a missing data-quality gate is why this
-    is refused rather than resolved by dropping an edge — the refusal is symmetric where the drop was not.
+    Candidates are considered in sorted order, so resolving this by dropping an edge would let a model's
+    *name* decide which one goes ungated: renaming `alpha` to `zeta` moves the loss from `beta_v2` to
+    `zeta_v2`. The refusal is symmetric, and both spellings must produce it.
     """
     manifest = _cross_referencing_versioned_project(tmp_path, first='zeta', second='beta')
 
@@ -1551,16 +1546,10 @@ def test_a_cross_model_data_test_is_not_treated_as_a_version_group_test(tmp_path
     A `relationships` test spanning a versioned model and a plain one must not reach the version-sibling
     exemption, which exists only for *"a test shared by the versions of a single model."*
 
-    The guard checked that the test's **unsatisfied** refs were version siblings of an ancestor, but never
-    that its refs were *confined* to one version group. So this layout — one versioned model plus an
-    ordinary cross-model data test — became a candidate and was then refused, with a message asserting
-    three things that are all false here: that the test covers every version of its model, that two
-    versioned models cross-reference each other's earlier versions, and that a *unit* test is involved.
-
-    Before the refusal existed this layout silently dropped the gate, so turning it into a hard build
-    failure was a behaviour change on a shape that is not the exemption's target at all. It now falls
-    through to the plain subset rule, which drops the edge exactly as it did before — verified on dbt
-    1.12.0. `test_cross_referencing_versioned_models_are_refused` covers the shape that *should* refuse.
+    Checking only that the test's *unsatisfied* refs are version siblings admits it, since one endpoint is a
+    versioned model — and then generation refuses a project that is not the exemption's target at all. It
+    must fall through to the plain subset rule, which drops the edge; verified on dbt 1.12.0.
+    `test_cross_referencing_versioned_models_are_refused` covers the shape that *should* refuse.
     """
     _write_project(
         tmp_path,
@@ -1627,20 +1616,17 @@ def _single_version_group_data_test_project(tmp_path) -> dict:
     ],
     ids=['unit-test-group', 'data-test-group'],
 )
-def test_the_refusal_describes_only_what_it_actually_found(tmp_path, project, ungated_task):
+def test_the_refusal_claims_no_more_than_it_established(tmp_path, project, ungated_task):
     """
-    The refusal message is the whole of what a CLI user sees, so it must not assert a cause it has not
-    established.
+    The refusal identifies the two tasks and stops. The check establishes exactly one fact — adding this
+    edge closes a loop — so anything past that is inference, and both fixtures here are counterexamples to
+    the obvious guesses.
 
-    An earlier revision hard-coded one explanation — "two versioned models' later versions reference each
-    other's earlier version", and "a *unit* test covering it had failed". Both are true for the
-    `unit-test-group` case and false for `data-test-group`, which has a single versioned model and no unit
-    test at all (`manifest['unit_tests']` is empty). A reader was sent hunting for a cross-referencing pair
-    that did not exist. The message now describes the edge it refused — the task, the test, and the cycle —
-    and leaves the cause to the project.
-
-    Both layouts refuse legitimately: in each, the test waits transitively for the task being gated, so the
-    edge would close a loop. Verified on dbt 1.12.0.
+    `data-test-group` contains no unit test at all, so naming one misdirects the reader; neither fixture is
+    a pair of models referencing *each other*; and in `unit-test-group` the test does not depend on the
+    gated task in the dbt project — `ut_alpha` refs only `alpha.v1`, and the reachability comes from a
+    sibling gate added moments earlier, so telling the reader to remove that dependency points at nothing.
+    Each phrase is pinned so it cannot come back.
     """
     manifest = project(tmp_path)
 
@@ -1650,9 +1636,7 @@ def test_the_refusal_describes_only_what_it_actually_found(tmp_path, project, un
     message = str(raised.value)
     assert ungated_task in message, f'the message does not name the task it refused to gate: {message}'
     assert '--bundle-tests' in message, f'the message must name a working remedy: {message}'
-    # Claims the message is in no position to make. `unit test` is the specific regression: the
-    # data-test project contains none, so naming one misdirects the reader outright.
-    for unfounded in ('unit test', 'each other'):
+    for unfounded in ('unit test', 'each other', 'already waits for'):
         assert unfounded not in message, f'message asserts {unfounded!r}, which it has not established: {message}'
 
 
@@ -1661,13 +1645,10 @@ def test_a_single_version_group_data_test_that_cycles_is_refused(tmp_path):
     A data test confined to one version group reaches the version-sibling exemption too.
 
     `_covers_one_version_group` admits any test whose refs are all versions of one model, which is right —
-    such a test does gate a downstream node, and the benign case (no cycle) correctly gains that gate. But
-    it means the exemption is not unit-test-only, so the refusal has to be worded for both.
-
-    Before the refusal existed this layout silently dropped the gate and generated. Failing is the better
-    outcome — the gate is real — but it is a behaviour change on a project that is not a cross-referencing
-    versioned pair, which is why the README describes the refusal by its condition rather than by that one
-    layout.
+    such a test does gate a node downstream of those versions, and the benign case correctly gains that
+    gate. So the exemption is not unit-test-only, and this layout refuses for the same reason a shared unit
+    test does. The README describes the refusal by its condition rather than by a single layout because of
+    this second shape.
     """
     manifest = _single_version_group_data_test_project(tmp_path)
 

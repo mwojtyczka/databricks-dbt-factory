@@ -856,32 +856,19 @@ class DbtFactory:
         emitted graph acyclic: it forces every gate edge to respect the dbt graph's own topological order,
         so no combination of edges can close a loop.
 
-        The one exception is a test shared by the *versions* of a single model. `_unit_test_groups` gives a
+        The one exception is a test covering the *versions* of a single model: `_unit_test_groups` gives a
         versioned model's cloned unit test one task depending on every version, so its refs are
         `{orders.v1, orders.v2}` while a `consumer` referencing only v1 has just `{orders.v1}` among its
-        ancestors. The plain subset test therefore dropped the edge and a failing v1 assertion stopped
-        blocking `consumer`, contrary to the documented gating behaviour. Such an edge is returned as a
-        *candidate* rather than added here: no local predicate can establish it is safe.
+        ancestors. The subset rule alone drops that edge, leaving `consumer` ungated against a failing v1
+        assertion. It is confined to tests whose refs lie entirely in one version group — see
+        `_covers_one_version_group`; anything else, including a cross-model `relationships` test that happens
+        to reference a versioned model, falls through to the subset rule.
 
-        The exemption applies only when the test's refs lie entirely within one version group, which is what
-        "shared by the versions of a single model" means — see `_covers_one_version_group`. Any other test,
-        including an ordinary cross-model `relationships` test that happens to reference a versioned model,
-        falls through to the plain subset rule above.
-
-        That is the lesson worth recording. Testing the cycle condition locally — "no ref of `T` is `N` or
-        has `N` as an ancestor" — is sound for one edge in isolation but not for a set of them:
-        `gating.ancestors` describes the *dbt* graph, while the edges added here are *task* edges, so once
-        several gates exist the reachability it consults no longer matches the graph being built. Two
-        interlocking `relationships` tests are enough to close a loop, and so are two versioned models
-        whose later versions reference each other's earlier one. Both were verified on dbt 1.12.0 and are
-        pinned by `test_interlocking_cross_model_tests_do_not_create_a_cycle`,
-        `test_interlocking_tests_on_v_prefixed_models_do_not_create_a_cycle` and
-        `test_cross_referencing_versioned_models_do_not_create_a_cycle`.
-
-        So the split is by what can actually be proven: edges satisfying the subset rule are returned as
-        deps outright, because that rule makes every one of them respect the dbt graph's topological order
-        no matter how many are added. Everything else is a candidate that `_add_safe_gate_candidates`
-        admits only if it does not close a loop in the *real, assembled* task graph.
+        Such an edge is returned as a *candidate*, because no local predicate can establish it is safe.
+        Testing the cycle condition here — "no ref of `T` is `N` or has `N` as an ancestor" — is sound for
+        one edge and unsound for a set of them: `gating.ancestors` describes the *dbt* graph while these are
+        *task* edges, so once several gates exist the reachability it consults no longer matches the graph
+        being built. `_add_safe_gate_candidates` settles them against the real, assembled graph instead.
 
         Returns:
             (deps, candidates): the node's dependency list, and the gating test keys whose safety must be
@@ -947,12 +934,10 @@ class DbtFactory:
         This is the precondition for the version-sibling exemption, which applies to a test covering the
         versions of one model. `_unit_test_groups` is the usual source of that shape, but not the only one —
         a `relationships` test from `alpha.v1` to `alpha.v2` qualifies too, and correctly so: it does gate a
-        node downstream of those versions. So the check is about the *refs*, not about the kind of test, and
-        `_ungateable` is worded to match.
+        node downstream of those versions. So the test is about the *refs*, not about the kind of test.
 
-        Checking only that the *unsatisfied* refs were version siblings was too loose: an ordinary
-        cross-model test with refs `{alpha.v2, xm}` became a candidate, when it belongs to the plain subset
-        rule that handled it before the exemption existed.
+        All of them, not just the ones an ancestor does not already cover: a cross-model test with refs
+        `{alpha.v2, xm}` is not shared across versions and belongs to the plain subset rule.
         """
         groups = {version_groups.get(ref) for ref in test_refs}
         return len(groups) == 1 and None not in groups
@@ -965,11 +950,10 @@ class DbtFactory:
         Used only to keep a shared unit-test task gating a node that references one version of the model it
         covers; every other ref must be an ancestor outright.
 
-        Both sides must be versions of the *same* model, decided by `_version_group`. An earlier revision
-        compared ids by substring — `'.v' in ref` plus `startswith(f'{stem}.v')` — which made
-        `model.pkg.vendors` a "version sibling" of `model.pkg.visits`, since `'.v'` matches inside
-        `.vendors`. That handed the exemption to ordinary non-versioned models whose names merely begin
-        with `v`, reopening the cycle the subset rule prevents.
+        Both sides must be versions of the *same* model, decided by `_version_group` — which reads the
+        manifest's `version` field, so a model merely *named* `vendors` is not taken for a version of
+        `visits`. Comparing the ids by substring cannot make that distinction and grants the exemption to
+        ordinary models, reopening the cycle the subset rule prevents.
         """
         group = version_groups.get(ref)
         if group is None:
@@ -1034,23 +1018,20 @@ class DbtFactory:
         the resources and the remedy. `--bundle-tests` is offered because it gates on a per-resource test
         task and so never builds this edge — but the message only claims it *generates*, not that the gate
         survives: for a shared unit test bundling keeps an equivalent gate, while a multi-endpoint data test
-        becomes a standalone task that gates nothing under `--indirect-selection cautious`. Both were
-        checked on dbt 1.12.0.
+        becomes a standalone task that gates nothing under `--indirect-selection cautious`. Both verified on
+        dbt 1.12.0.
 
-        It describes the *edge it refused* and nothing more. Two earlier revisions hard-coded a cause —
-        "two versioned models' later versions reference each other's earlier version", and a failing "unit
-        test" — which held for the layout that prompted the message and was false for the next one found: a
-        `relationships` data test confined to one version group refuses identically in a project containing
-        no unit tests at all. The condition here is a graph property, so anything beyond it is a guess; the
-        project shapes that produce it are documented in the README instead.
+        It names the two task keys and stops: the caller establishes one fact — adding this edge closes a
+        loop — so explaining *why* the project is shaped that way would assert what the check never verified.
+        The reachability can come from a sibling gate added moments earlier, which is no dependency the
+        reader could find in their own refs. The README documents the shapes that cause it.
         """
         return ValueError(
-            f'Cannot generate a gate for {task_key!r} on {test_key!r}: {test_key!r} already waits for '
-            f'{task_key!r} (directly or through its dependencies), so making {task_key!r} wait for it in '
-            f'turn would deadlock the job. Run with --bundle-tests, which gates on a per-resource test '
-            f'task and does not create this edge, or change the models so the test does not depend on '
-            f'{task_key!r}. Emitting the task without the gate would let {task_key!r} build even though a '
-            f'test covering it had failed.'
+            f'Cannot generate a gate for {task_key!r} on {test_key!r}: the two are mutually dependent once '
+            f'that gate is added, and Databricks rejects a cyclic depends_on at deploy. Run with '
+            f'--bundle-tests, which gates on a per-resource test task and does not form this edge. '
+            f'Emitting the task without the gate would let {task_key!r} build even though a test covering '
+            f'it had failed. See "Handling dbt tests" in the README for the project shapes that cause this.'
         )
 
     def _classify_tests(

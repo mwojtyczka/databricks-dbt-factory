@@ -59,13 +59,11 @@ def render_job_spec(
         except yaml.YAMLError as error:
             raise ValueError(f"Could not parse {input_job_spec_path} as YAML: {error}") from error
 
-    # *Every* level this function dereferences is checked, in one place, before any of it is used. The
-    # code below calls `.get`/`.pop`, indexes by key, and assigns into the job, so a non-mapping at any
-    # level used to raise `AttributeError`/`TypeError` — and those escape `main`'s
-    # `except (ValueError, FileNotFoundError)`, printing a traceback for a malformed *input file*, the
-    # very outcome this guard exists to prevent. Earlier revisions added one level at a time (top-level,
-    # then `resources`/`jobs`, then the job itself), each time leaving the next level exposed, so the
-    # whole chain is validated together rather than incrementally.
+    # *Every* level this function dereferences is checked here, before any of it is used — validating one
+    # level at a time just leaves the next one exposed. The code below calls `.get`/`.pop`, indexes by key
+    # and assigns into the job, so a non-mapping anywhere raises `AttributeError`/`TypeError`, which escapes
+    # `main`'s `except (ValueError, FileNotFoundError)` and prints a traceback for a malformed *input file*
+    # — the outcome this guard exists to prevent.
     resources = job_definition.get('resources') if isinstance(job_definition, dict) else None
     jobs = resources.get('jobs') if isinstance(resources, dict) else None
     if not isinstance(jobs, dict) or not jobs:

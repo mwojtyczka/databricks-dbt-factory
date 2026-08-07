@@ -1386,6 +1386,31 @@ def test_gate_candidate_for_an_absent_task_is_skipped():
     assert [(t.task_key, t.depends_on) for t in result] == [('a_model', ['b_test']), ('b_test', [])]
 
 
+@pytest.mark.parametrize(
+    'refs, expected',
+    [
+        (['model.pkg.orders.v1', 'model.pkg.orders.v2'], True),
+        (['model.pkg.orders.v2'], True),
+        # A cross-model data test: one endpoint is versioned, the other is not. Admitting these is what
+        # made the refusal cite a versioned pair for a project that had none.
+        (['model.pkg.orders.v1', 'model.pkg.consumer'], False),
+        # Two *different* models' versions — still not "the versions of a single model".
+        (['model.pkg.orders.v1', 'model.pkg.beta.v1'], False),
+        (['model.pkg.consumer'], False),
+        ([], False),
+    ],
+    ids=['two-versions', 'one-version', 'versioned-plus-plain', 'two-models', 'plain-only', 'empty'],
+)
+def test_covers_one_version_group_admits_only_a_single_models_versions(refs, expected):
+    version_groups = {
+        'model.pkg.orders.v1': 'pkg.orders',
+        'model.pkg.orders.v2': 'pkg.orders',
+        'model.pkg.beta.v1': 'pkg.beta',
+    }
+
+    assert DbtFactory._covers_one_version_group(frozenset(refs), version_groups) is expected
+
+
 def test_a_gate_candidate_that_would_close_a_loop_is_refused():
     # The structural check in isolation: `b_test` already depends on `a_model`, so gating `a_model` on
     # `b_test` would cycle. Refused rather than dropped — dropping is silent and loses a real quality

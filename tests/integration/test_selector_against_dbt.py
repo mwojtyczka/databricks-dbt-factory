@@ -1546,6 +1546,71 @@ def test_bundling_handles_the_cross_referencing_versioned_layout(tmp_path):
         )
 
 
+def test_a_cross_model_data_test_is_not_treated_as_a_version_group_test(tmp_path):
+    """
+    A `relationships` test spanning a versioned model and a plain one must not reach the version-sibling
+    exemption, which exists only for *"a test shared by the versions of a single model."*
+
+    The guard checked that the test's **unsatisfied** refs were version siblings of an ancestor, but never
+    that its refs were *confined* to one version group. So this layout — one versioned model plus an
+    ordinary cross-model data test — became a candidate and was then refused, with a message asserting
+    three things that are all false here: that the test covers every version of its model, that two
+    versioned models cross-reference each other's earlier versions, and that a *unit* test is involved.
+
+    Before the refusal existed this layout silently dropped the gate, so turning it into a hard build
+    failure was a behaviour change on a shape that is not the exemption's target at all. It now falls
+    through to the plain subset rule, which drops the edge exactly as it did before — verified on dbt
+    1.12.0. `test_cross_referencing_versioned_models_are_refused` covers the shape that *should* refuse.
+    """
+    _write_project(
+        tmp_path,
+        {
+            'alpha_v1.sql': MODEL_SQL,
+            'alpha_v2.sql': "select * from {{ ref('nn') }}\n",
+            'xm.sql': "select * from {{ ref('alpha', v=1) }}\n",
+            'nn.sql': "select * from {{ ref('xm') }}\n",
+        },
+        schema_yml=(
+            'models:\n'
+            '  - name: alpha\n    latest_version: 2\n    columns:\n      - name: id\n'
+            '    versions:\n      - v: 1\n      - v: 2\n'
+            '  - name: xm\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - relationships:\n              to: ref(\'alpha\', v=2)\n              field: id\n'
+            '  - name: nn\n    columns:\n      - name: id\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    # Generation must succeed: this is not the layout the refusal is for.
+    graph = _assert_acyclic(manifest, bundle_tests=False)
+
+    # And the edge is simply absent, as the subset rule always left it — `nn` is not downstream of
+    # `alpha.v2`, so the test cannot gate it either way.
+    assert not any(
+        'relationships' in dep for dep in graph['nn_model']
+    ), f'nn_model deps {sorted(graph["nn_model"])} include a cross-model test it is not downstream of'
+
+
+def test_the_refusal_names_the_cause_it_actually_found(tmp_path):
+    """
+    The refusal message is the whole of what a CLI user sees, so its diagnosis has to be true.
+
+    Asserting only the `Cannot generate a gate` prefix let the message claim a cross-referencing
+    versioned pair and a failing *unit* test for a layout that had neither, sending the reader looking
+    for a pair that does not exist. This pins the specifics for the layout that does refuse.
+    """
+    manifest = _cross_referencing_versioned_project(tmp_path)
+
+    with pytest.raises(ValueError) as raised:
+        create_dbt_factory(bundle_tests=False).create_tasks(manifest)
+
+    message = str(raised.value)
+    assert 'unit test' in message, f'the refusing test here is a unit test, but the message omits it: {message}'
+    assert '--bundle-tests' in message, f'the message must name a working remedy: {message}'
+    # Both endpoints of the refused edge, so the reader can find them without guessing.
+    assert 'beta_v2_model' in message and 'ut_alpha' in message, f'message names neither endpoint: {message}'
+
+
 def test_a_v_named_model_does_not_pick_up_an_unrelated_models_test(tmp_path):
     """
     The other half of the version-sibling substring bug, and the half acyclicity cannot see.

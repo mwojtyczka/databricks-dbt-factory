@@ -863,6 +863,11 @@ class DbtFactory:
         blocking `consumer`, contrary to the documented gating behaviour. Such an edge is returned as a
         *candidate* rather than added here: no local predicate can establish it is safe.
 
+        The exemption applies only when the test's refs lie entirely within one version group, which is what
+        "shared by the versions of a single model" means — see `_covers_one_version_group`. Any other test,
+        including an ordinary cross-model `relationships` test that happens to reference a versioned model,
+        falls through to the plain subset rule above.
+
         That is the lesson worth recording. Testing the cycle condition locally — "no ref of `T` is `N` or
         has `N` as an ancestor" — is sound for one edge in isolation but not for a set of them:
         `gating.ancestors` describes the *dbt* graph, while the edges added here are *task* edges, so once
@@ -899,6 +904,8 @@ class DbtFactory:
                     deps.append(test_key)
                     seen.add(test_key)
                     continue
+                if not cls._covers_one_version_group(test_refs, gating.version_groups):
+                    continue
                 if not all(
                     cls._version_sibling_of_any(ref, node_ancestors, gating.version_groups) for ref in unsatisfied
                 ):
@@ -931,6 +938,21 @@ class DbtFactory:
                 continue
             groups[full_name] = f"{info.get('package_name')}.{info.get('name')}"
         return groups
+
+    @staticmethod
+    def _covers_one_version_group(test_refs: frozenset[str], version_groups: dict[str, str]) -> bool:
+        """
+        Whether every resource `test_refs` names is a version of the *same* model.
+
+        This is the precondition for the version-sibling exemption, which exists only for a test shared by
+        the versions of one model — the shape `_unit_test_groups` produces. Checking only that the
+        *unsatisfied* refs were version siblings let an ordinary cross-model `relationships` test in: with
+        refs `{alpha.v2, xm}` it became a candidate and was then refused, citing a cross-referencing
+        versioned pair and a failing unit test for a layout that had neither. Such a test now falls
+        through to the plain subset rule, which is what handled it before the exemption existed.
+        """
+        groups = {version_groups.get(ref) for ref in test_refs}
+        return len(groups) == 1 and None not in groups
 
     @staticmethod
     def _version_sibling_of_any(ref: str, ancestors: set[str], version_groups: dict[str, str]) -> bool:
@@ -1009,6 +1031,11 @@ class DbtFactory:
         the resources and the remedy. It names `--bundle-tests` because that mode genuinely represents the
         layout: it gates on a per-resource test task rather than on a unit-test task shared across a
         model's versions, so no such edge arises.
+
+        The stated cause is reachable only because `_covers_one_version_group` confines candidates to tests
+        shared across one model's versions. An earlier revision let a cross-model `relationships` test
+        reach here, and the message then named a cross-referencing versioned pair the project did not have.
+        Keep the two in step: widening what becomes a candidate means widening this wording too.
         """
         return ValueError(
             f'Cannot generate a gate for {task_key!r} on {test_key!r}: the test covers every version of '

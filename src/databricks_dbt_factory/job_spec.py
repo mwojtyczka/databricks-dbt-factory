@@ -47,10 +47,11 @@ def render_job_spec(
         new_job_name (str, optional): The name of the job to update. Defaults to None.
 
     Raises:
-        ValueError: If the file is not valid YAML, or contains no jobs. A `ValueError` rather than a
-            `KeyError` so `main` can report it as a user-fixable problem without also catching the bare
-            `KeyError`s that an unexpected manifest shape raises from the factory — those are bugs, and
-            swallowing them turns a diagnosable traceback into `error: 'resource_type'`.
+        ValueError: If the file is not valid YAML, contains no jobs, or holds a non-mapping at any level
+            of `resources.jobs.<job>`. A `ValueError` rather than a `KeyError` so `main` can report it as
+            a user-fixable problem without also catching the bare `KeyError`s that an unexpected manifest
+            shape raises from the factory — those are bugs, and swallowing them turns a diagnosable
+            traceback into `error: 'resource_type'`.
     """
     with open(input_job_spec_path, 'r', encoding="utf-8") as file:
         try:
@@ -58,10 +59,13 @@ def render_job_spec(
         except yaml.YAMLError as error:
             raise ValueError(f"Could not parse {input_job_spec_path} as YAML: {error}") from error
 
-    # Every level is type-checked, not just the top one: the code below calls `.get`/`.pop` and indexes
-    # by key, so a `resources` or `jobs` holding a *list* raised `AttributeError`/`TypeError` instead.
-    # Those escape `main`'s `except (ValueError, FileNotFoundError)`, so a malformed input file printed a
-    # traceback — the very outcome this guard exists to prevent.
+    # *Every* level this function dereferences is checked, in one place, before any of it is used. The
+    # code below calls `.get`/`.pop`, indexes by key, and assigns into the job, so a non-mapping at any
+    # level used to raise `AttributeError`/`TypeError` — and those escape `main`'s
+    # `except (ValueError, FileNotFoundError)`, printing a traceback for a malformed *input file*, the
+    # very outcome this guard exists to prevent. Earlier revisions added one level at a time (top-level,
+    # then `resources`/`jobs`, then the job itself), each time leaving the next level exposed, so the
+    # whole chain is validated together rather than incrementally.
     resources = job_definition.get('resources') if isinstance(job_definition, dict) else None
     jobs = resources.get('jobs') if isinstance(resources, dict) else None
     if not isinstance(jobs, dict) or not jobs:
@@ -69,6 +73,9 @@ def render_job_spec(
 
     # replaces the first job only!
     first_job_key = next(iter(jobs))
+    if not isinstance(jobs[first_job_key], dict):
+        raise ValueError(f"Job {first_job_key!r} in {input_job_spec_path} is not a mapping, so it has no tasks.")
+
     if new_job_name:
         jobs[new_job_name] = jobs.pop(first_job_key)
         first_job_key = new_job_name

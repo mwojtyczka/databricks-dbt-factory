@@ -53,16 +53,15 @@ dbt's matching semantics, ask which project shapes it actually buys and whether 
 cheaper. Prefer a guarantee that holds per node over one that depends on the rest of the project, and
 accept being stricter than dbt when the alternative cannot be verified by reading it.
 
-The same shape recurred in the *gating* rule, and the same answer worked. Test-gate edges must not close
-a cycle in the emitted job, and acyclicity was enforced by a local predicate over `ancestors_by_node` (a
-subset rule, then a per-edge cycle test, then a version-sibling exemption). Each was sound for one edge
-and wrong for a *set* of them, because `ancestors_by_node` describes the dbt graph while the edges added
-are task edges — three rounds, three fresh cycles, most recently one where a model merely *named*
-`vendors` was mistaken for a version of `visits`. It is now checked structurally, against the assembled
-task graph, so the property asserted is the property that matters. When a rule is a proxy for a global
-property, verify the property on the real artifact instead of hardening the proxy — and read facts like
-"is this model versioned?" from the manifest field (`version`) rather than parsing them back out of an
-id, whose spelling is ambiguous (`model.pkg.orders.v1.1` vs `model.pkg.vendors`).
+**Fail rather than silently weaken a guarantee.** When a property cannot be established — a selector that
+may not be exact, a test gate that cannot be added without creating a cycle — raise, naming the resource
+and a remedy. Do not emit the task with the guarantee quietly dropped: the failure then surfaces as wrong
+data or an ungated model at run time, and which resource is affected can hinge on something as arbitrary
+as a name's sort order. Check the blast radius first (a refusal that fires on ordinary layouts is the
+wrong rule), and prefer a global property verified on the real artifact over a local predicate that
+approximates it. Read facts like "is this model versioned?" from the manifest field (`version`) rather
+than parsing them out of an id, whose spelling is ambiguous (`model.pkg.orders.v1.1` vs
+`model.pkg.vendors`).
 
 Practically:
 

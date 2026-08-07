@@ -428,6 +428,14 @@ the run when they fail, so they gate downstream models like error-severity data 
 file, and no dbt selector can tell them apart — so the clones share **one** task, which depends on
 every version's model and runs every version's assertions.
 
+Because that shared task waits for *every* version, one layout cannot be represented in this mode:
+two versioned models whose later versions reference each other's earlier version (`alpha.v2` refs
+`beta.v1` while `beta.v2` refs `alpha.v1`). Each model's gate would then have to wait for a test that
+waits, transitively, for the model itself. Generation **fails with an error** rather than emit the
+task without its gate, since a model that builds despite a failed unit test is the worse outcome.
+Use `--bundle-tests` for such a project: it gates on a per-resource test task instead of one shared
+across versions, so the layout is represented exactly.
+
 - **Pros:** per-test failures are individually visible in the Databricks UI; downstream
   execution halts on error-severity test failure just like `dbt build`; cross-model tests wait
   for every endpoint they reference; warn tests stay informational, no DAG gating.

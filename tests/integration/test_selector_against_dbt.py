@@ -1107,7 +1107,10 @@ def test_versioned_unit_test_group_does_not_create_a_dependency_cycle(tmp_path):
     manifest = _parse(tmp_path)
     assert len(manifest['unit_tests']) == 2, 'fixture no longer produces two clones'
 
-    _assert_acyclic(manifest, bundle_tests=False)
+    # Both modes: `--indirect-selection` changes what a selector resolves to, so bundling reaches a
+    # different set of gate edges and has to be asserted separately rather than assumed to follow.
+    for bundle_tests in (False, True):
+        _assert_acyclic(manifest, bundle_tests)
 
 
 def test_a_downstream_model_is_still_gated_on_a_versioned_unit_test(tmp_path):
@@ -1457,42 +1460,90 @@ def test_interlocking_tests_on_v_prefixed_models_do_not_create_a_cycle(tmp_path)
         _assert_acyclic(manifest, bundle_tests)
 
 
-def test_cross_referencing_versioned_models_do_not_create_a_cycle(tmp_path):
+def _cross_referencing_versioned_project(tmp_path, first: str = 'alpha', second: str = 'beta') -> dict:
     """
     Two versioned models whose later versions reference each other's earlier version.
 
-    This is the version-sibling exemption's *own* case, and it is unsound there too — the exemption is the
-    per-edge cycle test that `_extend_deps_with_upstream_tests` documents as not composing, wearing a
-    narrower hat. Each model's shared unit-test task waits for both of its versions, and the guard's
-    `ref != node` / `node not in ancestors(ref)` checks pass independently for both edges, so the two
-    gates together close a loop. Verified on dbt 1.12.0:
-    `alpha_v2_model -> unit_test...beta_v1 -> beta_v2_model -> unit_test...alpha_v1 -> alpha_v2_model`.
-
-    Fixing the substring bug in `test_interlocking_tests_on_v_prefixed_models_do_not_create_a_cycle` does
-    not reach this: here the segments really are versions.
+    `first`/`second` name the models so a caller can vary only their *alphabetical order*, which is what
+    decided which model lost its gate back when this layout was resolved by dropping an edge.
     """
     _write_project(
         tmp_path,
         {
-            'alpha_v1.sql': MODEL_SQL,
-            'alpha_v2.sql': "select * from {{ ref('beta', v=1) }}\n",
-            'beta_v1.sql': MODEL_SQL,
-            'beta_v2.sql': "select * from {{ ref('alpha', v=1) }}\n",
+            f'{first}_v1.sql': MODEL_SQL,
+            f'{first}_v2.sql': "select * from {{ ref('%s', v=1) }}\n" % second,
+            f'{second}_v1.sql': MODEL_SQL,
+            f'{second}_v2.sql': "select * from {{ ref('%s', v=1) }}\n" % first,
         },
         schema_yml=(
             'models:\n'
-            '  - name: alpha\n    latest_version: 2\n    columns:\n      - name: id\n'
+            f'  - name: {first}\n    latest_version: 2\n    columns:\n      - name: id\n'
             '    versions:\n      - v: 1\n      - v: 2\n'
-            '  - name: beta\n    latest_version: 2\n    columns:\n      - name: id\n'
+            f'  - name: {second}\n    latest_version: 2\n    columns:\n      - name: id\n'
             '    versions:\n      - v: 1\n      - v: 2\n'
             'unit_tests:\n'
-            '  - name: ut_alpha\n    model: alpha\n    given: []\n    expect: {rows: [{id: 1}]}\n'
-            '  - name: ut_beta\n    model: beta\n    given: []\n    expect: {rows: [{id: 1}]}\n'
+            f'  - name: ut_{first}\n    model: {first}\n    given: []\n    expect: {{rows: [{{id: 1}}]}}\n'
+            f'  - name: ut_{second}\n    model: {second}\n    given: []\n    expect: {{rows: [{{id: 1}}]}}\n'
         ),
     )
-    manifest = _parse(tmp_path)
+    return _parse(tmp_path)
 
-    _assert_acyclic(manifest, bundle_tests=False)
+
+def test_cross_referencing_versioned_models_are_refused(tmp_path):
+    """
+    Two versioned models whose later versions reference each other's earlier version.
+
+    This is the version-sibling exemption's *own* case, and it is unsound there too: each model's shared
+    unit-test task waits for both of its versions, so the two gates together close a loop —
+    `alpha_v2_model -> unit_test...beta_v1 -> beta_v2_model -> unit_test...alpha_v1 -> alpha_v2_model`,
+    verified on dbt 1.12.0.
+
+    Acyclicity alone can be restored by *dropping* one of the two edges, and an earlier revision did
+    exactly that. But the drop was silent and the gate it removed was real: `beta_v2_model` ended up with
+    no unit-test gate at all, so a failing `ut_beta` assertion no longer blocked it. Generation now
+    refuses instead, the same way `_ambiguous` refuses a selector it cannot prove exact — the project is
+    unrepresentable rather than nearly representable, and a silently ungated model is the one outcome
+    worth failing the build over.
+    """
+    manifest = _cross_referencing_versioned_project(tmp_path)
+
+    with pytest.raises(ValueError, match='Cannot generate a gate'):
+        create_dbt_factory(bundle_tests=False).create_tasks(manifest)
+
+
+def test_the_refusal_does_not_depend_on_model_naming(tmp_path):
+    """
+    The same layout with the models renamed so their alphabetical order flips.
+
+    Candidates were considered in sorted order and the first one won, so *which* model lost its gate
+    depended on nothing but its name: renaming `alpha` to `zeta` moved the unguarded model from
+    `beta_v2` to `zeta_v2`. A cosmetic rename silently relocating a missing data-quality gate is why this
+    is refused rather than resolved by dropping an edge — the refusal is symmetric where the drop was not.
+    """
+    manifest = _cross_referencing_versioned_project(tmp_path, first='zeta', second='beta')
+
+    with pytest.raises(ValueError, match='Cannot generate a gate'):
+        create_dbt_factory(bundle_tests=False).create_tasks(manifest)
+
+
+def test_bundling_handles_the_cross_referencing_versioned_layout(tmp_path):
+    """
+    The refusal above is specific to per-test mode, and bundling is a real way out of it.
+
+    Bundle mode gates each model on the upstream's `<resource>_test` task rather than on a unit-test task
+    shared across versions, so no candidate edge arises and both models keep their gate with no cycle.
+    Asserted here so the remedy the refusal message offers is known to work, and because
+    `--indirect-selection` changes what a selector resolves to — per AGENTS.md, both modes get checked.
+    """
+    manifest = _cross_referencing_versioned_project(tmp_path)
+
+    graph = _assert_acyclic(manifest, bundle_tests=True)
+
+    for model in ('alpha_v2_model', 'beta_v2_model'):
+        assert any(dep.endswith('_test') for dep in graph[model]), (
+            f'{model} deps {sorted(graph[model])} include no test task, so bundling is not the '
+            f'workaround the refusal message claims'
+        )
 
 
 def test_a_v_named_model_does_not_pick_up_an_unrelated_models_test(tmp_path):

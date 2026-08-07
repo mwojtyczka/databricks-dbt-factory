@@ -1386,15 +1386,25 @@ def test_gate_candidate_for_an_absent_task_is_skipped():
     assert [(t.task_key, t.depends_on) for t in result] == [('a_model', ['b_test']), ('b_test', [])]
 
 
-def test_gate_candidate_that_would_close_a_loop_is_dropped_but_the_safe_one_is_kept():
+def test_a_gate_candidate_that_would_close_a_loop_is_refused():
     # The structural check in isolation: `b_test` already depends on `a_model`, so gating `a_model` on
-    # `b_test` would cycle and must be refused, while an edge to the independent `c_test` is added.
-    tasks = [_dbt_task('a_model'), _dbt_task('b_test', ['a_model']), _dbt_task('c_test')]
+    # `b_test` would cycle. Refused rather than dropped — dropping is silent and loses a real quality
+    # gate, and which edge got dropped depended on nothing but sort order.
+    tasks = [_dbt_task('a_model'), _dbt_task('b_test', ['a_model'])]
 
-    result = DbtFactory._add_safe_gate_candidates(tasks, {'a_model': ['b_test', 'c_test']})
+    with pytest.raises(ValueError, match='Cannot generate a gate'):
+        DbtFactory._add_safe_gate_candidates(tasks, {'a_model': ['b_test']})
+
+
+def test_acyclic_gate_candidates_are_all_added():
+    # The passing side of the same check: nothing here reaches back to `a_model`, so both candidate
+    # edges are added, in sorted order so the result does not depend on `PYTHONHASHSEED`.
+    tasks = [_dbt_task('a_model'), _dbt_task('c_test'), _dbt_task('b_test')]
+
+    result = DbtFactory._add_safe_gate_candidates(tasks, {'a_model': ['c_test', 'b_test']})
 
     by_key = {t.task_key: t.depends_on for t in result}
-    assert by_key['a_model'] == ['c_test'], f'expected only the acyclic edge, got {by_key["a_model"]}'
+    assert by_key['a_model'] == ['b_test', 'c_test'], f'expected both edges sorted, got {by_key["a_model"]}'
 
 
 def test_gating_test_deps_are_ordered_deterministically_across_processes():

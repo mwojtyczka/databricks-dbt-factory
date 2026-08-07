@@ -898,11 +898,20 @@ class DbtFactory:
                 if not unsatisfied:
                     deps.append(test_key)
                     seen.add(test_key)
-                elif all(
+                    continue
+                if not all(
                     cls._version_sibling_of_any(ref, node_ancestors, gating.version_groups) for ref in unsatisfied
                 ):
-                    seen.add(test_key)
-                    candidates.append(test_key)
+                    continue
+                seen.add(test_key)
+                if node_full_name in test_refs:
+                    # The test covers this very node, so it necessarily runs *after* it — `_unit_test_groups`
+                    # makes the shared task wait for every version, including this one. There is no gate to
+                    # lose here and never was: a test of `orders.v2` cannot also gate `orders.v2`. Skipping
+                    # quietly (rather than offering it as a candidate, which would then be refused) is what
+                    # keeps the ordinary `orders.v2 = ref(orders.v1)` layout working.
+                    continue
+                candidates.append(test_key)
         return deps, candidates
 
     @staticmethod
@@ -945,17 +954,24 @@ class DbtFactory:
     @staticmethod
     def _add_safe_gate_candidates(tasks: list[DbtTask], candidates: dict[str, list[str]]) -> list[DbtTask]:
         """
-        Adds each candidate gate edge that does not close a loop in the assembled task graph.
+        Adds the candidate gate edges, refusing generation if any of them would close a loop.
 
         This is the check that replaces the local proxies: it walks the real `depends_on` graph — every
         task, gate edges included — so it cannot be fooled by the dbt-graph/task-graph mismatch that made
-        each per-edge predicate wrong for a *set* of edges. Candidates are considered in sorted order and
-        each is tested against the graph built so far, so the result is a function of the task keys alone.
+        each per-edge predicate wrong for a *set* of edges. Candidates are considered in sorted order, so
+        the outcome is a function of the task keys alone.
 
-        The base graph (subset-rule edges only) is acyclic, and every addition is checked, so the result is
-        always acyclic. A dropped edge means one gate is missing on a node whose test is shared across
-        model versions — the same weakening the subset rule alone would apply, but now confined to the
-        layouts that genuinely cannot have it.
+        A candidate that closes a loop is a *refusal*, not a dropped edge. Dropping keeps the graph acyclic
+        and is tempting — the subset rule would have dropped the same edge — but the edge is a real quality
+        gate, and losing it silently means a model builds even though a unit test covering it failed.
+        Worse, which model lost its gate depended only on alphabetical order, so renaming a model
+        relocated the missing gate. Refusing matches how `_ambiguous` and `_unaddressable` treat a
+        selector whose correctness cannot be established: fail at build time, naming the resources and the
+        remedy. Only two versioned models whose later versions cross-reference each other's earlier
+        version reach this, and `--bundle-tests` represents that layout without the ambiguity.
+
+        Raises:
+            ValueError: when a candidate edge cannot be added without creating a cycle.
         """
         if not candidates:
             return tasks
@@ -972,7 +988,7 @@ class DbtFactory:
                 # The edge is `task_key -> test_key`, so it closes a loop exactly when `test_key`
                 # already reaches back to `task_key`.
                 if _reaches(graph, test_key, task_key):
-                    continue
+                    raise DbtFactory._ungateable(task_key, test_key)
                 graph[task_key].add(test_key)
                 added.setdefault(task_key, []).append(test_key)
         if not added:
@@ -983,6 +999,26 @@ class DbtFactory:
             new_deps = added.get(task.task_key)
             extended.append(replace(task, depends_on=[*(task.depends_on or []), *new_deps]) if new_deps else task)
         return extended
+
+    @staticmethod
+    def _ungateable(task_key: str, test_key: str) -> ValueError:
+        """
+        Builds the error raised when a quality gate cannot be added without creating a cycle.
+
+        Like `_ambiguous` and `_unaddressable`, this is the whole of what a CLI user sees, so it leads with
+        the resources and the remedy. It names `--bundle-tests` because that mode genuinely represents the
+        layout: it gates on a per-resource test task rather than on a unit-test task shared across a
+        model's versions, so no such edge arises.
+        """
+        return ValueError(
+            f'Cannot generate a gate for {task_key!r} on {test_key!r}: the test covers every version of '
+            f'its model, so making {task_key!r} wait for it would also make it wait for itself. This '
+            f'happens when two versioned models\' later versions reference each other\'s earlier version. '
+            f'Run with --bundle-tests, which gates on a per-resource test task and represents this layout '
+            f'exactly, or break the cycle by having one model reference the other\'s latest version. '
+            f'Emitting the task without the gate would let {task_key!r} build even though a unit test '
+            f'covering it had failed.'
+        )
 
     def _classify_tests(
         self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict

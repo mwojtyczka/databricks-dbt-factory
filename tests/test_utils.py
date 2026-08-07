@@ -57,6 +57,28 @@ def test_build_task_key_maps_disambiguates_tests_via_hash():
     assert task_keys['test.b.dup_check.7f2'] == 'dup_check_7f2_test'
 
 
+def test_build_task_key_maps_keys_do_not_depend_on_input_order():
+    # A numeric counter handed out in iteration order makes which node keeps the readable key
+    # depend on manifest order, so adding an unrelated model can silently repoint a task key (and
+    # with it, run history and task-level alerts) at a different model. Keys must be a function of
+    # the node id alone.
+    ids = ['model.pkg.a_b', 'model.pkg.a.b']
+    forward, _ = build_task_key_maps(ids)
+    reverse, _ = build_task_key_maps(list(reversed(ids)))
+
+    assert forward == reverse
+    assert len(set(forward.values())) == 2
+
+
+def test_build_task_key_maps_key_is_stable_when_unrelated_node_added():
+    ids = ['model.pkg.a_b', 'model.pkg.a.b']
+    before, _ = build_task_key_maps(ids)
+    after, _ = build_task_key_maps(ids + ['model.pkg.unrelated'])
+
+    for uid in ids:
+        assert before[uid] == after[uid]
+
+
 def test_build_task_key_maps_numeric_suffix_when_disambiguated_key_collides():
     # `model.a.orders`'s plain key `orders_model` collides with `model.pkg.orders`, so it takes the
     # package-prefixed `a_orders_model` — which in turn collides with `model.pkg.a_orders`'s plain

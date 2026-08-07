@@ -154,3 +154,6 @@ dev/cleanup.py
 .python-version
 .databricks-login.json
 .local-dev
+
+# local AI/agent tool state
+.isaac/

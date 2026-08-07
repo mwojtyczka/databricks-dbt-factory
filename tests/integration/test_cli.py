@@ -11,11 +11,13 @@ job spec from ``tests/test_data`` and writes a generated spec, which we compare 
 committed golden files.
 """
 
+import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 TEST_DATA = Path(__file__).resolve().parent.parent / "test_data"
@@ -134,3 +136,101 @@ def test_cli_missing_required_args_fails():
     )
     assert result.returncode != 0
     assert "usage" in (result.stderr + result.stdout).lower()
+
+
+def test_cli_unaddressable_resource_reports_without_a_traceback(tmp_path):
+    """
+    A resource the factory cannot address is a user-fixable condition — the remedy is to rename a
+    file — so the CLI must report it as an error message, not as a Python traceback with the useful
+    sentence buried at the end.
+
+    `models/orders+1.sql` is legal in dbt but its name ends in something dbt reads as a graph
+    operator, so neither the FQN nor the bare name can address it. See the README's
+    "When generation fails".
+    """
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "model.pkg.orders+1": {
+                        "resource_type": "model",
+                        "name": "orders+1",
+                        "package_name": "pkg",
+                        "fqn": ["pkg", "orders+1"],
+                        "original_file_path": "models/orders+1.sql",
+                        "depends_on": {"nodes": []},
+                    }
+                },
+                "sources": {},
+                "unit_tests": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "job_definition.yaml"
+
+    result = subprocess.run(  # noqa: S603
+        [
+            CLI,
+            "--dbt-manifest-path",
+            str(manifest),
+            "--input-job-spec-path",
+            str(TEST_DATA / "job_definition_template.yaml"),
+            "--target-job-spec-path",
+            str(target),
+            "--task-type",
+            "dbt",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 1, f"expected exit 1, got {result.returncode}\n{output}"
+    assert "Traceback (most recent call last)" not in output, f"the failure is still a traceback:\n{output}"
+    # The message has to name the resource, its file and the remedy, since that is all the user gets.
+    assert "orders+1" in output
+    assert "models/orders+1.sql" in output
+    assert "Rename" in output
+    # Nothing is written on failure, so a broken spec can never be deployed.
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    ("manifest_contents", "expected"),
+    [
+        pytest.param(None, "Manifest file not found", id="missing-file"),
+        pytest.param("not json at all", "Error parsing JSON", id="unparsable"),
+    ],
+)
+def test_cli_unreadable_manifest_reports_without_a_traceback(tmp_path, manifest_contents, expected):
+    """An unreadable manifest is the user's to fix too, so it reports the same way."""
+    manifest = tmp_path / "manifest.json"
+    if manifest_contents is not None:
+        manifest.write_text(manifest_contents, encoding="utf-8")
+    target = tmp_path / "job_definition.yaml"
+
+    result = subprocess.run(  # noqa: S603
+        [
+            CLI,
+            "--dbt-manifest-path",
+            str(manifest),
+            "--input-job-spec-path",
+            str(TEST_DATA / "job_definition_template.yaml"),
+            "--target-job-spec-path",
+            str(target),
+            "--task-type",
+            "dbt",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 1, f"expected exit 1, got {result.returncode}\n{output}"
+    assert "Traceback (most recent call last)" not in output, f"the failure is still a traceback:\n{output}"
+    assert expected in output
+    assert not target.exists()

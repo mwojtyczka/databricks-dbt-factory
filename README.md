@@ -338,22 +338,82 @@ resource type as a suffix:
 | `test.my_project.unique_customers_id` | `unique_customers_id_test` |
 | `source.my_project.raw.customers` | `raw_customers_test` |
 
-When two nodes would produce the same key — a model name reused across packages, or the same
-custom test name on two models — the colliding keys are disambiguated with the package name or
-dbt's test hash (e.g. `pkg_a_customers_model` / `pkg_b_customers_model`). Keys are therefore always
-unique, so a valid dbt project can never fail to deploy on a duplicate task key. Keys are also
-bounded to Databricks' 100-character limit (long test names are truncated with a hash suffix).
+When two nodes would produce the same key — a model name reused across packages, or the same custom
+test name on two models — the colliding keys are disambiguated with the package name or dbt's test
+hash (e.g. `pkg_a_customers_model` / `pkg_b_customers_model`), and long keys are truncated to
+Databricks' 100-character limit. Keys are always unique, so a valid dbt project can never fail to
+deploy on a duplicate task key.
+
+Keys are stable as long as the set of resources is. Adding a resource whose key collides with an
+existing disambiguated key can shift that key (e.g. to a `_2` suffix), which repoints that task's run
+history and alerts.
 
 ## Handling dbt tests
 
 The factory produces tasks for dbt tests (both data tests and unit tests) from the manifest by
-default (pass `--no-run-tests` to skip them). Selectors use each node's full dot-separated FQN
-(e.g. `my_project.staging.stg_orders`) so they are unambiguous across packages and match models
-in subdirectories. Two modes are available, controlled by `--bundle-tests`:
+default (pass `--no-run-tests` to skip them). Two modes are available, controlled by
+`--bundle-tests`.
+
+### How resources are addressed
+
+Each task selects its resource by several facts at once, joined with commas (dbt reads a comma as
+AND), so that exactly one resource matches:
+
+```
+dbt run  --select my_project.sql_model1.zzz_game_details,package:my_project,file:zzz_game_details.sql,resource_type:model
+dbt test --select my_project.models.sql_model1.unique_zzz_game_details_game_id,package:my_project,file:schemas.yml,resource_type:test,test_name:unique
+```
+
+Each selector is then checked against the manifest, because an FQN is a *prefix* over dbt's flattened
+FQN rather than an identifier: a test named `check.nested` is also matched by its sibling `check`'s
+selector. Where a collision cannot be broken by any term dbt offers, generation fails rather than
+emitting a task that would run its neighbour's resource.
+
+Sources use dbt's own form for them, `source:<package>.<source>.<table>`.
+
+Resources dbt has disabled are skipped, including the few that stay in `nodes` with `enabled: false`
+rather than moving to the manifest's `disabled` section.
+
+#### When generation fails
+
+Selectors name the `fqn:` method explicitly rather than letting dbt infer it from the value's shape, so
+most awkward names cost nothing: a `/`, a `:`, or a `.sql` suffix in a resource name is matched literally.
+What still cannot be expressed is a name containing a space, comma, brace or one of `*?[]`, or one that
+ends with something dbt reads as a graph operator (a trailing `+2`) — the `fqn:` prefix does not neutralise
+those. Sources additionally cannot contain a `.`, since dbt's `source:` form uses it as its own separator.
+Braces are excluded for a non-dbt reason: Databricks substitutes `{{...}}` in a task's commands as plain
+text before the task runs, so a selector containing one resolves locally and matches nothing in the job.
+
+Test tasks pin `--indirect-selection empty`, so a task runs exactly the test it names and nothing dbt
+would otherwise sweep in alongside it. Bundled tasks keep `cautious`, where sweeping a resource's tests is
+the point.
+
+> **Requires dbt 1.5 or newer at task runtime.** The `empty` indirect-selection mode first appears in
+> dbt-core 1.5.0 — 1.4.0 offers only `eager`, `cautious` and `buildable` (verified by reading the
+> `IndirectSelection` enum in each released source tarball). The dbt that runs inside your Databricks job
+> is yours, not this tool's, so on an older dbt every generated test task fails on an invalid flag value.
+> It fails loudly rather than silently, but it is a hard floor.
+
+Generation also fails when a selector is valid but not *exact* — when two resources cannot be told apart
+by any term dbt has. Two generic tests may share an FQN outright (dbt allows duplicate test names), or a
+dotted test name may flatten onto a sibling's FQN. In each case the task would run the other resource too,
+before that resource's own dependencies had completed.
+
+Either way the CLI exits 1 naming the resource and the remedy, and writes no output file, so a
+partly-generated spec can never be deployed:
+
+```
+$ databricks_dbt_factory --dbt-manifest-path target/manifest.json ...
+error: Cannot generate a task for 'orders+1' (models/orders+1.sql): dbt cannot select it uniquely. Rename ...
+```
+
+Almost always the resource's own name is fine and there is nothing to do. The case to know about is a
+**file** name that trips the rules above, such as `models/orders+1.sql`: rename the file (the model's
+name in `schema.yml` can stay as it is).
 
 ### Per-test (default)
 
-One Databricks task per dbt test node, running `dbt test --select <fqn>`. Each test task's
+One Databricks task per dbt test node, running `dbt test --select <selector>`. Each test task's
 `depends_on` includes every model/seed/snapshot the test references, so multi-model tests
 (e.g. `relationships`) only run after all their endpoints are built. **Downstream models are
 gated only on error-severity tests**: every model/seed/snapshot task depends on the
@@ -362,9 +422,27 @@ the downstream task. This matches `dbt build` semantics. **`severity: warn` test
 kept out of downstream `depends_on`** — they surface findings without cluttering the DAG or
 blocking anything.
 
-Unit tests get one task each, selected by the unit test's full FQN and gated on the model under
-test. They have no severity and always fail the run when they fail, so they gate downstream
-models like error-severity data tests.
+Unit tests get one task each, gated on the model under test. They have no severity and always fail
+the run when they fail, so they gate downstream models like error-severity data tests. On a
+*versioned* model, dbt clones the unit test per version but gives every clone the same FQN, name and
+file, and no dbt selector can tell them apart — so the clones share **one** task, which depends on
+every version's model and runs every version's assertions.
+
+A test that covers several versions of one model waits for *all* of them, so gating a downstream model
+on it can require that test to wait, transitively, for the very model being gated. Generation then
+**fails with an error** naming both tasks, rather than emit the task without its gate — a model that
+builds despite a failed test covering it is the worse outcome. Two shapes reach this, both rare:
+
+- two versioned models whose later versions reference each other's earlier version (`alpha.v2` refs
+  `beta.v1` while `beta.v2` refs `alpha.v1`), each carrying a unit test;
+- a data test spanning two versions of one model (`relationships` from `alpha.v1` to `alpha.v2`) where
+  a third model sits between those versions.
+
+`--bundle-tests` generates both, since it gates on a per-resource test task and never forms that edge.
+For the shared unit test it keeps an equivalent gate; for a multi-endpoint data test the test becomes a
+standalone task that gates nothing, so the run still fails on a bad assertion but does not block the
+downstream model. The alternative is to restructure the refs so the test no longer depends on the model
+it would gate.
 
 - **Pros:** per-test failures are individually visible in the Databricks UI; downstream
   execution halts on error-severity test failure just like `dbt build`; cross-model tests wait
@@ -399,7 +477,7 @@ The factory classifies each dbt test node into one of two buckets based on its `
   references. These run in parallel with the bundled tasks; they don't fit inside a bundle
   because their correctness requires all their endpoints to be built first.
 
-A resource's `<resource>_test` task selects the resource by its full FQN with
+A resource's `<resource>_test` task selects the resource by the same selector with
 `--indirect-selection cautious`, which also runs the resource's unit tests. A model whose only
 test is a unit test still gets a `<resource>_test` task so its unit test is not dropped.
 
@@ -408,11 +486,8 @@ the upstream's `<resource>_test` task, so data only flows downstream after its u
 single-model tests pass. Cross-model test tasks don't gate downstream execution — they run
 as leaf assertions.
 
-Severity handling: warn-severity test failures exit 0 in dbt, so the bundled `<resource>_test`
-task is green and downstream still runs. Error-severity failures exit non-zero, the
-`<resource>_test` task goes red, and downstream is skipped. Same end result as per-test mode
-(warn ≠ blocking, error = blocking), just via dbt's exit code rather than our dep-graph
-filtering.
+Severity behaves the same as in per-test mode — warn never blocks, error does — here because dbt
+itself exits 0 on a warn-severity failure and non-zero on an error-severity one.
 
 - **Pros:** **faster** — fewer task startups and fewer dbt invocations translate directly into
   shorter end-to-end run times; smaller, cleaner DAG in the UI.

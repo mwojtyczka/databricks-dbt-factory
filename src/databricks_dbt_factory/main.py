@@ -6,7 +6,7 @@ from pathlib import Path
 
 from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.DbtFactory import DbtFactory
-from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
+from databricks_dbt_factory.job_spec import render_job_spec, write_job_spec
 from databricks_dbt_factory.Utils import read_dbt_manifest
 from databricks_dbt_factory.DbtTask import DbtTaskOptions
 from databricks_dbt_factory.TaskFactory import (
@@ -32,10 +32,15 @@ def main():
 
     notebook_path = args.notebook_path
     effective_project_directory = args.project_directory
+    # Computed but *not* written yet: the runner is copied only once generation has succeeded, below.
+    # Writing it here would leave a runner behind for a run that produced no job spec, and would
+    # overwrite a runner the user had edited, since the copy is unconditional.
+    copy_runner = False
     if args.task_type == "notebook" and notebook_path is None:
         notebook_path, notebook_at_project_root = _copy_runner_notebook(
-            args.target_job_spec_path, args.project_directory, write=not args.dry_run
+            args.target_job_spec_path, args.project_directory, write=False
         )
+        copy_runner = not args.dry_run
         # If the runner landed at the project root, CWD at task runtime already equals the
         # project root. Pass `.` explicitly so the generated spec is self-documenting (and
         # immune to any future change in dbt's default); the user's original `../` would
@@ -66,12 +71,31 @@ def main():
         task_factories['test'] = TestTaskFactory(resolver, task_options, dbt_options)
 
     factory = DbtFactory(task_factories, bundle_tests=args.bundle_tests)
-    manifest = read_dbt_manifest(args.dbt_manifest_path)
-    tasks = factory.create_tasks(manifest)
+    # These failures are all conditions the user fixes in their own project — an unreadable manifest,
+    # or a resource whose name or path dbt cannot select uniquely — so report the message and stop
+    # rather than letting a traceback bury it. `SystemExit` exits 1 without writing a partial spec.
+    # The library API still raises, so callers embedding `DbtFactory` keep the exception.
+    # Every fallible step runs before anything is written: reading the manifest, creating the tasks, and
+    # rendering the new spec from the input. An earlier revision copied the runner notebook once task
+    # creation succeeded, which still left it behind — overwriting an edited one — when reading or
+    # rendering an invalid *input job spec* then failed and no target spec was produced.
+    #
+    # Only `ValueError`/`FileNotFoundError` are caught, both raised deliberately for conditions the user
+    # fixes. `KeyError` is deliberately *not* caught: the factory indexes manifest fields directly, so an
+    # unexpected manifest shape raises a bare `KeyError` that is a bug in this tool, and reporting it as
+    # `error: 'resource_type'` would hide the traceback needed to diagnose it.
+    try:
+        manifest = read_dbt_manifest(args.dbt_manifest_path)
+        tasks = factory.create_tasks(manifest)
+        rendered = None if args.dry_run else render_job_spec(args.input_job_spec_path, tasks, args.new_job_name)
+    except (ValueError, FileNotFoundError) as error:
+        raise SystemExit(f"error: {error}") from error
     if args.dry_run:
         print(tasks)
     else:
-        replace_tasks_in_job_spec(args.input_job_spec_path, tasks, args.target_job_spec_path, args.new_job_name)
+        if copy_runner:
+            _copy_runner_notebook(args.target_job_spec_path, args.project_directory, write=True)
+        write_job_spec(rendered, args.target_job_spec_path)
 
 
 def _copy_runner_notebook(

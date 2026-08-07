@@ -1591,24 +1591,98 @@ def test_a_cross_model_data_test_is_not_treated_as_a_version_group_test(tmp_path
     ), f'nn_model deps {sorted(graph["nn_model"])} include a cross-model test it is not downstream of'
 
 
-def test_the_refusal_names_the_cause_it_actually_found(tmp_path):
+def _single_version_group_data_test_project(tmp_path) -> dict:
     """
-    The refusal message is the whole of what a CLI user sees, so its diagnosis has to be true.
+    A `relationships` data test whose *both* endpoints are versions of one model, wired so gating cycles.
 
-    Asserting only the `Cannot generate a gate` prefix let the message claim a cross-referencing
-    versioned pair and a failing *unit* test for a layout that had neither, sending the reader looking
-    for a pair that does not exist. This pins the specifics for the layout that does refuse.
+    `nn` sits between the two versions (`nn` refs `alpha.v1`, `alpha.v2` refs `nn`), so the test — which
+    waits for both versions — transitively waits for `nn`. There is no unit test anywhere in this project.
     """
-    manifest = _cross_referencing_versioned_project(tmp_path)
+    _write_project(
+        tmp_path,
+        {
+            'alpha_v1.sql': MODEL_SQL,
+            'alpha_v2.sql': "select * from {{ ref('nn') }}\n",
+            'nn.sql': "select * from {{ ref('alpha', v=1) }}\n",
+        },
+        schema_yml=(
+            'models:\n'
+            '  - name: alpha\n    latest_version: 2\n    columns:\n      - name: id\n'
+            '    versions:\n'
+            '      - v: 1\n        columns:\n          - name: id\n            data_tests:\n'
+            '              - relationships:\n                  to: ref(\'alpha\', v=2)\n'
+            '                  field: id\n'
+            '      - v: 2\n'
+            '  - name: nn\n    columns:\n      - name: id\n'
+        ),
+    )
+    return _parse(tmp_path)
+
+
+@pytest.mark.parametrize(
+    'project, ungated_task',
+    [
+        (_cross_referencing_versioned_project, 'beta_v2_model'),
+        (_single_version_group_data_test_project, 'nn_model'),
+    ],
+    ids=['unit-test-group', 'data-test-group'],
+)
+def test_the_refusal_describes_only_what_it_actually_found(tmp_path, project, ungated_task):
+    """
+    The refusal message is the whole of what a CLI user sees, so it must not assert a cause it has not
+    established.
+
+    An earlier revision hard-coded one explanation — "two versioned models' later versions reference each
+    other's earlier version", and "a *unit* test covering it had failed". Both are true for the
+    `unit-test-group` case and false for `data-test-group`, which has a single versioned model and no unit
+    test at all (`manifest['unit_tests']` is empty). A reader was sent hunting for a cross-referencing pair
+    that did not exist. The message now describes the edge it refused — the task, the test, and the cycle —
+    and leaves the cause to the project.
+
+    Both layouts refuse legitimately: in each, the test waits transitively for the task being gated, so the
+    edge would close a loop. Verified on dbt 1.12.0.
+    """
+    manifest = project(tmp_path)
 
     with pytest.raises(ValueError) as raised:
         create_dbt_factory(bundle_tests=False).create_tasks(manifest)
 
     message = str(raised.value)
-    assert 'unit test' in message, f'the refusing test here is a unit test, but the message omits it: {message}'
+    assert ungated_task in message, f'the message does not name the task it refused to gate: {message}'
     assert '--bundle-tests' in message, f'the message must name a working remedy: {message}'
-    # Both endpoints of the refused edge, so the reader can find them without guessing.
-    assert 'beta_v2_model' in message and 'ut_alpha' in message, f'message names neither endpoint: {message}'
+    # Claims the message is in no position to make. `unit test` is the specific regression: the
+    # data-test project contains none, so naming one misdirects the reader outright.
+    for unfounded in ('unit test', 'each other'):
+        assert unfounded not in message, f'message asserts {unfounded!r}, which it has not established: {message}'
+
+
+def test_a_single_version_group_data_test_that_cycles_is_refused(tmp_path):
+    """
+    A data test confined to one version group reaches the version-sibling exemption too.
+
+    `_covers_one_version_group` admits any test whose refs are all versions of one model, which is right —
+    such a test does gate a downstream node, and the benign case (no cycle) correctly gains that gate. But
+    it means the exemption is not unit-test-only, so the refusal has to be worded for both.
+
+    Before the refusal existed this layout silently dropped the gate and generated. Failing is the better
+    outcome — the gate is real — but it is a behaviour change on a project that is not a cross-referencing
+    versioned pair, which is why the README describes the refusal by its condition rather than by that one
+    layout.
+    """
+    manifest = _single_version_group_data_test_project(tmp_path)
+
+    assert not manifest['unit_tests'], 'fixture must contain no unit tests for this to test what it claims'
+
+    with pytest.raises(ValueError, match='Cannot generate a gate'):
+        create_dbt_factory(bundle_tests=False).create_tasks(manifest)
+
+    # The advertised remedy has to at least *generate*. It is weaker than it looks here: this test spans
+    # two resources, so bundling emits it as a standalone task that gates nothing (`--indirect-selection
+    # cautious` keeps a multi-endpoint test out of the per-resource bundles). So the escape hatch is real
+    # but trades the gate away — which is why the message says bundling "does not create this edge" rather
+    # than claiming it preserves the gate.
+    graph = _assert_acyclic(manifest, bundle_tests=True)
+    assert 'relationships_alpha_v1_id__id__ref_alpha_v_2__test' in graph, 'the test task should still exist'
 
 
 def test_a_v_named_model_does_not_pick_up_an_unrelated_models_test(tmp_path):

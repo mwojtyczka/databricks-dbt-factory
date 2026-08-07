@@ -944,12 +944,15 @@ class DbtFactory:
         """
         Whether every resource `test_refs` names is a version of the *same* model.
 
-        This is the precondition for the version-sibling exemption, which exists only for a test shared by
-        the versions of one model — the shape `_unit_test_groups` produces. Checking only that the
-        *unsatisfied* refs were version siblings let an ordinary cross-model `relationships` test in: with
-        refs `{alpha.v2, xm}` it became a candidate and was then refused, citing a cross-referencing
-        versioned pair and a failing unit test for a layout that had neither. Such a test now falls
-        through to the plain subset rule, which is what handled it before the exemption existed.
+        This is the precondition for the version-sibling exemption, which applies to a test covering the
+        versions of one model. `_unit_test_groups` is the usual source of that shape, but not the only one —
+        a `relationships` test from `alpha.v1` to `alpha.v2` qualifies too, and correctly so: it does gate a
+        node downstream of those versions. So the check is about the *refs*, not about the kind of test, and
+        `_ungateable` is worded to match.
+
+        Checking only that the *unsatisfied* refs were version siblings was too loose: an ordinary
+        cross-model test with refs `{alpha.v2, xm}` became a candidate, when it belongs to the plain subset
+        rule that handled it before the exemption existed.
         """
         groups = {version_groups.get(ref) for ref in test_refs}
         return len(groups) == 1 and None not in groups
@@ -1028,23 +1031,26 @@ class DbtFactory:
         Builds the error raised when a quality gate cannot be added without creating a cycle.
 
         Like `_ambiguous` and `_unaddressable`, this is the whole of what a CLI user sees, so it leads with
-        the resources and the remedy. It names `--bundle-tests` because that mode genuinely represents the
-        layout: it gates on a per-resource test task rather than on a unit-test task shared across a
-        model's versions, so no such edge arises.
+        the resources and the remedy. `--bundle-tests` is offered because it gates on a per-resource test
+        task and so never builds this edge — but the message only claims it *generates*, not that the gate
+        survives: for a shared unit test bundling keeps an equivalent gate, while a multi-endpoint data test
+        becomes a standalone task that gates nothing under `--indirect-selection cautious`. Both were
+        checked on dbt 1.12.0.
 
-        The stated cause is reachable only because `_covers_one_version_group` confines candidates to tests
-        shared across one model's versions. An earlier revision let a cross-model `relationships` test
-        reach here, and the message then named a cross-referencing versioned pair the project did not have.
-        Keep the two in step: widening what becomes a candidate means widening this wording too.
+        It describes the *edge it refused* and nothing more. Two earlier revisions hard-coded a cause —
+        "two versioned models' later versions reference each other's earlier version", and a failing "unit
+        test" — which held for the layout that prompted the message and was false for the next one found: a
+        `relationships` data test confined to one version group refuses identically in a project containing
+        no unit tests at all. The condition here is a graph property, so anything beyond it is a guess; the
+        project shapes that produce it are documented in the README instead.
         """
         return ValueError(
-            f'Cannot generate a gate for {task_key!r} on {test_key!r}: the test covers every version of '
-            f'its model, so making {task_key!r} wait for it would also make it wait for itself. This '
-            f'happens when two versioned models\' later versions reference each other\'s earlier version. '
-            f'Run with --bundle-tests, which gates on a per-resource test task and represents this layout '
-            f'exactly, or break the cycle by having one model reference the other\'s latest version. '
-            f'Emitting the task without the gate would let {task_key!r} build even though a unit test '
-            f'covering it had failed.'
+            f'Cannot generate a gate for {task_key!r} on {test_key!r}: {test_key!r} already waits for '
+            f'{task_key!r} (directly or through its dependencies), so making {task_key!r} wait for it in '
+            f'turn would deadlock the job. Run with --bundle-tests, which gates on a per-resource test '
+            f'task and does not create this edge, or change the models so the test does not depend on '
+            f'{task_key!r}. Emitting the task without the gate would let {task_key!r} build even though a '
+            f'test covering it had failed.'
         )
 
     def _classify_tests(

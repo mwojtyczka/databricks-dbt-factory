@@ -29,6 +29,23 @@ def test_replace_tasks_raises_valueerror_when_resources_null(tmp_path):
         replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"))
 
 
+def test_replace_tasks_raises_valueerror_when_resources_is_not_a_mapping(tmp_path):
+    # `resources:` holding a list: `.get('resources').get(...)` raised AttributeError, which
+    # `main`'s `except (ValueError, FileNotFoundError)` does not catch, so the CLI printed a
+    # traceback for a malformed *input file*.
+    spec = _write(tmp_path / "in.yaml", {"resources": [1, 2]})
+    with pytest.raises(ValueError):
+        replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"))
+
+
+def test_replace_tasks_raises_valueerror_when_jobs_is_not_a_mapping(tmp_path):
+    # `jobs:` holding a list: indexing it with `['jobs']` and then `next(iter(...))` raised
+    # TypeError, likewise escaping the CLI's error handling.
+    spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": ["a", "b"]}})
+    with pytest.raises(ValueError):
+        replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"))
+
+
 def test_replace_tasks_writes_tasks_into_first_job(tmp_path):
     spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {"my_job": {"tasks": []}}}})
     target = tmp_path / "out.yaml"

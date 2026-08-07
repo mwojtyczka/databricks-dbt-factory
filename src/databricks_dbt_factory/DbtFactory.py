@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath, PureWindowsPath
 
 from databricks_dbt_factory.TaskFactory import TaskFactory
@@ -19,6 +19,37 @@ def _flatten_fqn(fqn: list[str]) -> list[str]:
     which is why the shorter `probe.check` matches it as a subtree parent.
     """
     return [part for segment in fqn for part in segment.split('.')]
+
+
+@dataclass
+class _Gating:
+    """
+    What deciding a node's gating test edges needs, in per-test mode.
+
+    Grouped because the three are only ever read together, and only by
+    `_extend_deps_with_upstream_tests`: `tests` is the test index, `ancestors` the dbt-graph reachability
+    it is judged against, and `version_groups` the versioned-model grouping behind the one exemption to
+    the subset rule. `candidates` collects the edges that exemption produces, for
+    `_add_safe_gate_candidates` to settle against the finished task graph.
+    """
+
+    tests: dict[str, list[tuple[str, frozenset[str]]]] = field(default_factory=dict)
+    ancestors: dict[str, set[str]] = field(default_factory=dict)
+    version_groups: dict[str, str] = field(default_factory=dict)
+    candidates: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _reaches(graph: dict[str, set[str]], start: str, target: str) -> bool:
+    """Whether `target` is reachable from `start` by following `graph`'s dependency edges."""
+    seen, stack = {start}, [start]
+    while stack:
+        for dep in graph.get(stack.pop(), ()):
+            if dep == target:
+                return True
+            if dep not in seen:
+                seen.add(dep)
+                stack.append(dep)
+    return False
 
 
 def _base_file_name(original_file_path: str) -> str:
@@ -573,19 +604,20 @@ class DbtFactory:
         task_ids += unit_test_ids
         task_keys, bundled_test_keys = build_task_key_maps(task_ids, sorted(single_model_tested))
 
-        tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]] = {}
-        ancestors: dict[str, set[str]] = {}
+        gating = _Gating()
         if not bundle and 'test' in self.task_factories:
-            tests_by_resource = self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests, task_keys)
-            ancestors = self._compute_ancestors(dbt_nodes, dbt_sources)
+            gating = _Gating(
+                tests=self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests, task_keys),
+                ancestors=self._compute_ancestors(dbt_nodes, dbt_sources),
+                version_groups=self._version_group(dbt_nodes),
+            )
 
         tasks = self._build_resource_tasks(
             dbt_nodes,
             bundle,
             task_keys,
             bundled_test_keys,
-            tests_by_resource,
-            ancestors,
+            gating,
             peers,
         )
 
@@ -604,7 +636,9 @@ class DbtFactory:
         elif 'test' in self.task_factories:
             tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, dbt_nodes, task_keys, peers))
 
-        return tasks
+        # Last, so the graph walked is the complete one: the candidates gate on unit-test tasks, which
+        # only exist after the branch above, and their own deps are what close the loops being detected.
+        return self._add_safe_gate_candidates(tasks, gating.candidates)
 
     @staticmethod
     def _enabled_only(entries: dict) -> dict:
@@ -813,9 +847,8 @@ class DbtFactory:
         cls,
         node_full_name: str,
         existing_deps: list[str] | None,
-        tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
-        ancestors_by_node: dict[str, set[str]],
-    ) -> list[str]:
+        gating: _Gating,
+    ) -> tuple[list[str], list[str]]:
         """
         Appends the task keys of tests that can safely gate this node.
 
@@ -827,54 +860,129 @@ class DbtFactory:
         versioned model's cloned unit test one task depending on every version, so its refs are
         `{orders.v1, orders.v2}` while a `consumer` referencing only v1 has just `{orders.v1}` among its
         ancestors. The plain subset test therefore dropped the edge and a failing v1 assertion stopped
-        blocking `consumer`, contrary to the documented gating behaviour. A version sibling of an ancestor
-        is treated as satisfied, which restores that gate.
+        blocking `consumer`, contrary to the documented gating behaviour. Such an edge is returned as a
+        *candidate* rather than added here: no local predicate can establish it is safe.
 
-        Relaxing further does not work, and the attempt is worth recording. Testing the cycle condition
-        directly — "no ref of `T` is `N` or has `N` as an ancestor" — is sound for one edge in isolation but
-        not for a set of them: `ancestors_by_node` describes the *dbt* graph, while the edges added here are
-        *task* edges, so once several gates exist the reachability it consults no longer matches the graph
-        being built. Two interlocking `relationships` tests are enough to close a loop — verified on a
-        dbt-1.12.0 manifest with models `a`, `c`, `n = ref(a)`, `b = ref(c)` and relationships `a`->`b` and
-        `c`->`n`, which produced `b_model -> relationships_c... -> n_model -> relationships_a... -> b_model`.
-        `test_interlocking_cross_model_tests_do_not_create_a_cycle` pins that layout.
+        That is the lesson worth recording. Testing the cycle condition locally — "no ref of `T` is `N` or
+        has `N` as an ancestor" — is sound for one edge in isolation but not for a set of them:
+        `gating.ancestors` describes the *dbt* graph, while the edges added here are *task* edges, so once
+        several gates exist the reachability it consults no longer matches the graph being built. Two
+        interlocking `relationships` tests are enough to close a loop, and so are two versioned models
+        whose later versions reference each other's earlier one. Both were verified on dbt 1.12.0 and are
+        pinned by `test_interlocking_cross_model_tests_do_not_create_a_cycle`,
+        `test_interlocking_tests_on_v_prefixed_models_do_not_create_a_cycle` and
+        `test_cross_referencing_versioned_models_do_not_create_a_cycle`.
+
+        So the split is by what can actually be proven: edges satisfying the subset rule are returned as
+        deps outright, because that rule makes every one of them respect the dbt graph's topological order
+        no matter how many are added. Everything else is a candidate that `_add_safe_gate_candidates`
+        admits only if it does not close a loop in the *real, assembled* task graph.
+
+        Returns:
+            (deps, candidates): the node's dependency list, and the gating test keys whose safety must be
+            settled against the finished graph.
         """
-        extended: list[str] = list(existing_deps or [])
-        seen = set(extended)
-        node_ancestors = ancestors_by_node.get(node_full_name, set())
-        for ancestor in node_ancestors:
-            for test_key, test_refs in tests_by_resource.get(ancestor, []):
+        deps: list[str] = list(existing_deps or [])
+        seen = set(deps)
+        candidates: list[str] = []
+        node_ancestors = gating.ancestors.get(node_full_name, set())
+        # `sorted` rather than plain set iteration: the append order below decides the order of the
+        # emitted `depends_on`, and a set's is `PYTHONHASHSEED`-dependent. The spec is checked in, so
+        # that showed up as a spurious diff on every regeneration. Same reasoning as the sorted passes
+        # in `build_task_key_maps`: the output should be a function of the node ids alone.
+        for ancestor in sorted(node_ancestors):
+            for test_key, test_refs in gating.tests.get(ancestor, []):
                 if test_key in seen:
                     continue
-                if all(
-                    ref in node_ancestors
-                    or (
-                        # A version sibling of an ancestor counts as satisfied, but only when it is not
-                        # downstream of the node being gated: with `orders.v2` depending on `orders.v1`,
-                        # letting the shared test gate `v2` while the test waits for `v2` closes a loop.
-                        ref != node_full_name
-                        and node_full_name not in ancestors_by_node.get(ref, set())
-                        and cls._version_sibling_of_any(ref, node_ancestors)
-                    )
-                    for ref in test_refs
-                ):
-                    extended.append(test_key)
+                unsatisfied = [ref for ref in test_refs if ref not in node_ancestors]
+                if not unsatisfied:
+                    deps.append(test_key)
                     seen.add(test_key)
-        return extended
+                elif all(
+                    cls._version_sibling_of_any(ref, node_ancestors, gating.version_groups) for ref in unsatisfied
+                ):
+                    seen.add(test_key)
+                    candidates.append(test_key)
+        return deps, candidates
 
     @staticmethod
-    def _version_sibling_of_any(ref: str, ancestors: set[str]) -> bool:
+    def _version_group(dbt_nodes: dict) -> dict[str, str]:
+        """
+        Maps each versioned model's id to the `<package>.<name>` group its versions share.
+
+        Read from the manifest's `version` field rather than parsed out of the id. The id is
+        `model.<pkg>.<name>.v<version>` with the version rendered verbatim, so its final segment cannot be
+        told apart from a model *name*: a dotted version gives `model.probe.orders.v1.1` while an ordinary
+        model named `vendors` gives `model.probe.vendors`. Both were confirmed on dbt 1.12.0, where
+        `version` is `None` for every non-versioned model.
+        """
+        groups: dict[str, str] = {}
+        for full_name, info in dbt_nodes.items():
+            if info.get('resource_type') != 'model' or info.get('version') is None:
+                continue
+            groups[full_name] = f"{info.get('package_name')}.{info.get('name')}"
+        return groups
+
+    @staticmethod
+    def _version_sibling_of_any(ref: str, ancestors: set[str], version_groups: dict[str, str]) -> bool:
         """
         Whether `ref` is another *version* of a model already among `ancestors`.
 
-        A versioned model's id is `model.<pkg>.<name>.v<N>`, so siblings share everything up to the final
-        segment. Used only to keep a shared unit-test task gating a node that references one version of the
-        model it covers; every other ref must be an ancestor outright.
+        Used only to keep a shared unit-test task gating a node that references one version of the model it
+        covers; every other ref must be an ancestor outright.
+
+        Both sides must be versions of the *same* model, decided by `_version_group`. An earlier revision
+        compared ids by substring — `'.v' in ref` plus `startswith(f'{stem}.v')` — which made
+        `model.pkg.vendors` a "version sibling" of `model.pkg.visits`, since `'.v'` matches inside
+        `.vendors`. That handed the exemption to ordinary non-versioned models whose names merely begin
+        with `v`, reopening the cycle the subset rule prevents.
         """
-        if not ref.startswith('model.') or '.v' not in ref:
+        group = version_groups.get(ref)
+        if group is None:
             return False
-        stem = ref.rsplit('.', 1)[0]
-        return any(ancestor != ref and ancestor.startswith(f'{stem}.v') for ancestor in ancestors)
+        return any(ancestor != ref and version_groups.get(ancestor) == group for ancestor in ancestors)
+
+    @staticmethod
+    def _add_safe_gate_candidates(tasks: list[DbtTask], candidates: dict[str, list[str]]) -> list[DbtTask]:
+        """
+        Adds each candidate gate edge that does not close a loop in the assembled task graph.
+
+        This is the check that replaces the local proxies: it walks the real `depends_on` graph — every
+        task, gate edges included — so it cannot be fooled by the dbt-graph/task-graph mismatch that made
+        each per-edge predicate wrong for a *set* of edges. Candidates are considered in sorted order and
+        each is tested against the graph built so far, so the result is a function of the task keys alone.
+
+        The base graph (subset-rule edges only) is acyclic, and every addition is checked, so the result is
+        always acyclic. A dropped edge means one gate is missing on a node whose test is shared across
+        model versions — the same weakening the subset rule alone would apply, but now confined to the
+        layouts that genuinely cannot have it.
+        """
+        if not candidates:
+            return tasks
+        graph = {task.task_key: set(task.depends_on or ()) for task in tasks}
+
+        added: dict[str, list[str]] = {}
+        for task_key in sorted(candidates):
+            if task_key not in graph:
+                # Cannot happen today: candidates are keyed by the `task_key` of a task in this very
+                # list. Skipping rather than raising keeps a future caller that filters tasks after
+                # collecting candidates from failing with a `KeyError` in an unrelated place.
+                continue
+            for test_key in sorted(candidates[task_key]):
+                # The edge is `task_key -> test_key`, so it closes a loop exactly when `test_key`
+                # already reaches back to `task_key`.
+                if _reaches(graph, test_key, task_key):
+                    continue
+                graph[task_key].add(test_key)
+                added.setdefault(task_key, []).append(test_key)
+        if not added:
+            return tasks
+
+        extended: list[DbtTask] = []
+        for task in tasks:
+            new_deps = added.get(task.task_key)
+            extended.append(replace(task, depends_on=[*(task.depends_on or []), *new_deps]) if new_deps else task)
+        return extended
 
     def _classify_tests(
         self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict
@@ -924,11 +1032,15 @@ class DbtFactory:
         bundle: bool,
         task_keys: dict[str, str],
         bundled_test_keys: dict[str, str],
-        tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
-        ancestors_by_node: dict[str, set[str]],
+        gating: _Gating,
         peers: dict,
     ) -> list[DbtTask]:
-        """Builds tasks for every non-test resource (plus per-test tasks when not bundling)."""
+        """
+        Builds tasks for every non-test resource (plus per-test tasks when not bundling).
+
+        Gate edges the subset rule cannot prove safe are recorded in `gating.candidates`, keyed by task
+        key, for `_add_safe_gate_candidates` to settle once every task exists.
+        """
         # Maps a tested resource's task key (what `depends_on` holds) to its gating bundled test
         # task key, for rewiring in bundle mode. Sources have a bundled test key but no run task,
         # so they are absent from `task_keys` and skipped.
@@ -953,18 +1065,27 @@ class DbtFactory:
             )
 
             if resource_type in self._GATEABLE_TYPES:
-                if bundle:
-                    task = replace(task, depends_on=self._rewire_deps(task.depends_on, bundled_test_key_by_task_key))
-                elif tests_by_resource:
-                    task = replace(
-                        task,
-                        depends_on=self._extend_deps_with_upstream_tests(
-                            node_full_name, task.depends_on, tests_by_resource, ancestors_by_node
-                        ),
-                    )
-
+                task = self._gate_task(task, node_full_name, bundle, bundled_test_key_by_task_key, gating)
             tasks.append(task)
         return tasks
+
+    def _gate_task(
+        self,
+        task: DbtTask,
+        node_full_name: str,
+        bundle: bool,
+        bundled_test_key_by_task_key: dict[str, str],
+        gating: _Gating,
+    ) -> DbtTask:
+        """Applies the gating policy to one gateable task: bundled rewiring, or upstream test edges."""
+        if bundle:
+            return replace(task, depends_on=self._rewire_deps(task.depends_on, bundled_test_key_by_task_key))
+        if not gating.tests:
+            return task
+        deps, candidates = self._extend_deps_with_upstream_tests(node_full_name, task.depends_on, gating)
+        if candidates:
+            gating.candidates[task.task_key] = candidates
+        return replace(task, depends_on=deps)
 
     @staticmethod
     def _rewire_deps(deps: list[str] | None, bundled_test_key_by_task_key: dict[str, str]) -> list[str]:

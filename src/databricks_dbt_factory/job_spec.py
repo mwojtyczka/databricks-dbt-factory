@@ -58,10 +58,14 @@ def render_job_spec(
         except yaml.YAMLError as error:
             raise ValueError(f"Could not parse {input_job_spec_path} as YAML: {error}") from error
 
-    if not isinstance(job_definition, dict) or not (job_definition.get('resources') or {}).get('jobs'):
+    # Every level is type-checked, not just the top one: the code below calls `.get`/`.pop` and indexes
+    # by key, so a `resources` or `jobs` holding a *list* raised `AttributeError`/`TypeError` instead.
+    # Those escape `main`'s `except (ValueError, FileNotFoundError)`, so a malformed input file printed a
+    # traceback — the very outcome this guard exists to prevent.
+    resources = job_definition.get('resources') if isinstance(job_definition, dict) else None
+    jobs = resources.get('jobs') if isinstance(resources, dict) else None
+    if not isinstance(jobs, dict) or not jobs:
         raise ValueError(f"No jobs found in {input_job_spec_path}.")
-
-    jobs = job_definition['resources']['jobs']
 
     # replaces the first job only!
     first_job_key = next(iter(jobs))

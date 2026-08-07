@@ -1,11 +1,15 @@
 import os
 import shlex
+import subprocess
+import sys
+import textwrap
 from tempfile import NamedTemporaryFile
 from pathlib import Path
 import pytest
 import yaml
 
 from databricks_dbt_factory.DbtFactory import DbtFactory
+from databricks_dbt_factory.DbtTask import DbtTask, DbtTaskOptions, TaskType
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
 from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
 from databricks_dbt_factory.Utils import read_dbt_manifest
@@ -1365,6 +1369,90 @@ def test_a_selector_that_reaches_nothing_is_refused(dbt_factory):
 
     with pytest.raises(ValueError, match='does not reach model.pkg.orders'):
         DbtFactory._node_select(node, peers=peers)
+
+
+def _dbt_task(task_key: str, depends_on: list[str] | None = None) -> DbtTask:
+    return DbtTask(task_key, ['dbt run'], DbtTaskOptions(task_type=TaskType.DBT), depends_on or [])
+
+
+def test_gate_candidate_for_an_absent_task_is_skipped():
+    # Cannot arise from `_create_tasks`, which keys candidates by a task in the same list — but the
+    # lookup used to be an unguarded `graph[task_key]`, so a future caller that filtered tasks after
+    # collecting candidates would have failed with a `KeyError` far from the cause.
+    tasks = [_dbt_task('a_model', ['b_test']), _dbt_task('b_test')]
+
+    result = DbtFactory._add_safe_gate_candidates(tasks, {'ghost_model': ['b_test']})
+
+    assert [(t.task_key, t.depends_on) for t in result] == [('a_model', ['b_test']), ('b_test', [])]
+
+
+def test_gate_candidate_that_would_close_a_loop_is_dropped_but_the_safe_one_is_kept():
+    # The structural check in isolation: `b_test` already depends on `a_model`, so gating `a_model` on
+    # `b_test` would cycle and must be refused, while an edge to the independent `c_test` is added.
+    tasks = [_dbt_task('a_model'), _dbt_task('b_test', ['a_model']), _dbt_task('c_test')]
+
+    result = DbtFactory._add_safe_gate_candidates(tasks, {'a_model': ['b_test', 'c_test']})
+
+    by_key = {t.task_key: t.depends_on for t in result}
+    assert by_key['a_model'] == ['c_test'], f'expected only the acyclic edge, got {by_key["a_model"]}'
+
+
+def test_gating_test_deps_are_ordered_deterministically_across_processes():
+    """
+    `depends_on` must be a function of the node ids alone, as `Utils.build_task_key_maps` documents for
+    task keys. Extending a node's deps walked its ancestors as a `set`, so the order the gating test keys
+    were appended in varied with `PYTHONHASHSEED` — one manifest produced six orderings across eight
+    seeds. The generated spec is checked in, so that is a spurious diff on every regeneration.
+
+    Run in subprocesses because the seed is fixed at interpreter start-up.
+    """
+    script = (
+        textwrap.dedent(
+            """
+        import json, sys
+        sys.path.insert(0, %r)
+        from conftest import create_dbt_factory
+
+        def model(name, deps=()):
+            return f'model.pkg.{name}', {'resource_type': 'model', 'name': name, 'package_name': 'pkg',
+                'fqn': ['pkg', name], 'original_file_path': f'models/{name}.sql',
+                'depends_on': {'nodes': list(deps)}}
+
+        def test(name, deps):
+            return f'test.pkg.{name}', {'resource_type': 'test', 'name': name, 'package_name': 'pkg',
+                'fqn': ['pkg', name], 'original_file_path': f'models/{name}.yml',
+                'depends_on': {'nodes': list(deps)}, 'config': {'severity': 'error'}}
+
+        # A chain a -> b -> c -> d -> e with a test on each of the first four, so `e` is gated on all
+        # four and the append order is observable.
+        nodes = dict([
+            model('a'), model('b', ['model.pkg.a']), model('c', ['model.pkg.b']),
+            model('d', ['model.pkg.c']), model('e', ['model.pkg.d']),
+            test('t_a', ['model.pkg.a']), test('t_b', ['model.pkg.b']),
+            test('t_c', ['model.pkg.c']), test('t_d', ['model.pkg.d']),
+        ])
+        tasks = create_dbt_factory().create_tasks({'nodes': nodes})
+        by_key = {t['task_key']: [d['task_key'] for d in (t.get('depends_on') or [])] for t in tasks}
+        print(json.dumps(by_key['e_model']))
+        """
+        )
+        % BASE_PATH
+    )
+
+    orderings = set()
+    for seed in range(8):
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, '-c', script],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, 'PYTHONHASHSEED': str(seed)},
+            cwd=str(Path(BASE_PATH).parent),
+        )
+        assert result.returncode == 0, f'seed {seed} failed:\n{result.stderr}'
+        orderings.add(result.stdout.strip())
+
+    assert len(orderings) == 1, f'depends_on ordering varies with PYTHONHASHSEED: {sorted(orderings)}'
 
 
 @pytest.mark.parametrize('name', ['@weird', '2+orders'], ids=['at-prefix', 'numeric-prefix'])

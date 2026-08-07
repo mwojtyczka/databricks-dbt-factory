@@ -1057,6 +1057,32 @@ def test_dynamic_reference_in_a_path_is_dropped_from_the_selector(tmp_path):
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
+def _assert_acyclic(manifest, bundle_tests):
+    """
+    Fails if any emitted task reaches itself through `depends_on`, which Databricks rejects at deploy.
+
+    Acyclicity is necessary but not sufficient: dropping *every* gate edge also satisfies it, so each
+    caller is paired with an assertion that the gates which should survive do — see
+    `test_a_downstream_model_is_still_gated_on_a_versioned_unit_test` and
+    `test_a_v_named_model_does_not_pick_up_an_unrelated_models_test`.
+    """
+    tasks = create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest)
+    graph = {t['task_key']: {d['task_key'] for d in (t.get('depends_on') or [])} for t in tasks}
+
+    def reachable(start):
+        seen, stack = set(), [start]
+        while stack:
+            for dep in graph.get(stack.pop(), ()):
+                if dep not in seen:
+                    seen.add(dep)
+                    stack.append(dep)
+        return seen
+
+    cycles = [key for key in graph if key in reachable(key)]
+    assert not cycles, f'bundle_tests={bundle_tests} emitted a cyclic depends_on for {cycles}: {graph}'
+    return graph
+
+
 def test_versioned_unit_test_group_does_not_create_a_dependency_cycle(tmp_path):
     """
     The clones' shared task waits for every version's model, so its refs must be visible to the
@@ -1081,20 +1107,7 @@ def test_versioned_unit_test_group_does_not_create_a_dependency_cycle(tmp_path):
     manifest = _parse(tmp_path)
     assert len(manifest['unit_tests']) == 2, 'fixture no longer produces two clones'
 
-    tasks = create_dbt_factory(bundle_tests=False).create_tasks(manifest)
-    graph = {t['task_key']: {d['task_key'] for d in (t.get('depends_on') or [])} for t in tasks}
-
-    def reachable(start):
-        seen, stack = set(), [start]
-        while stack:
-            for dep in graph.get(stack.pop(), ()):
-                if dep not in seen:
-                    seen.add(dep)
-                    stack.append(dep)
-        return seen
-
-    cycles = [key for key in graph if key in reachable(key)]
-    assert not cycles, f'emitted a cyclic depends_on for {cycles}: {graph}'
+    _assert_acyclic(manifest, bundle_tests=False)
 
 
 def test_a_downstream_model_is_still_gated_on_a_versioned_unit_test(tmp_path):
@@ -1406,17 +1419,208 @@ def test_interlocking_cross_model_tests_do_not_create_a_cycle(tmp_path):
     manifest = _parse(tmp_path)
 
     for bundle_tests in (False, True):
-        tasks = create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest)
-        graph = {t['task_key']: {d['task_key'] for d in (t.get('depends_on') or [])} for t in tasks}
+        _assert_acyclic(manifest, bundle_tests)
 
-        def reachable(start, graph=graph):
-            seen, stack = set(), [start]
-            while stack:
-                for dep in graph.get(stack.pop(), ()):
-                    if dep not in seen:
-                        seen.add(dep)
-                        stack.append(dep)
-            return seen
 
-        cycles = [key for key in graph if key in reachable(key)]
-        assert not cycles, f'bundle_tests={bundle_tests} emitted a cyclic depends_on for {cycles}: {graph}'
+def test_interlocking_tests_on_v_prefixed_models_do_not_create_a_cycle(tmp_path):
+    """
+    `test_interlocking_cross_model_tests_do_not_create_a_cycle` with every model renamed to start with `v`.
+
+    The version-sibling exemption to the subset rule was matched with substring tests — `'.v' in ref` and
+    `startswith(f'{stem}.v')` — rather than by checking the final fqn segment is a real version. So for
+    `model.probe.vendors`, `'.v'` matched inside `.vendors` and any ancestor under `model.probe.v*`
+    counted as a "version sibling", handing ordinary non-versioned models the relaxed rule and reopening
+    exactly the loop the subset rule prevents. Verified on dbt 1.12.0: this produced
+    `vn_model -> relationships_va... -> vb_model -> relationships_vc... -> vn_model`.
+    """
+    _write_project(
+        tmp_path,
+        {
+            'va.sql': MODEL_SQL,
+            'vc.sql': MODEL_SQL,
+            'vn.sql': "select * from {{ ref('va') }}\n",
+            'vb.sql': "select * from {{ ref('vc') }}\n",
+        },
+        schema_yml=(
+            'models:\n'
+            '  - name: va\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - relationships: {to: ref("vb"), field: id}\n'
+            '  - name: vc\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - relationships: {to: ref("vn"), field: id}\n'
+            '  - name: vn\n    columns:\n      - name: id\n'
+            '  - name: vb\n    columns:\n      - name: id\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    for bundle_tests in (False, True):
+        _assert_acyclic(manifest, bundle_tests)
+
+
+def test_cross_referencing_versioned_models_do_not_create_a_cycle(tmp_path):
+    """
+    Two versioned models whose later versions reference each other's earlier version.
+
+    This is the version-sibling exemption's *own* case, and it is unsound there too — the exemption is the
+    per-edge cycle test that `_extend_deps_with_upstream_tests` documents as not composing, wearing a
+    narrower hat. Each model's shared unit-test task waits for both of its versions, and the guard's
+    `ref != node` / `node not in ancestors(ref)` checks pass independently for both edges, so the two
+    gates together close a loop. Verified on dbt 1.12.0:
+    `alpha_v2_model -> unit_test...beta_v1 -> beta_v2_model -> unit_test...alpha_v1 -> alpha_v2_model`.
+
+    Fixing the substring bug in `test_interlocking_tests_on_v_prefixed_models_do_not_create_a_cycle` does
+    not reach this: here the segments really are versions.
+    """
+    _write_project(
+        tmp_path,
+        {
+            'alpha_v1.sql': MODEL_SQL,
+            'alpha_v2.sql': "select * from {{ ref('beta', v=1) }}\n",
+            'beta_v1.sql': MODEL_SQL,
+            'beta_v2.sql': "select * from {{ ref('alpha', v=1) }}\n",
+        },
+        schema_yml=(
+            'models:\n'
+            '  - name: alpha\n    latest_version: 2\n    columns:\n      - name: id\n'
+            '    versions:\n      - v: 1\n      - v: 2\n'
+            '  - name: beta\n    latest_version: 2\n    columns:\n      - name: id\n'
+            '    versions:\n      - v: 1\n      - v: 2\n'
+            'unit_tests:\n'
+            '  - name: ut_alpha\n    model: alpha\n    given: []\n    expect: {rows: [{id: 1}]}\n'
+            '  - name: ut_beta\n    model: beta\n    given: []\n    expect: {rows: [{id: 1}]}\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    _assert_acyclic(manifest, bundle_tests=False)
+
+
+def test_a_v_named_model_does_not_pick_up_an_unrelated_models_test(tmp_path):
+    """
+    The other half of the version-sibling substring bug, and the half acyclicity cannot see.
+
+    `_version_sibling_of_any` compared ids with `'.v' in ref` and `startswith(f'{stem}.v')`, so for
+    `model.probe.vendors` the `'.v'` matched inside `.vendors` and every `model.probe.v*` counted as a
+    version sibling. Besides closing cycles, that relaxation adds gate edges that are merely *wrong*:
+    here `downstream` refs only `vendors`, yet it waited on a `relationships` test of `visits` — a model
+    it has no dependency on. That edge does not close a loop, so the cycle tests pass with the bug still
+    present; only an assertion on the exact deps catches it.
+
+    Nothing about these models is versioned — dbt reports `version: None` for all three on dbt 1.12.0 —
+    so the exemption should never have been consulted at all.
+    """
+    _write_project(
+        tmp_path,
+        {
+            'vendors.sql': MODEL_SQL,
+            'visits.sql': MODEL_SQL,
+            'downstream.sql': "select * from {{ ref('vendors') }}\n",
+        },
+        schema_yml=(
+            'models:\n'
+            '  - name: vendors\n    columns:\n      - name: id\n'
+            '  - name: visits\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - relationships:\n              to: ref(\'vendors\')\n              field: id\n'
+            '  - name: downstream\n    columns:\n      - name: id\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    # Guard the premise: none of these is a versioned model.
+    assert all(info.get('version') is None for info in manifest['nodes'].values() if info['resource_type'] == 'model')
+
+    tasks = create_dbt_factory(bundle_tests=False).create_tasks(manifest)
+    deps = {t['task_key']: {d['task_key'] for d in (t.get('depends_on') or [])} for t in tasks}
+
+    assert deps['downstream_model'] == {'vendors_model'}, (
+        f'downstream_model deps {sorted(deps["downstream_model"])} include a test of `visits`, which it '
+        f'does not depend on — the version-sibling exemption was applied to non-versioned models'
+    )
+
+
+def _random_gating_project(rng: random.Random) -> tuple[dict[str, str], str]:
+    """
+    A randomised project of plain and versioned models wired with refs and multi-endpoint tests.
+
+    Aimed at the gating graph rather than at selectors, so it draws the ingredients that produce gate
+    edges: `ref()`s between models (which make ancestors), `relationships` tests (whose refs span two
+    models, the shape the subset rule judges), and versioned models with unit tests (the one exemption to
+    that rule). Half the names begin with `v` because that is what distinguished a version segment from an
+    ordinary name in the substring bug.
+    """
+    names = ['va', 'vb', 'orders', 'items'][: rng.randint(2, 4)]
+    versioned = {name for name in names if rng.random() < 0.4}
+
+    files: dict[str, str] = {}
+    model_entries: list[str] = []
+    unit_tests: list[str] = []
+    # Every ref target must already be selectable, so refs only point at previously emitted models.
+    emitted: list[tuple[str, bool]] = []
+
+    for name in names:
+
+        def ref_to_earlier() -> str:
+            if not emitted or rng.random() < 0.3:
+                return MODEL_SQL
+            target, target_versioned = rng.choice(emitted)
+            if target_versioned:
+                return "select * from {{ ref('%s', v=1) }}\n" % target
+            return "select * from {{ ref('%s') }}\n" % target
+
+        if name in versioned:
+            files[f'{name}_v1.sql'] = ref_to_earlier()
+            files[f'{name}_v2.sql'] = ref_to_earlier()
+            model_entries.append(
+                f'  - name: {name}\n    latest_version: 2\n    columns:\n      - name: id\n'
+                f'    versions:\n      - v: 1\n      - v: 2\n'
+            )
+            if rng.random() < 0.7:
+                unit_tests.append(
+                    f'  - name: ut_{name}\n    model: {name}\n    given: []\n    expect: {{rows: [{{id: 1}}]}}\n'
+                )
+        else:
+            files[f'{name}.sql'] = ref_to_earlier()
+            model_entries.append(f'  - name: {name}\n    columns:\n      - name: id\n')
+        emitted.append((name, name in versioned))
+
+    # `relationships` tests come last so both endpoints exist. They are what the subset rule is for: a
+    # test whose refs span two models is only safe to gate a node downstream of both.
+    for index, entry in enumerate(model_entries):
+        other = rng.choice(names)
+        if names[index] == other or rng.random() < 0.5:
+            continue
+        target = f"ref('{other}', v=1)" if other in versioned else f"ref('{other}')"
+        # Block style, not `{to: ..., field: id}`: the comma inside a versioned `ref('x', v=1)` is a
+        # separator in YAML flow style, which dbt then rejects as a keyword argument to the test macro.
+        model_entries[index] = entry.replace(
+            '      - name: id\n',
+            '      - name: id\n        data_tests:\n'
+            f'          - relationships:\n              to: {target}\n              field: id\n',
+            1,
+        )
+
+    schema = 'models:\n' + ''.join(model_entries)
+    if unit_tests:
+        schema += 'unit_tests:\n' + ''.join(unit_tests)
+    return files, schema
+
+
+@pytest.mark.parametrize('seed', range(12))
+def test_random_gating_layouts_never_emit_a_cycle(tmp_path, seed):
+    """
+    The generative counterpart to the three enumerated cycle fixtures.
+
+    Every per-edge rule tried here was sound for the layouts someone thought to write down and wrong for
+    one nobody had — three rounds, three fresh cycles. So the property is asserted over randomised
+    ref/test/version wiring as well: whatever dbt parses, the emitted `depends_on` must be acyclic, in both
+    modes. A cycle is not a cosmetic defect — Databricks rejects the job at deploy.
+
+    Gating strength is asserted separately, by `test_a_downstream_model_is_still_gated_on_a_versioned_unit_test`:
+    a graph with every gate edge dropped is acyclic too, so this test alone cannot catch over-refusal.
+    """
+    files, schema = _random_gating_project(random.Random(seed))
+    _write_project(tmp_path, files, schema_yml=schema)
+    manifest = _parse(tmp_path)
+
+    for bundle_tests in (False, True):
+        _assert_acyclic(manifest, bundle_tests)

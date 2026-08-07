@@ -130,7 +130,9 @@ def _selected_ids(
 
 
 @functools.lru_cache(maxsize=None)
-def _selected_unique_ids(root: Path, select: str, resource_type: str | None) -> tuple[str, ...]:
+def _selected_unique_ids(
+    root: Path, select: str, resource_type: str | None, indirect_selection: str | None = None
+) -> tuple[str, ...]:
     """
     The *unique ids* dbt resolves `select` to, rather than the display names `_selected_ids` returns.
 
@@ -140,6 +142,8 @@ def _selected_unique_ids(root: Path, select: str, resource_type: str | None) -> 
     args = ['ls', '--quiet', '--select', select, '--output', 'json', '--output-keys', 'unique_id']
     if resource_type:
         args += ['--resource-type', resource_type]
+    if indirect_selection:
+        args += ['--indirect-selection', indirect_selection]
     result = _dbt(root, *args)
     assert result.success, f'dbt ls failed for {select!r}: {result.exception}'
     assert isinstance(result.result, list), f'expected dbt ls to return a list, got {type(result.result)}'
@@ -202,20 +206,6 @@ def _tested_resources(manifest: dict, ids: list[str]) -> set[str]:
     return tested
 
 
-def _dbt_ls_name(unique_id: str, manifest: dict) -> str:
-    """
-    Translates a manifest id into the name `dbt ls` prints for it.
-
-    `dbt ls` reports a *selector name* rather than a unique id — `probe.orders` for a model, and
-    `unit_test:probe.ut_orders` for a unit test — so an id-based expectation has to be converted before
-    it can be compared. Derived from the node's own fqn, which is what dbt joins.
-    """
-    info = {**manifest.get('nodes', {}), **manifest.get('unit_tests', {})}[unique_id]
-    if (info.get('resource_type') or '') == 'unit_test':
-        return f"unit_test:{info['package_name']}.{info['name']}"
-    return '.'.join(info['fqn'])
-
-
 def _assert_each_task_selects_its_own_node(tmp_path: Path, manifest: dict, bundle_tests: bool) -> None:
     """
     Asserts every resource task resolves to exactly the node it is named for.
@@ -234,14 +224,13 @@ def _assert_each_task_selects_its_own_node(tmp_path: Path, manifest: dict, bundl
         if unique_id is None:
             unmapped.append(task_key)
             continue
-        selected = _selected_ids(tmp_path, select, resource_type=None, indirect_selection='empty')
-        expected = _dbt_ls_name(unique_id, manifest)
-        # A bundled `<resource>_test` task deliberately runs the resource's whole test set, so its
-        # selector addresses the *resource*; `--indirect-selection empty` reduces that to the resource
-        # itself, which is what makes the same equality check valid for both kinds of task.
-        assert selected == (expected,), (
-            f'{task_key} selects {selected} via {select!r}, expected exactly ({expected!r},) — '
-            f'the node it is named for ({unique_id})'
+        # Compare against the *manifest unique id*, not the name `dbt ls` displays. Two generic tests can
+        # share a display name while separate files keep each selector individually addressable, so a
+        # name-based assertion would be satisfied by pointing task A at task B's node.
+        selected = _selected_unique_ids(tmp_path, select, None, indirect_selection='empty')
+        assert selected == (unique_id,), (
+            f'{task_key} selects {selected} via {select!r}, expected exactly ({unique_id!r},) — '
+            f'the node it is named for'
         )
     # No task may go unchecked: an unmapped key means this helper has drifted from the factory's keying,
     # which is how bundled test tasks previously escaped the assertion entirely.
@@ -394,41 +383,24 @@ def test_awkward_file_names_still_resolve_to_one_node(tmp_path, file_name, note)
         assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one node'
 
 
-def test_singular_test_sharing_a_models_fqn_is_refused(tmp_path):
+def test_singular_test_sharing_a_models_fqn_is_addressable_under_empty(tmp_path):
     """
-    `models/beta.sql` and `tests/beta.sql` parse with the same fqn and base name. An earlier revision
-    emitted both, reasoning that each task's verb plus dbt's resource-type filtering keeps them apart.
+    `models/beta.sql` and `tests/beta.sql` parse with the same fqn and base name, and the model carries a
+    test of its own.
 
-    It does not, and the earlier version of this test could not see why: its fixture had no *attached*
-    tests, so nothing was there to be swept in. dbt intersects `resource_type:` only after expanding
-    indirect selection, so under the default eager mode the singular test's selector also matches the
-    model and therefore pulls in the model's own attached tests. Two consequences, both confirmed with
-    `dbt ls` on dbt 1.12.0 for the layout below:
-
-        probe.beta,package:probe,file:beta.sql,resource_type:test
-          -> ('test.probe.beta', 'test.probe.not_null_beta_id.13481bf6b3')
-
-    `not_null_beta_id` runs twice, and it runs inside `beta_test`, whose only upstream is `gamma_model`
-    — so it asserts on `beta` before `beta_model` has built it. No term dbt offers separates them, so
-    the singular test must be refused.
-
-    It is the *attached* test leaking that makes this unaddressable, not reaching the model: without
-    `not_null` on `beta` the same layout is fine, which
-    `test_singular_test_named_after_a_model_without_other_tests_is_kept` pins.
+    Under dbt's default eager mode this had to be refused: the test task's selector also reached the
+    model, and eager selection then added the model's attached `not_null`, so the task asserted on `beta`
+    before `beta_model` had built it. Pinning `--indirect-selection empty` removes that — verified on dbt
+    1.12.0, where the same selector returns two tests under eager and one under `empty` — so the layout
+    generates.
     """
     _write_project(
         tmp_path,
         {'beta.sql': MODEL_SQL, 'gamma.sql': MODEL_SQL},
         schema_yml=(
             'models:\n'
-            '  - name: beta\n'
-            '    columns:\n'
-            '      - name: id\n'
-            '        data_tests: [not_null]\n'
-            '  - name: gamma\n'
-            '    columns:\n'
-            '      - name: id\n'
-            '        data_tests: [not_null]\n'
+            '  - name: beta\n    columns:\n      - name: id\n        data_tests: [not_null]\n'
+            '  - name: gamma\n    columns:\n      - name: id\n        data_tests: [not_null]\n'
         ),
     )
     tests_dir = tmp_path / 'tests'
@@ -436,12 +408,9 @@ def test_singular_test_sharing_a_models_fqn_is_refused(tmp_path):
     (tests_dir / 'beta.sql').write_text("select * from {{ ref('gamma') }} where id is null\n", encoding='utf-8')
     manifest = _parse(tmp_path)
 
-    # dbt's own verdict on the selector we would otherwise have emitted: two tests, not one.
-    swept = _selected_ids(tmp_path, 'probe.beta,package:probe,file:beta.sql,resource_type:test', None)
-    assert len(swept) == 2, f'expected the singular test selector to sweep in the model tests, got {swept}'
-
-    with pytest.raises(ValueError, match='also runs test.probe.not_null_beta_id'):
-        _resource_selectors(manifest, bundle_tests=False)
+    leaky = 'fqn:probe.beta,package:probe,file:beta.sql,resource_type:test'
+    assert len(_selected_unique_ids(tmp_path, leaky, None)) == 2, 'eager no longer leaks; revisit this test'
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
 def test_singular_test_not_sharing_a_models_fqn_is_kept(tmp_path):
@@ -547,15 +516,19 @@ def test_same_type_tests_in_one_file_resolve_individually(tmp_path):
         assert len(selected) == 1, f'{task_key} selects {selected} via {select!r}, expected exactly one test'
 
 
-def test_leading_numeric_graph_operator_in_a_name_is_refused(tmp_path):
+def test_leading_numeric_graph_operator_in_a_name_is_addressable_under_an_explicit_fqn(tmp_path):
     """
-    dbt reads a leading `N+` as parent depth, not just a trailing `+N`, so a bare name of `2+check`
-    is not the node's name at all — it means "check, plus two levels of its parents".
+    dbt reads a leading `N+` as parent depth only while it is *inferring* the selector method. Naming the
+    method makes it literal, so a custom test name of `2+check` is addressable.
 
-    Reaching this needs a name that is *also* stuck sharing a file, since a resource owning its file
-    is addressed by `package:`+`file:` regardless of its name. A custom test name in a `schema.yml`
-    under a spacey directory is that shape: the space kills the fqn, the leading `2+` kills the name,
-    and the shared file kills `file:` — so generation must refuse.
+    This layout used to be refused, and it is the sharpest illustration of what the `fqn:` prefix buys: the
+    space in the directory kills the fqn path, the shared `schema.yml` kills `file:`, and the leading `2+`
+    used to kill the name fallback too — leaving nothing. Verified on dbt 1.12.0: bare `2+check` selects
+    nothing, while `fqn:2+check` resolves to exactly `test.probe.2+check`.
+
+    A *trailing* `+N` is still fatal and still refused; see
+    `test_a_file_name_alone_is_not_enough_to_address_a_resource` and, for sources,
+    `test_source_with_a_trailing_graph_operator_is_refused`.
     """
     _write_project(tmp_path, {'my dir/a.sql': MODEL_SQL, 'my dir/b.sql': MODEL_SQL})
     (tmp_path / 'models' / 'my dir' / 'schema.yml').write_text(
@@ -573,11 +546,11 @@ def test_leading_numeric_graph_operator_in_a_name_is_refused(tmp_path):
     )
     manifest = _parse(tmp_path)
 
-    # dbt's own reading of the name we would have fallen back to: not this node.
-    assert not _selected_ids(tmp_path, '2+check', 'test', indirect=False)
+    # The bare value really is unusable — this is why the explicit method matters.
+    assert not _selected_unique_ids(tmp_path, '2+check', 'test')
+    assert _selected_unique_ids(tmp_path, 'fqn:2+check', 'test')
 
-    with pytest.raises(ValueError, match='Cannot generate a task for'):
-        _resource_selectors(manifest, bundle_tests=False)
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
 def test_source_with_a_trailing_graph_operator_is_refused(tmp_path):
@@ -1029,30 +1002,38 @@ def test_duplicate_test_names_sharing_an_fqn_are_refused(tmp_path):
                 '        data_tests:\n'
                 '          - not_null: {name: "check/slash"}\n'
             ),
-            'a slash dispatches the selector to MethodName.Path',
+            'a slash would dispatch a bare value to MethodName.Path',
             id='path-dispatch',
         ),
         pytest.param(
             {'orders.sql.sql': MODEL_SQL, 'plain.sql': MODEL_SQL},
             None,
-            'a .sql suffix dispatches the selector to MethodName.File',
+            'a .sql suffix would dispatch a bare value to MethodName.File',
             id='file-dispatch',
+        ),
+        pytest.param(
+            {'orders.SQL.sql': MODEL_SQL, 'plain.sql': MODEL_SQL},
+            None,
+            'dbt lowercases before testing the suffix, so .SQL dispatches too',
+            id='file-dispatch-uppercase',
         ),
     ],
 )
-def test_method_dispatching_names_are_refused(tmp_path, layout, schema_yml, note):
+def test_method_dispatching_names_are_addressable_with_an_explicit_fqn(tmp_path, layout, schema_yml, note):
     """
-    `SelectionCriteria.default_method` picks the selector method from the *value*: a path separator makes
-    it `MethodName.Path`, and a `.sql`/`.py`/`.csv` suffix makes it `MethodName.File`. Neither is a dbt
-    grammar metacharacter, so an earlier revision emitted both and each matched nothing while the task
-    exited 0 — a test that never ran, and a model that was never built. Confirmed on dbt 1.12.0.
+    `SelectionCriteria.default_method` infers the method from a bare value's shape: a path separator makes
+    it `MethodName.Path`, and a `.sql`/`.py`/`.csv` suffix (compared case-insensitively) makes it
+    `MethodName.File`. Both then match nothing while the task still exits 0.
+
+    Emitting `fqn:` names the method instead of letting dbt guess, so these layouts are addressable rather
+    than refused. Verified on dbt 1.12.0: bare `probe.orders.sql` and `probe.check/slash` select nothing,
+    while the `fqn:`-prefixed forms each resolve to exactly their node.
     """
     assert note
     _write_project(tmp_path, layout, schema_yml=schema_yml)
     manifest = _parse(tmp_path)
 
-    with pytest.raises(ValueError, match='Cannot generate a task for'):
-        _resource_selectors(manifest, bundle_tests=False)
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
 def test_dynamic_reference_in_a_path_is_dropped_from_the_selector(tmp_path):
@@ -1116,6 +1097,46 @@ def test_versioned_unit_test_group_does_not_create_a_dependency_cycle(tmp_path):
     assert not cycles, f'emitted a cyclic depends_on for {cycles}: {graph}'
 
 
+def test_a_downstream_model_is_still_gated_on_a_versioned_unit_test(tmp_path):
+    """
+    The companion to the cycle test above, and the reason acyclicity alone is not enough: a graph with
+    *every* gating edge removed is also acyclic, so that check passes while the quality gate is gone.
+
+    The shared unit-test task waits for both version models, so its refs are `{v1, v2}`. An earlier
+    revision required every ref of a test to be an ancestor of the node being gated, which `consumer` —
+    referencing only v1 — fails. The edge was dropped and a failing v1 assertion no longer blocked
+    `consumer`, contrary to the documented gating behaviour. The guard now tests the cycle condition
+    directly, so the gate survives.
+    """
+    _write_project(
+        tmp_path,
+        {
+            'orders_v1.sql': MODEL_SQL,
+            'orders_v2.sql': MODEL_SQL,
+            'consumer.sql': "select * from {{ ref('orders', v=1) }}\n",
+        },
+        schema_yml=(
+            'models:\n  - name: orders\n    latest_version: 2\n'
+            '    columns:\n      - name: id\n'
+            '    versions:\n      - v: 1\n      - v: 2\n'
+            '  - name: consumer\n    columns:\n      - name: id\n'
+            'unit_tests:\n  - name: unit_orders\n    model: orders\n'
+            '    given: []\n    expect: {rows: [{id: 1}]}\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    tasks = create_dbt_factory(bundle_tests=False).create_tasks(manifest)
+    by_key = {t['task_key']: {d['task_key'] for d in (t.get('depends_on') or [])} for t in tasks}
+    unit_keys = [key for key in by_key if key.startswith('unit_test')]
+    assert unit_keys, f'expected a unit-test task, got {sorted(by_key)}'
+
+    assert any(key in by_key['consumer_model'] for key in unit_keys), (
+        f'consumer_model deps {sorted(by_key["consumer_model"])} include no unit-test task, so a failing '
+        f'v1 assertion would not block it'
+    )
+
+
 def test_backslash_in_a_posix_file_name_keeps_its_file_term(tmp_path):
     """
     dbt splits `original_file_path` with `Path`, which is platform-dependent, so on POSIX a backslash is
@@ -1127,21 +1148,6 @@ def test_backslash_in_a_posix_file_name_keeps_its_file_term(tmp_path):
     manifest = _parse(tmp_path)
 
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
-
-
-def test_uppercase_sql_suffix_is_refused_like_lowercase(tmp_path):
-    """
-    dbt's `default_method` lowercases before testing the suffix, so a model named `orders.SQL` is
-    dispatched to `MethodName.File` exactly as `orders.sql` is. A case-sensitive guard let it through to a
-    selector that matches nothing — verified with `dbt ls` on dbt 1.12.0, where `dbt run` exits 0 having
-    built nothing.
-    """
-    _write_project(tmp_path, {'orders.SQL.sql': MODEL_SQL, 'plain.sql': MODEL_SQL})
-    manifest = _parse(tmp_path)
-
-    assert not _selected_ids(tmp_path, 'probe.orders.SQL,package:probe,file:orders.SQL.sql', 'model')
-    with pytest.raises(ValueError, match='Cannot generate a task for'):
-        _resource_selectors(manifest, bundle_tests=False)
 
 
 def test_file_stem_collision_is_refused(tmp_path):
@@ -1200,14 +1206,16 @@ def test_singular_test_named_after_a_model_without_other_tests_is_kept(tmp_path)
 
 def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
     """
-    Asserts the exactness model predicts exactly what dbt runs, for every emitted task.
+    Asserts the factory's exactness model predicts exactly what dbt runs, for every emitted task.
 
-    This is the strongest available check on `_nodes_run_by`, because it compares the model against dbt
-    in *both* directions. Under-predicting means a collision slips through and a task runs another task's
-    resource; over-predicting means refusing a project dbt handles. A count-based assertion sees neither.
+    The strongest available check on `_matching_ids`, because it compares the model against dbt in *both*
+    directions: under-predicting lets a collision through, so a task runs another task's resource;
+    over-predicting refuses a project dbt handles. A count-based assertion sees neither.
 
-    Bundled `<resource>_test` tasks are skipped: they deliberately sweep a resource's whole test set with
-    `--indirect-selection cautious`, so running several nodes is their purpose rather than a defect.
+    Each task is replayed with the exact flags its own command carries — the verb's resource type and its
+    `--indirect-selection` mode — so the comparison is against what that task will really run. Bundled
+    `<resource>_test` tasks are skipped: sweeping a resource's whole test set with `cautious` is their
+    purpose rather than a defect.
     """
     peers = {
         **{k: v for k, v in manifest['nodes'].items() if (v.get('config') or {}).get('enabled') is not False},
@@ -1219,17 +1227,19 @@ def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
         command = shlex.split(task['dbt_task']['commands'][-1])
         verb = command[1]
         select = command[command.index('--select') + 1]
-        if '--indirect-selection' in command or select.startswith('source:'):
+        if select.startswith('source:'):
             continue
-        expand = verb == 'test'
-        predicted = DbtFactory._nodes_run_by(select, index, expand=expand)  # pylint: disable=protected-access
+        mode = command[command.index('--indirect-selection') + 1] if '--indirect-selection' in command else None
+        if mode == 'cautious':  # a bundled sweep, deliberately multi-node
+            continue
+        predicted = set(DbtFactory._matching_ids(select, index))  # pylint: disable=protected-access
         resource_type = None if verb == 'test' else {'run': 'model', 'seed': 'seed', 'snapshot': 'snapshot'}[verb]
         # Compare on unique ids: `_selected_ids` returns the *display* names `dbt ls` prints, which do not
         # match manifest keys, so intersecting those with `peers` would silently compare against nothing.
-        actual = set(_selected_unique_ids(tmp_path, select, resource_type)) & set(peers)
-        assert predicted == actual, (
-            f'{task["task_key"]}: model predicts {sorted(predicted)} but dbt runs {sorted(actual)} ' f'for {select!r}'
-        )
+        actual = set(_selected_unique_ids(tmp_path, select, resource_type, indirect_selection=mode)) & set(peers)
+        assert (
+            predicted == actual
+        ), f'{task["task_key"]}: model predicts {sorted(predicted)} but dbt runs {sorted(actual)} for {select!r}'
 
 
 @pytest.mark.parametrize('bundle_tests', [False, True], ids=['per-test', 'bundled'])
@@ -1300,17 +1310,16 @@ def test_exactness_model_predicts_what_dbt_runs(tmp_path, layout, schema_yml, ex
     _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests)
 
 
-def test_attached_test_leaking_through_a_non_matching_model_is_refused(tmp_path):
+def test_attached_test_leaking_through_a_non_matching_model_is_prevented_by_empty(tmp_path):
     """
-    dbt expands indirect selection *per component* and intersects afterwards, so a component can reach a
-    model that the intersection excludes while the model's attached tests are added inside that component
-    and survive on their own terms.
+    dbt expands indirect selection *per component* and intersects afterwards, so under eager mode a
+    component could reach a model the intersection excluded while the model's attached tests were added
+    inside that component and survived on their own terms.
 
     Verified on dbt 1.12.0: with `models/orders.sql` carrying `not_null` and `models/other.sql` carrying
-    `not_null: {name: orders}` in the shared `schema.yml`, the selector for the second test resolves to
-    *both* tests. Its task depends only on `other_model`, so `not_null_orders_id` asserts on `orders`
-    before `orders_model` has built it. An "intersect, then expand" model cannot see this, because
-    `file:schema.yml` excludes `models/orders.sql` before the expansion is considered.
+    `not_null: {name: orders}` in the shared `schema.yml`, the second test's selector resolves to *both*
+    tests under eager and to exactly one under `empty`. Pinning `empty` therefore makes the layout
+    addressable instead of refused, and removes the need to model the expansion at all.
     """
     _write_project(
         tmp_path,
@@ -1324,24 +1333,20 @@ def test_attached_test_leaking_through_a_non_matching_model_is_refused(tmp_path)
     )
     manifest = _parse(tmp_path)
 
-    leaked = _selected_ids(
-        tmp_path, 'probe.orders,package:probe,file:schema.yml,resource_type:test,test_name:not_null', None
-    )
-    assert len(leaked) == 2, f'expected the attached test to leak through the model, got {leaked}'
+    leaky = 'fqn:probe.orders,package:probe,file:schema.yml,resource_type:test,test_name:not_null'
+    assert len(_selected_unique_ids(tmp_path, leaky, None)) == 2, 'eager no longer leaks; revisit this test'
+    assert len(_selected_unique_ids(tmp_path, leaky, None, indirect_selection='empty')) == 1
 
-    with pytest.raises(ValueError, match='also runs'):
-        _resource_selectors(manifest, bundle_tests=False)
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
-def test_multi_endpoint_test_leaking_from_one_endpoint_is_refused(tmp_path):
+def test_multi_endpoint_test_leaking_from_one_endpoint_is_prevented_by_empty(tmp_path):
     """
     dbt's eager rule is "if ANY parent is selected, select the test" — its own words in
-    `expand_selection`. An earlier revision required *every* endpoint (the `cautious` rule) and so
-    ignored multi-endpoint tests entirely.
+    `expand_selection` — so a `relationships` test leaked into a task selecting just one endpoint.
 
-    Verified on dbt 1.12.0: a `relationships` test on `beta` referencing `delta` is pulled in by the
-    singular `tests/beta.sql` task's selector, whose only dependency is `gamma_model` — so it races both
-    `beta_model` and `delta_model`.
+    Verified on dbt 1.12.0: the singular `tests/beta.sql` task's selector resolves to both that test and
+    `relationships_beta_id__id__ref_delta_` under eager, and to only its own node under `empty`.
     """
     _write_project(
         tmp_path,
@@ -1359,8 +1364,59 @@ def test_multi_endpoint_test_leaking_from_one_endpoint_is_refused(tmp_path):
     (tests_dir / 'beta.sql').write_text("select * from {{ ref('gamma') }} where id is null\n", encoding='utf-8')
     manifest = _parse(tmp_path)
 
-    leaked = _selected_ids(tmp_path, 'probe.beta,package:probe,file:beta.sql,resource_type:test', None)
-    assert len(leaked) == 2, f'expected the relationships test to leak from one endpoint, got {leaked}'
+    leaky = 'fqn:probe.beta,package:probe,file:beta.sql,resource_type:test'
+    assert len(_selected_unique_ids(tmp_path, leaky, None)) == 2, 'eager no longer leaks; revisit this test'
+    assert len(_selected_unique_ids(tmp_path, leaky, None, indirect_selection='empty')) == 1
 
-    with pytest.raises(ValueError, match='also runs'):
-        _resource_selectors(manifest, bundle_tests=False)
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
+
+
+def test_interlocking_cross_model_tests_do_not_create_a_cycle(tmp_path):
+    """
+    Two multi-endpoint tests pointing at each other's downstream models.
+
+    A gate edge is only safe to add when it respects the dbt graph's topological order, which the subset
+    rule enforces. Testing the cycle condition per edge instead is sound in isolation but not for a *set*
+    of edges: `ancestors_by_node` describes the dbt graph while the edges added are task edges, so once
+    several gates exist the reachability consulted no longer matches the graph being built.
+
+    This layout closes the loop under that weaker rule — verified on dbt 1.12.0, where it produced
+    `b_model -> relationships_c... -> n_model -> relationships_a... -> b_model`, which Databricks rejects
+    at deploy. `test_a_downstream_model_is_still_gated_on_a_versioned_unit_test` is the companion: acyclic
+    alone is satisfied by dropping every gate, so both properties need asserting.
+    """
+    _write_project(
+        tmp_path,
+        {
+            'a.sql': MODEL_SQL,
+            'c.sql': MODEL_SQL,
+            'n.sql': "select * from {{ ref('a') }}\n",
+            'b.sql': "select * from {{ ref('c') }}\n",
+        },
+        schema_yml=(
+            'models:\n'
+            '  - name: a\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - relationships: {to: ref("b"), field: id}\n'
+            '  - name: c\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - relationships: {to: ref("n"), field: id}\n'
+            '  - name: n\n    columns:\n      - name: id\n'
+            '  - name: b\n    columns:\n      - name: id\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    for bundle_tests in (False, True):
+        tasks = create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest)
+        graph = {t['task_key']: {d['task_key'] for d in (t.get('depends_on') or [])} for t in tasks}
+
+        def reachable(start, graph=graph):
+            seen, stack = set(), [start]
+            while stack:
+                for dep in graph.get(stack.pop(), ()):
+                    if dep not in seen:
+                        seen.add(dep)
+                        stack.append(dep)
+            return seen
+
+        cycles = [key for key in graph if key in reachable(key)]
+        assert not cycles, f'bundle_tests={bundle_tests} emitted a cyclic depends_on for {cycles}: {graph}'

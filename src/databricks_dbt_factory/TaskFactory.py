@@ -219,8 +219,16 @@ class TestTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
+        # `--indirect-selection empty` is appended *after* the user's options so it cannot be overridden:
+        # this task selects its test node directly, and dbt's default eager mode would additionally run
+        # every test attached to anything the selector happens to touch. Verified with `dbt ls` on dbt
+        # 1.12.0 that `empty` preserves the direct match for generic, singular, relationships and unit
+        # tests alike, so the flag costs nothing and removes the whole class of leak. Bundled tasks keep
+        # `cautious`, where sweeping a resource's tests is the point.
         commands.append(
-            f"dbt test --select {shlex.quote(select)}" + (f" {self.dbt_options}" if self.dbt_options else "")
+            f"dbt test --select {shlex.quote(select)}"
+            + (f" {self.dbt_options}" if self.dbt_options else "")
+            + " --indirect-selection empty"
         )
 
         return DbtTask(task_key, commands, self.task_options, depends_on)

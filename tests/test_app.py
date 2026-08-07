@@ -479,3 +479,52 @@ def test_failed_generation_preserves_an_existing_runner_notebook(monkeypatch, tm
         main()
 
     assert existing_runner.read_text(encoding="utf-8") == "# edited by the user\n"
+
+
+@pytest.mark.parametrize(
+    ('spec_body', 'note'),
+    [
+        pytest.param(None, 'the input spec does not exist', id='missing-input-spec'),
+        pytest.param('not_a_job: true\n', 'the input spec holds no jobs', id='malformed-input-spec'),
+    ],
+)
+def test_input_spec_failure_preserves_an_existing_runner(monkeypatch, tmp_path, spec_body, note):
+    """
+    The runner copy must survive a failure in the *input* spec, not just in the manifest.
+
+    An earlier revision deferred the copy until task creation succeeded, which still left a runner behind
+    — overwriting an edited one — when reading or rendering an invalid input spec then failed and no
+    target spec was produced. Every fallible step now runs before anything is written.
+    """
+    assert note
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    input_path = spec_dir / "in.yaml"
+    if spec_body is not None:
+        input_path.write_text(spec_body, encoding="utf-8")
+    target_path = spec_dir / "out.yaml"
+    existing_runner = tmp_path / "run_dbt_command.py"
+    existing_runner.write_text("# edited by the user\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            str(input_path),
+            "--target-job-spec-path",
+            str(target_path),
+            "--task-type",
+            "notebook",
+            "--project-directory",
+            "../",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        main()
+
+    assert existing_runner.read_text(encoding="utf-8") == "# edited by the user\n"
+    assert not target_path.exists(), "a failed run must not write a target spec"

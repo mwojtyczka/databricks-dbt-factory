@@ -6,8 +6,6 @@ from databricks_dbt_factory.DbtTask import DbtTask
 from databricks_dbt_factory.Utils import build_task_key_maps
 
 
-# The resource types whose tasks run `dbt test`, and so are subject to dbt's indirect selection.
-_TEST_TYPES = frozenset({'test', 'unit_test'})
 # The `unique_id` prefixes of resources a test can be attached to.
 _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
 
@@ -84,37 +82,30 @@ class DbtFactory:
         return [task.to_dict() for task in tasks]
 
     _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
-    # Shared with `_SelectorIndex`, which files tests by their parents; defined at module level so both
-    # read the same definition rather than one reaching into the other.
-    _TEST_TYPES = _TEST_TYPES
     _DBT_TEST_TARGET_PREFIXES = _DBT_TEST_TARGET_PREFIXES
 
-    # Characters that change how a selector component is interpreted, so a component containing one
-    # cannot be used to address a node. Each confirmed against dbt 1.12.0 with `dbt ls`.
+    # Characters that still change how an *explicit* `fqn:` selector is interpreted, so a component
+    # containing one cannot be used to address a node. Each verified against dbt 1.12.0 with `dbt ls`.
     #
-    # Most come from dbt's grammar:
-    #   ' '    union separator (`graph/cli.py` splits the raw spec on spaces); the fragments then
-    #          match independently, so a leading fragment can select an unrelated node
+    #   ' '    union separator (`graph/cli.py` splits the raw spec on spaces) — the fragments then match
+    #          independently. dbt rejects a space in a resource *name* outright, but a space in a
+    #          *directory* reaches the fqn, and `fqn:probe.my dir.orders` selects nothing.
     #   ','    intersection separator — the component is read as two, matching zero nodes
-    #   '*?[]' `fnmatch` pattern syntax — `*` pulls in other nodes, `[...]` matches nothing
-    #   ':'    method prefix (`RAW_SELECTOR_PATTERN`) — dbt raises InvalidSelectorError
-    #   '/'    dispatches the whole selector to `MethodName.Path` (`SelectionCriteria.default_method`
-    #          calls `_probably_path`, which tests for a separator), so it is matched as a path and
-    #          resolves to nothing — a test named `check/slash` silently never runs
+    #   '*?[]' `fnmatch` pattern syntax, still honoured after the `fqn:` prefix: `fqn:probe.a*star`
+    #          selects `a*star` *and* `aXstar`, so the glob is live rather than literal
     #
-    # `{}` is *not* from dbt's grammar, which is why an earlier revision derived from that grammar
-    # alone could not have caught it: Databricks substitutes `{{...}}` dynamic references in the dbt
-    # commands field as plain text before the task runs, so a model under `models/{{job.id}}/` emits a
-    # selector that resolves locally and matches nothing once substituted. The whole task then exits 0
-    # having built nothing.
-    _SELECTOR_METACHARACTERS = frozenset(' ,*?[]:/{}')
-
-    # Suffixes that dispatch the *whole* selector to `MethodName.File` rather than matching an fqn
-    # (`SelectionCriteria.default_method`). A model at `models/orders.sql.sql` is named `orders.sql`,
-    # so its fqn selector `probe.orders.sql` is read as a file name and matches nothing while
-    # `dbt run` still exits 0. Checked against the assembled selector, not each component, because
-    # dispatch looks at the value as a whole.
-    _FILE_METHOD_SUFFIXES = ('.sql', '.py', '.csv')
+    # `{}` is the one entry that is *not* about dbt at all, and so survives the move to `fqn:`:
+    # Databricks substitutes `{{...}}` dynamic references in a task's dbt commands as plain text before
+    # the task runs, so a model under `models/{{job.id}}/` emits a selector that resolves locally and
+    # matches nothing once substituted — the task then exits 0 having built nothing.
+    #
+    # Emitting `fqn:` rather than a bare value is what keeps this list short. dbt's
+    # `SelectionCriteria.default_method` dispatches a bare value containing `/` to `MethodName.Path` and
+    # one ending `.sql`/`.py`/`.csv` to `MethodName.File`, both of which then match nothing; naming the
+    # method explicitly bypasses that heuristic entirely. Verified: bare `probe.orders.sql` and
+    # `probe.check/slash` select nothing, while `fqn:probe.orders.sql` and `fqn:probe.check/slash` each
+    # resolve to exactly their node. `:` and `{}` are likewise literal under `fqn:`.
+    _SELECTOR_METACHARACTERS = frozenset(' ,*?[]{}')
 
     @classmethod
     def _node_select(
@@ -205,18 +196,22 @@ class DbtFactory:
         # `group`, `version`, `access`, `semantic_model`, `saved_query`, `unit_test`, `selector`.
         terms: list[str] = []
         fqn = node_info.get('fqn') or []
+        # The `fqn:` prefix does *not* neutralise graph operators: `fqn:probe.orders+1` still selects
+        # `orders` and its children, verified with `dbt ls` on dbt 1.12.0. So the boundary check applies to
+        # the joined value exactly as before — naming the method only bypasses the *dispatch* heuristic.
         if fqn and cls._is_usable_selector('.'.join(fqn)) and all(cls._is_usable_component(part) for part in fqn):
-            terms.append('.'.join(fqn))
+            # `fqn:` names the method explicitly rather than relying on `SelectionCriteria.default_method`
+            # to infer it from the value's shape. That inference is what made a `/` or a `.sql` suffix
+            # fatal: dbt read the value as a path or a file name and matched nothing while the task still
+            # exited 0. With the prefix, `fqn:probe.orders.sql` and `fqn:probe.check/slash` each resolve
+            # to exactly their node — verified with `dbt ls` on dbt 1.12.0.
+            terms.append(f'fqn:{".".join(fqn)}')
         elif cls._is_usable_component(name := node_info.get('name') or '') and cls._is_usable_selector(name):
             # The fqn is unusable, so fall back to the bare resource name, which dbt matches against
             # the fqn's leaf. It is the only term that tells apart two nodes sharing a package, a
             # file and a test type — two `not_null` tests in one `schema.yml`, say. Not used *with* a
             # usable fqn, whose leaf already carries it.
-            #
-            # `_is_usable_selector` applies here too: unlike an fqn segment, a bare name *is* the
-            # whole raw selector, so a name like `orders+1` would be read as a graph operator and
-            # select the wrong node (or none). An fqn segment is shielded by the package prefix.
-            terms.append(name)
+            terms.append(f'fqn:{name}')
         else:
             raise cls._unaddressable(node_info)
 
@@ -255,40 +250,34 @@ class DbtFactory:
         """
         Raises unless `select` runs only the node it was built for.
 
-        Mirrors dbt's actual pipeline, which is *expand each component, then intersect* — see
-        `NodeSelector.select_nodes_recursively`, where every component goes through
-        `get_nodes_from_criteria` and only then is combined with `spec.combined(indirect_sets)`. Modelling
-        it the other way round (intersect, then expand) leaves a hole: a component can reach a model that
-        the intersection later excludes, yet the model's attached tests are added *inside that component*
-        and survive the intersection on their own terms.
+        Every task selects its own resource directly and pins the indirect-selection mode, so this is a
+        plain intersection of the emitted terms — no model of dbt's eager expansion is needed.
 
-        Verified on dbt 1.12.0. With `models/orders.sql` carrying `not_null`, and `models/other.sql`
-        carrying `not_null: {name: orders}` in the shared `schema.yml`, the selector
-        `probe.orders,package:probe,file:schema.yml,resource_type:test,test_name:not_null` resolves to
-        *two* tests: the `probe.orders` component matches `model.probe.orders`, pulls in its
-        `not_null_orders_id` eagerly, and that test independently satisfies `file:`, `resource_type:` and
-        `test_name:`. The task depends only on `other_model`, so it asserts on `orders` before
-        `orders_model` has built it — the exact failure this check exists to prevent.
+        That is what `--indirect-selection empty` buys. Under dbt's default eager mode the check had to
+        mirror dbt's real pipeline (*expand each component, then intersect* — see
+        `NodeSelector.select_nodes_recursively`), because a component could reach a model the intersection
+        later excluded while the model's attached tests were added *inside that component* and survived on
+        their own terms. Pinning `empty` removes the expansion entirely rather than emulating it: verified
+        with `dbt ls` on dbt 1.12.0 that `empty` preserves the direct match for generic, singular,
+        `relationships` and unit tests alike. Bundled tasks keep `cautious` and are not checked here —
+        sweeping a resource's tests is their purpose.
 
-        So each term's match set is expanded before intersecting, and expansion follows dbt's eager rule:
-        **if ANY parent is selected, select the test** (`expand_selection`'s own comment). Under that rule
-        a multi-endpoint `relationships` test leaks from a single endpoint too.
+        The contract is **equality**, not "no surplus". A selector that matches nothing is just as wrong as
+        one that matches too much: `dbt test` and `dbt run` both exit 0 on a zero-match selector, so the
+        task would go green having asserted or built nothing.
 
-        `expected_ids` names the additional ids allowed, for a group that deliberately shares one task.
-        The node recognises itself by object identity *or* by `unique_id`: identity alone would call a node
-        its own collision if a caller passed a copy, and `unique_id` alone fails on the hand-written
-        fixtures that omit the field.
+        `expected_ids` names additional ids the selector may legitimately run. The node recognises itself
+        by object identity *or* by `unique_id`: identity alone would call a node its own collision if a
+        caller passed a copy, and `unique_id` alone fails on hand-written fixtures that omit the field.
         """
         allowed = cls._own_ids(node_info, peers) | (expected_ids or set())
-        # Eager expansion only matters for a task whose command is `dbt test`: `dbt run`, `dbt seed` and
-        # `dbt snapshot` build the resources they select and never execute a test, so a model task is
-        # judged on its direct matches alone. Verified with `dbt ls` on dbt 1.12.0 — the same selector
-        # returns just the model under `--resource-type model` while pulling a test in under `test`.
-        expand = (node_info.get('resource_type') or '') in cls._TEST_TYPES
-        run = cls._nodes_run_by(select, peers, expand=expand)
+        run = set(cls._matching_ids(select, peers))
         surplus = run - allowed
         if surplus:
             raise cls._ambiguous(node_info, select, sorted(surplus))
+        missing = allowed - run
+        if missing:
+            raise cls._selects_nothing(node_info, select, sorted(missing))
 
     @staticmethod
     def _own_ids(node_info: dict, peers: dict) -> set[str]:
@@ -303,64 +292,6 @@ class DbtFactory:
         if own_id is not None and peers.get(own_id) is not None:
             return {own_id}
         return {full_name for full_name, info in peers.items() if info is node_info}
-
-    @classmethod
-    def _nodes_run_by(cls, select: str, peers: dict, expand: bool = True) -> set[str]:
-        """
-        Every node dbt would run for `select`, mirroring dbt's own pipeline.
-
-        dbt evaluates each comma-separated component, expands indirect selection *within* that component,
-        and only then intersects — see `NodeSelector.select_nodes_recursively`, where each component goes
-        through `get_nodes_from_criteria` before `spec.combined(indirect_sets)`. So the model here is: for
-        each term, the nodes it matches plus the tests eager selection attaches to them; intersect those.
-
-        `expand` is False for a `dbt run`/`seed`/`snapshot` task, which builds what it selects and never
-        executes a test — verified with `dbt ls` on dbt 1.12.0, where the same selector returns just the
-        model under `--resource-type model` while pulling a test in under `test`.
-
-        Deliberately a straightforward pass over `peers` per term. Narrowing each term against an
-        index is tempting — this is the hot path for large manifests — but a term like `package:pkg`
-        matches nearly everything, so the narrowing has to be joint, and every attempt at that dropped
-        real collisions. Correct and slower beats fast and wrong: a missed collision is a task that runs
-        another task's resource before its dependencies, which is the whole bug class this guards.
-        """
-        if not expand:
-            return set(cls._matching_ids(select, peers))
-
-        combined: set[str] | None = None
-        for term in select.split(','):
-            matched = set(cls._matching_ids(term, peers))
-            reachable = matched | cls._eagerly_attached(matched, peers)
-            combined = reachable if combined is None else combined & reachable
-        return combined or set()
-
-    @classmethod
-    def _eagerly_attached(cls, selected: set[str], peers: dict) -> set[str]:
-        """
-        The tests dbt's eager indirect selection adds when `selected` is chosen.
-
-        dbt's rule is "if ANY parent is selected, select the test" — quoted from `expand_selection`'s own
-        comment, and confirmed with `dbt ls`: a `relationships` test on `beta` referencing `delta` is
-        pulled in by a selector matching only `beta`. An earlier revision required *every* endpoint to be
-        selected, which is the `cautious` rule, and so missed multi-endpoint tests entirely.
-        """
-        if not selected:
-            return set()
-        if isinstance(peers, _SelectorIndex):
-            return peers.tests_depending_on(selected)
-        attached: set[str] = set()
-        for full_name, info in peers.items():
-            if (info.get('resource_type') or '') in cls._TEST_TYPES and cls._has_selected_parent(info, selected):
-                attached.add(full_name)
-        return attached
-
-    @classmethod
-    def _has_selected_parent(cls, test_info: dict, selected: set[str]) -> bool:
-        """Whether any testable parent of `test_info` is in `selected` — dbt's eager condition."""
-        for dep in test_info.get('depends_on', {}).get('nodes', []):
-            if dep in selected and dep.startswith(cls._DBT_TEST_TARGET_PREFIXES):
-                return True
-        return False
 
     @staticmethod
     def _base_file_name(original_file_path: str) -> str:
@@ -406,35 +337,21 @@ class DbtFactory:
     @classmethod
     def _is_usable_selector(cls, value: str) -> bool:
         """
-        Whether `value` is safe as a whole raw selector: no graph operator at its boundary, and
-        nothing that makes dbt dispatch it to a method other than fqn matching.
+        Whether `value` can be used as an `fqn:` selector without a graph operator changing its meaning.
 
-        dbt's `RAW_SELECTOR_PATTERN` reads a leading `@` or `N+` and a trailing `+N` as graph
-        operators, so `pkg.orders+1` means "pkg.orders and its children one level deep" and selects
-        the wrong model. The leading form is spelled `<digits>+`, so `2+orders` means "orders and two
-        levels of its parents" — confirmed with `dbt ls` on dbt 1.12.0, where it selects a *different*
-        model rather than nothing.
+        Only the *trailing* `+N` still matters. dbt's `RAW_SELECTOR_PATTERN` reads a trailing `+N` as child
+        depth even after an explicit method prefix, so `fqn:probe.orders+1` selects `orders` *and its
+        child* — verified with `dbt ls` on dbt 1.12.0.
 
-        Only the boundary matters for operators: `pkg.+leading` and `pkg.raw.2+ord` are exact, both
-        confirmed with `dbt ls`, so an operator character inside a segment is left alone.
+        The leading forms do not survive the prefix and are therefore no longer rejected: `fqn:@weird` and
+        `fqn:2+orders` each resolve to exactly their node, checked in a project where both models have
+        children so an operator would have visibly expanded. Refusing them cost the user a working project
+        for nothing.
 
-        A trailing `.sql`/`.py`/`.csv` is rejected for a different reason — not the grammar but
-        `SelectionCriteria.default_method`, which dispatches such a value to `MethodName.File`. The
-        value is then matched as a file name rather than an fqn and resolves to nothing, so the task
-        exits 0 having built nothing. Confirmed on dbt 1.12.0 with a model at `models/orders.sql.sql`,
-        whose dbt name is `orders.sql`.
-
-        The suffix comparison is case-insensitive because dbt's is: `default_method` tests
-        `value.lower().endswith(...)`. A model at `models/orders.SQL.sql` is dispatched to `File` by dbt
-        just the same, and a case-sensitive guard here would pass it through to a selector that matches
-        nothing — verified with `dbt ls` on dbt 1.12.0.
+        An operator inside a segment was never a problem: `pkg.+leading` and `pkg.raw.2+ord` are exact,
+        both confirmed with `dbt ls`.
         """
-        return not (
-            value.startswith(('@', '+'))
-            or value.rstrip('0123456789').endswith('+')
-            or value.lstrip('0123456789').startswith('+')
-            or value.lower().endswith(cls._FILE_METHOD_SUFFIXES)
-        )
+        return not value.rstrip('0123456789').endswith('+')
 
     @staticmethod
     def _flat_fqn(fqn: list[str]) -> list[str]:
@@ -462,7 +379,11 @@ class DbtFactory:
         """
         fqn = node_info.get('fqn') or []
         if not fqn:
-            return False
+            # A manifest missing `fqn` is not something dbt produces, but a hand-rolled or truncated one
+            # can be, and the selector then falls back to the bare name. dbt would still match that name
+            # against the fqn's leaf, so compare against the name rather than declining outright —
+            # otherwise the exactness check reports a selector that reaches nothing.
+            return bool(node_info.get('name')) and node_info.get('name') == term
         # dbt's `is_versioned` requires the resource type to be a model (`VERSIONED_NODE_TYPES`), not
         # merely that `version` is set — and a unit-test clone *does* carry `version`. Deriving it from
         # the field alone takes dbt's versioned branch for unit tests and so skips its plain
@@ -506,8 +427,10 @@ class DbtFactory:
     def _term_matches(cls, term: str, node_info: dict) -> bool:
         """Whether one emitted selector term matches `node_info`."""
         method, _, value = term.partition(':')
-        if not _:
-            return cls._fqn_term_matches(term, node_info)
+        if not _ or method == 'fqn':
+            # A bare value is still accepted so a hand-written selector keeps working; everything the
+            # factory emits now carries the explicit `fqn:` method.
+            return cls._fqn_term_matches(value if method == 'fqn' else term, node_info)
         if method == 'package':
             return (node_info.get('package_name') or '') == value
         if method == 'file':
@@ -571,6 +494,24 @@ class DbtFactory:
         )
 
     @staticmethod
+    def _selects_nothing(node_info: dict, select: str, missing: list[str]) -> ValueError:
+        """
+        Builds the error raised when a selector fails to reach what the task is meant to run.
+
+        Distinct from `_ambiguous`, which is the opposite failure. This one is easy to overlook because it
+        is silent at run time: `dbt test` and `dbt run` exit 0 on a selector that matches nothing, so the
+        task goes green having asserted or built nothing at all.
+        """
+        name = node_info.get('name')
+        path = node_info.get('original_file_path')
+        return ValueError(
+            f'Cannot generate a task for {name!r} ({path}): the selector dbt offers for it ({select}) '
+            f'does not reach {", ".join(missing)}. dbt exits 0 for a selector that matches nothing, so '
+            f'the task would report success having run nothing. This is a bug in selector construction '
+            f'rather than something to fix in the project — please report it.'
+        )
+
+    @staticmethod
     def _unaddressable(node_info: dict) -> ValueError:
         """
         Builds the error raised when no selector can address a node.
@@ -582,11 +523,10 @@ class DbtFactory:
         path = node_info.get('original_file_path')
         return ValueError(
             f'Cannot generate a task for {name!r} ({path}): dbt cannot select it uniquely. '
-            f'Rename the resource or its file so that it neither starts nor ends with a dbt graph '
-            f'operator (a leading @ or N+, a trailing +N), does not end in .sql, .py or .csv, and '
-            f'contains none of a space, comma, colon, slash, brace or one of *?[] — or, for a source, '
-            f"a dot. Without a usable name or path, the only terms left match a group of resources, so "
-            f"the task could run another task's resource."
+            f'Rename the resource or its file so that it does not end with a dbt graph operator (a '
+            f'trailing +N) and contains none of a space, comma, brace or one of *?[] — or, for a '
+            f"source, a dot. Without a usable name or path, the only terms left match a group of "
+            f"resources, so the task could run another task's resource."
         )
 
     def _create_tasks(self, dbt_manifest: dict) -> list[DbtTask]:
@@ -868,19 +808,36 @@ class DbtFactory:
             return f'model.{package}.{model}'
         return None
 
-    @staticmethod
+    @classmethod
     def _extend_deps_with_upstream_tests(
+        cls,
         node_full_name: str,
         existing_deps: list[str] | None,
         tests_by_resource: dict[str, list[tuple[str, frozenset[str]]]],
         ancestors_by_node: dict[str, set[str]],
     ) -> list[str]:
         """
-        Appends task keys of tests that safely gate this node — i.e. tests whose refs are all
-        ancestors of the current node. This prevents both direct and transitive cycles: a test
-        `T` with refs `R` is added to node `N`'s deps only if `N` transitively depends on every
-        resource in `R`. If any ref of `T` is downstream of (or equal to) `N`, adding `T` would
-        cycle because `T` already depends on that ref, and the ref depends on `N`.
+        Appends the task keys of tests that can safely gate this node.
+
+        A test `T` gates node `N` only when every ref of `T` is an ancestor of `N`. That is what keeps the
+        emitted graph acyclic: it forces every gate edge to respect the dbt graph's own topological order,
+        so no combination of edges can close a loop.
+
+        The one exception is a test shared by the *versions* of a single model. `_unit_test_groups` gives a
+        versioned model's cloned unit test one task depending on every version, so its refs are
+        `{orders.v1, orders.v2}` while a `consumer` referencing only v1 has just `{orders.v1}` among its
+        ancestors. The plain subset test therefore dropped the edge and a failing v1 assertion stopped
+        blocking `consumer`, contrary to the documented gating behaviour. A version sibling of an ancestor
+        is treated as satisfied, which restores that gate.
+
+        Relaxing further does not work, and the attempt is worth recording. Testing the cycle condition
+        directly — "no ref of `T` is `N` or has `N` as an ancestor" — is sound for one edge in isolation but
+        not for a set of them: `ancestors_by_node` describes the *dbt* graph, while the edges added here are
+        *task* edges, so once several gates exist the reachability it consults no longer matches the graph
+        being built. Two interlocking `relationships` tests are enough to close a loop — verified on a
+        dbt-1.12.0 manifest with models `a`, `c`, `n = ref(a)`, `b = ref(c)` and relationships `a`->`b` and
+        `c`->`n`, which produced `b_model -> relationships_c... -> n_model -> relationships_a... -> b_model`.
+        `test_interlocking_cross_model_tests_do_not_create_a_cycle` pins that layout.
         """
         extended: list[str] = list(existing_deps or [])
         seen = set(extended)
@@ -889,10 +846,35 @@ class DbtFactory:
             for test_key, test_refs in tests_by_resource.get(ancestor, []):
                 if test_key in seen:
                     continue
-                if test_refs <= node_ancestors:
+                if all(
+                    ref in node_ancestors
+                    or (
+                        # A version sibling of an ancestor counts as satisfied, but only when it is not
+                        # downstream of the node being gated: with `orders.v2` depending on `orders.v1`,
+                        # letting the shared test gate `v2` while the test waits for `v2` closes a loop.
+                        ref != node_full_name
+                        and node_full_name not in ancestors_by_node.get(ref, set())
+                        and cls._version_sibling_of_any(ref, node_ancestors)
+                    )
+                    for ref in test_refs
+                ):
                     extended.append(test_key)
                     seen.add(test_key)
         return extended
+
+    @staticmethod
+    def _version_sibling_of_any(ref: str, ancestors: set[str]) -> bool:
+        """
+        Whether `ref` is another *version* of a model already among `ancestors`.
+
+        A versioned model's id is `model.<pkg>.<name>.v<N>`, so siblings share everything up to the final
+        segment. Used only to keep a shared unit-test task gating a node that references one version of the
+        model it covers; every other ref must be an ancestor outright.
+        """
+        if not ref.startswith('model.') or '.v' not in ref:
+            return False
+        stem = ref.rsplit('.', 1)[0]
+        return any(ancestor != ref and ancestor.startswith(f'{stem}.v') for ancestor in ancestors)
 
     def _classify_tests(
         self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict
@@ -1138,7 +1120,6 @@ class _SelectorIndex(dict):
         self._by_file: dict[str, dict] = {}
         self._by_test_name: dict[str, dict] = {}
         self._by_fqn_key: dict[str, dict] = {}
-        self._tests_by_parent: dict[str, set[str]] = {}
         for full_name, info in peers.items():
             self._add(full_name, info)
 
@@ -1154,10 +1135,6 @@ class _SelectorIndex(dict):
             self._by_test_name.setdefault(test_name, {})[full_name] = info
         for key in self._fqn_keys(info):
             self._by_fqn_key.setdefault(key, {})[full_name] = info
-        if (info.get('resource_type') or '') in _TEST_TYPES:
-            for dep in info.get('depends_on', {}).get('nodes', []):
-                if dep.startswith(_DBT_TEST_TARGET_PREFIXES):
-                    self._tests_by_parent.setdefault(dep, set()).add(full_name)
 
     @staticmethod
     def _fqn_keys(info: dict) -> set[str]:
@@ -1173,7 +1150,11 @@ class _SelectorIndex(dict):
         """
         fqn = info.get('fqn') or []
         if not fqn:
-            return set()
+            # No fqn: the selector falls back to the bare name, which is the only key that can reach this
+            # node. Returning nothing here would drop it from every candidate set, so the exactness check
+            # would report a selector that reaches nothing.
+            name = info.get('name') or ''
+            return {name} if name else set()
         keys = {_flatten_fqn(fqn)[0], fqn[-1]}
         stripped = _flatten_fqn(fqn[1:])
         if stripped:
@@ -1182,17 +1163,6 @@ class _SelectorIndex(dict):
             keys.add(fqn[-2])
             keys.add('_'.join(fqn[-2:]))
         return keys
-
-    def tests_depending_on(self, selected: set[str]) -> set[str]:
-        """
-        The tests with any parent in `selected` — dbt's eager expansion, from a prebuilt reverse index.
-
-        Scanning every peer per term instead made the exactness check quadratic all over again.
-        """
-        attached: set[str] = set()
-        for parent in selected:
-            attached |= self._tests_by_parent.get(parent, set())
-        return attached
 
     def narrow(self, terms: list[str]) -> dict:
         """
@@ -1205,8 +1175,8 @@ class _SelectorIndex(dict):
         smallest: dict | None = None
         for term in terms:
             method, _, value = term.partition(':')
-            if not _:
-                bucket = self._fqn_candidates(term)
+            if not _ or method == 'fqn':
+                bucket = self._fqn_candidates(value if method == 'fqn' else term)
             elif method == 'package':
                 bucket = self._by_package.get(value, {})
             elif method == 'file':

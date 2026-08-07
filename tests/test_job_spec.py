@@ -10,22 +10,22 @@ def _write(path, content: dict) -> str:
     return str(path)
 
 
-def test_replace_tasks_raises_keyerror_when_jobs_empty(tmp_path):
+def test_replace_tasks_raises_valueerror_when_jobs_empty(tmp_path):
     spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {}}})
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError):
         replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"))
 
 
-def test_replace_tasks_raises_keyerror_when_resources_missing(tmp_path):
+def test_replace_tasks_raises_valueerror_when_resources_missing(tmp_path):
     spec = _write(tmp_path / "in.yaml", {"foo": "bar"})
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError):
         replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"))
 
 
-def test_replace_tasks_raises_keyerror_when_resources_null(tmp_path):
+def test_replace_tasks_raises_valueerror_when_resources_null(tmp_path):
     # `resources:` with a null value: the read chain must not raise AttributeError.
     spec = _write(tmp_path / "in.yaml", {"resources": None})
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError):
         replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"))
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.DbtFactory import DbtFactory
-from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
+from databricks_dbt_factory.job_spec import render_job_spec, write_job_spec
 from databricks_dbt_factory.Utils import read_dbt_manifest
 from databricks_dbt_factory.DbtTask import DbtTaskOptions
 from databricks_dbt_factory.TaskFactory import (
@@ -75,9 +75,19 @@ def main():
     # or a resource whose name or path dbt cannot select uniquely — so report the message and stop
     # rather than letting a traceback bury it. `SystemExit` exits 1 without writing a partial spec.
     # The library API still raises, so callers embedding `DbtFactory` keep the exception.
+    # Every fallible step runs before anything is written: reading the manifest, creating the tasks, and
+    # rendering the new spec from the input. An earlier revision copied the runner notebook once task
+    # creation succeeded, which still left it behind — overwriting an edited one — when reading or
+    # rendering an invalid *input job spec* then failed and no target spec was produced.
+    #
+    # Only `ValueError`/`FileNotFoundError` are caught, both raised deliberately for conditions the user
+    # fixes. `KeyError` is deliberately *not* caught: the factory indexes manifest fields directly, so an
+    # unexpected manifest shape raises a bare `KeyError` that is a bug in this tool, and reporting it as
+    # `error: 'resource_type'` would hide the traceback needed to diagnose it.
     try:
         manifest = read_dbt_manifest(args.dbt_manifest_path)
         tasks = factory.create_tasks(manifest)
+        rendered = None if args.dry_run else render_job_spec(args.input_job_spec_path, tasks, args.new_job_name)
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(f"error: {error}") from error
     if args.dry_run:
@@ -85,7 +95,7 @@ def main():
     else:
         if copy_runner:
             _copy_runner_notebook(args.target_job_spec_path, args.project_directory, write=True)
-        replace_tasks_in_job_spec(args.input_job_spec_path, tasks, args.target_job_spec_path, args.new_job_name)
+        write_job_spec(rendered, args.target_job_spec_path)
 
 
 def _copy_runner_notebook(

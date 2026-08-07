@@ -376,19 +376,28 @@ rather than moving to the manifest's `disabled` section.
 
 #### When generation fails
 
-A name that dbt would not read literally cannot be used to select a resource. That means a name
-containing a space, comma, colon, slash, brace or one of `*?[]`; one that ends in `.sql`, `.py` or
-`.csv` (which makes dbt match it as a *file name*); or one that starts or ends with something dbt reads
-as a graph operator — a trailing `+2`, or a leading `2+`, which means "two levels of parents". Sources
-additionally cannot contain a `.`, since dbt's `source:` form uses it as its own separator. Braces are
-excluded for a non-dbt reason: Databricks substitutes `{{...}}` in a task's commands as plain text
-before the task runs, so a selector containing one resolves locally and matches nothing in the job.
+Selectors name the `fqn:` method explicitly rather than letting dbt infer it from the value's shape, so
+most awkward names cost nothing: a `/`, a `:`, or a `.sql` suffix in a resource name is matched literally.
+What still cannot be expressed is a name containing a space, comma, brace or one of `*?[]`, or one that
+ends with something dbt reads as a graph operator (a trailing `+2`) — the `fqn:` prefix does not neutralise
+those. Sources additionally cannot contain a `.`, since dbt's `source:` form uses it as its own separator.
+Braces are excluded for a non-dbt reason: Databricks substitutes `{{...}}` in a task's commands as plain
+text before the task runs, so a selector containing one resolves locally and matches nothing in the job.
 
-Generation also fails when a selector is valid but not *exact* — when two resources cannot be told
-apart by any term dbt has. Two generic tests may share an FQN outright (dbt allows duplicate test
-names), a dotted test name may flatten onto a sibling's FQN, or a singular test may share its model's
-name. In each case the task would run the other resource too, before that resource's own dependencies
-had completed.
+Test tasks pin `--indirect-selection empty`, so a task runs exactly the test it names and nothing dbt
+would otherwise sweep in alongside it. Bundled tasks keep `cautious`, where sweeping a resource's tests is
+the point.
+
+> **Requires dbt 1.5 or newer at task runtime.** The `empty` indirect-selection mode first appears in
+> dbt-core 1.5.0 — 1.4.0 offers only `eager`, `cautious` and `buildable` (verified by reading the
+> `IndirectSelection` enum in each released source tarball). The dbt that runs inside your Databricks job
+> is yours, not this tool's, so on an older dbt every generated test task fails on an invalid flag value.
+> It fails loudly rather than silently, but it is a hard floor.
+
+Generation also fails when a selector is valid but not *exact* — when two resources cannot be told apart
+by any term dbt has. Two generic tests may share an FQN outright (dbt allows duplicate test names), or a
+dotted test name may flatten onto a sibling's FQN. In each case the task would run the other resource too,
+before that resource's own dependencies had completed.
 
 Either way the CLI exits 1 naming the resource and the remedy, and writes no output file, so a
 partly-generated spec can never be deployed:

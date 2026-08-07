@@ -167,10 +167,10 @@ def test_same_model_name_across_packages_produces_distinct_bundled_test_tasks(db
     assert 'pkg_a_customers_test' in by_key
     assert 'pkg_b_customers_test' in by_key
     assert by_key['pkg_a_customers_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg_a.customers,package:pkg_a,file:customers.sql,resource_type:model --indirect-selection cautious --target dev'
+        'dbt test --select fqn:pkg_a.customers,package:pkg_a,file:customers.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
     assert by_key['pkg_b_customers_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg_b.customers,package:pkg_b,file:customers.sql,resource_type:model --indirect-selection cautious --target dev'
+        'dbt test --select fqn:pkg_b.customers,package:pkg_b,file:customers.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
     assert by_key['pkg_a_customers_test']['depends_on'] == [{'task_key': 'pkg_a_customers_model'}]
     assert by_key['pkg_b_customers_test']['depends_on'] == [{'task_key': 'pkg_b_customers_model'}]
@@ -213,7 +213,7 @@ def test_tests_on_seed_produce_task_and_gate_downstream(dbt_factory_bundled):
 
     assert 'countries_test' in by_key
     assert by_key['countries_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.countries,package:pkg,file:countries.csv,resource_type:seed --indirect-selection cautious --target dev'
+        'dbt test --select fqn:pkg.countries,package:pkg,file:countries.csv,resource_type:seed --indirect-selection cautious --target dev'
     ]
     assert by_key['countries_test']['depends_on'] == [{'task_key': 'countries_seed'}]
     assert by_key['enriched_model']['depends_on'] == [{'task_key': 'countries_test'}]
@@ -233,7 +233,7 @@ def test_tests_on_snapshot_produce_task_and_gate_downstream(dbt_factory_bundled)
 
     assert 'orders_snap_test' in by_key
     assert by_key['orders_snap_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.orders_snap,package:pkg,file:orders_snap.sql,resource_type:snapshot --indirect-selection cautious --target dev'
+        'dbt test --select fqn:pkg.orders_snap,package:pkg,file:orders_snap.sql,resource_type:snapshot --indirect-selection cautious --target dev'
     ]
     assert by_key['orders_snap_test']['depends_on'] == [{'task_key': 'orders_snap_snapshot'}]
     assert by_key['orders_history_model']['depends_on'] == [{'task_key': 'orders_snap_test'}]
@@ -277,7 +277,7 @@ def test_flat_mode_emits_one_task_per_test_node_and_gates_downstream(dbt_factory
     assert 'customers_test' not in by_key
 
     assert by_key['unique_customers_id_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.unique_customers_id,package:pkg,file:unique_customers_id.yml,resource_type:test --target dev'
+        'dbt test --select fqn:pkg.unique_customers_id,package:pkg,file:unique_customers_id.yml,resource_type:test --target dev --indirect-selection empty'
     ]
     assert by_key['unique_customers_id_test']['depends_on'] == [{'task_key': 'customers_model'}]
     # orders depends on customers AND every test attached to customers
@@ -427,14 +427,14 @@ def test_cross_model_test_in_bundled_mode_is_emitted_as_standalone_task(dbt_fact
     # Single-model test → bundled with cautious selection (relationship test is excluded by dbt)
     assert 'team_cities_test' in by_key
     assert by_key['team_cities_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.team_cities,package:pkg,file:team_cities.sql,resource_type:model --indirect-selection cautious --target dev'
+        'dbt test --select fqn:pkg.team_cities,package:pkg,file:team_cities.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
 
     # Cross-model test → its own task, gated on BOTH referenced models
     cross_test_key = 'relationships_game_details_winner__team_city__ref_team_cities__test'
     assert cross_test_key in by_key
     assert by_key[cross_test_key]['dbt_task']['commands'] == [
-        'dbt test --select pkg.relationships_game_details_winner__team_city__ref_team_cities_,package:pkg,file:relationships_game_details_winner__team_city__ref_team_cities_.yml,resource_type:test --target dev'
+        'dbt test --select fqn:pkg.relationships_game_details_winner__team_city__ref_team_cities_,package:pkg,file:relationships_game_details_winner__team_city__ref_team_cities_.yml,resource_type:test --target dev --indirect-selection empty'
     ]
     assert {dep['task_key'] for dep in by_key[cross_test_key]['depends_on']} == {
         'team_cities_model',
@@ -459,14 +459,14 @@ def test_single_package_bundled_test_uses_qualified_select(dbt_factory_bundled):
 
     assert 'customers_test' in by_key
     assert by_key['customers_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg_a.customers,package:pkg_a,file:customers.sql,resource_type:model --indirect-selection cautious --target dev'
+        'dbt test --select fqn:pkg_a.customers,package:pkg_a,file:customers.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
     assert by_key['orders_model']['depends_on'] == [{'task_key': 'customers_test'}]
 
 
 def test_duplicate_model_name_across_packages_selects_by_distinct_fqn(dbt_factory):
     # Two packages define a model named `customers`. Selecting by the bare name would make both
-    # tasks run `dbt run --select customers`, executing both models from each task. The full FQN
+    # tasks run `dbt run --select fqn:customers`, executing both models from each task. The full FQN
     # keeps each task scoped to exactly its own node.
     nodes = dict(
         [
@@ -479,10 +479,10 @@ def test_duplicate_model_name_across_packages_selects_by_distinct_fqn(dbt_factor
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['pkg_a_customers_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg_a.customers,package:pkg_a,file:customers.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg_a.customers,package:pkg_a,file:customers.sql,resource_type:model --target dev'
     ]
     assert by_key['pkg_b_customers_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg_b.customers,package:pkg_b,file:customers.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg_b.customers,package:pkg_b,file:customers.sql,resource_type:model --target dev'
     ]
 
 
@@ -512,13 +512,13 @@ def test_model_in_subdirectory_selects_by_full_fqn_flat_mode(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['stg_orders_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.staging.stg_orders,package:pkg,file:stg_orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg.staging.stg_orders,package:pkg,file:stg_orders.sql,resource_type:model --target dev'
     ]
 
 
 def test_model_in_subdirectory_bundled_test_selects_by_full_fqn(dbt_factory_bundled):
     # In bundled mode the `<model>_test` task's select must be the model's full fqn so
-    # `dbt test --select <model_fqn> --indirect-selection cautious` actually matches the subdirectory
+    # `dbt test --select fqn:<model_fqn> --indirect-selection cautious` actually matches the subdirectory
     # model. `pkg.stg_orders` would match no nodes and silently run zero tests.
     nodes = dict(
         [
@@ -531,7 +531,7 @@ def test_model_in_subdirectory_bundled_test_selects_by_full_fqn(dbt_factory_bund
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['stg_orders_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.staging.stg_orders,package:pkg,file:stg_orders.sql,resource_type:model --indirect-selection cautious --target dev'
+        'dbt test --select fqn:pkg.staging.stg_orders,package:pkg,file:stg_orders.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
 
 
@@ -551,7 +551,7 @@ def test_flat_mode_unit_test_emits_task_and_gates_downstream(dbt_factory):
 
     unit_test_key = 'unit_test_pkg_orders_test_totals'
     assert by_key[unit_test_key]['dbt_task']['commands'] == [
-        'dbt test --select pkg.staging.orders.test_totals,package:pkg,file:orders_unit_tests.yml,resource_type:unit_test --target dev'
+        'dbt test --select fqn:pkg.staging.orders.test_totals,package:pkg,file:orders_unit_tests.yml,resource_type:unit_test --target dev --indirect-selection empty'
     ]
     assert by_key[unit_test_key]['depends_on'] == [{'task_key': 'orders_model'}]
     # summary (downstream of orders) gates on the unit test as well as the model
@@ -563,7 +563,7 @@ def test_flat_mode_unit_test_emits_task_and_gates_downstream(dbt_factory):
 
 def test_bundled_mode_model_with_only_unit_test_emits_bundled_task(dbt_factory_bundled):
     # A model whose only test is a unit test (no data test) must still get a bundled
-    # `<model>_test` task. `dbt test --select <model_fqn> --indirect-selection cautious` sweeps
+    # `<model>_test` task. `dbt test --select fqn:<model_fqn> --indirect-selection cautious` sweeps
     # in the unit test, so it is not silently dropped.
     nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'staging', 'orders'])])
     unit_tests = dict([_unit_test('pkg', 'orders', 'test_totals', fqn=['pkg', 'staging', 'orders', 'test_totals'])])
@@ -573,7 +573,7 @@ def test_bundled_mode_model_with_only_unit_test_emits_bundled_task(dbt_factory_b
 
     assert 'orders_test' in by_key
     assert by_key['orders_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.staging.orders,package:pkg,file:orders.sql,resource_type:model --indirect-selection cautious --target dev'
+        'dbt test --select fqn:pkg.staging.orders,package:pkg,file:orders.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
     assert by_key['orders_test']['depends_on'] == [{'task_key': 'orders_model'}]
     # No standalone unit-test task in bundled mode — the bundled task covers it.
@@ -662,7 +662,7 @@ def test_select_intersects_fqn_package_and_file(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -681,10 +681,10 @@ def test_select_of_nested_sibling_is_separated_by_its_file(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
     assert by_key['items_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.marts.orders.items,package:pkg,file:items.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg.marts.orders.items,package:pkg,file:items.sql,resource_type:model --target dev'
     ]
 
 
@@ -705,10 +705,10 @@ def test_select_of_package_node_is_separated_by_its_package(dbt_factory):
 
     assert (
         commands['probe_alpha_model']
-        == 'dbt run --select probe.alpha,package:probe,file:alpha.sql,resource_type:model --target dev'
+        == 'dbt run --select fqn:probe.alpha,package:probe,file:alpha.sql,resource_type:model --target dev'
     )
     assert commands['other_alpha_model'] == (
-        'dbt run --select other.probe.alpha,package:other,file:alpha.sql,resource_type:model --target dev'
+        'dbt run --select fqn:other.probe.alpha,package:other,file:alpha.sql,resource_type:model --target dev'
     )
 
 
@@ -724,7 +724,7 @@ def test_bundled_test_select_uses_the_same_uniform_form(dbt_factory_bundled):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --indirect-selection cautious --target dev'
+        'dbt test --select fqn:pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --indirect-selection cautious --target dev'
     ]
 
 
@@ -736,13 +736,12 @@ def test_bundled_test_select_uses_the_same_uniform_form(dbt_factory_bundled):
         pytest.param('or[der]s', 'brackets are fnmatch syntax', id='brackets'),
         pytest.param('star*model', 'star is fnmatch syntax', id='star'),
         pytest.param('q?model', 'question mark is fnmatch syntax', id='question-mark'),
-        pytest.param('colon:model', 'colon is a method prefix', id='colon'),
     ],
 )
 def test_unusable_fqn_segment_is_dropped_but_other_terms_remain(dbt_factory, bad_segment, reason):
-    # A directory whose name dbt cannot express in a selector only costs us the fqn term. The
-    # remaining terms still address the node, so generation succeeds rather than failing outright.
-    # (`reason` documents which dbt rule each character trips.)
+    # A directory whose name dbt cannot express in a selector costs us the fqn *path*, falling back to the
+    # bare name. The remaining terms still address the node, so generation succeeds rather than failing
+    # outright. (`reason` documents which dbt rule each character trips.)
     assert reason
     nodes = dict([_model('pkg', 'orders', fqn=['pkg', bad_segment, 'orders'], path=f'models/{bad_segment}/orders.sql')])
 
@@ -750,7 +749,21 @@ def test_unusable_fqn_segment_is_dropped_but_other_terms_remain(dbt_factory, bad
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+    ]
+
+
+def test_colon_in_an_fqn_segment_is_kept_now_that_the_method_is_explicit(dbt_factory):
+    # A colon used to make the whole value unusable, because dbt read everything before it as a method
+    # name. Naming the method ourselves settles that: `fqn:pkg.colon:model.orders` matches literally —
+    # verified with `dbt ls` on dbt 1.12.0 — so the fqn term survives and the node keeps its strongest
+    # discriminator.
+    nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'colon:model', 'orders'], path='models/colon:model/orders.sql')])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+
+    assert [t['dbt_task']['commands'][0] for t in tasks] == [
+        'dbt run --select fqn:pkg.colon:model.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -767,33 +780,36 @@ def test_fqn_ending_in_a_graph_operator_is_refused(dbt_factory):
         dbt_factory.create_tasks({'nodes': nodes})
 
 
-def test_fqn_starting_with_a_numeric_graph_operator_is_dropped(dbt_factory):
-    # dbt's `RAW_SELECTOR_PATTERN` reads a *leading* `N+` as parent depth, not just a trailing `+N`.
-    # Confirmed with `dbt ls` on dbt 1.12.0: `2+orders` selects `probe.orders` (the sibling, plus two
-    # levels of its parents) — a wrong-node hit, not an empty one — so the bare name must be dropped.
-    # The fqn `pkg.2+orders` is exact, because the operator is no longer at the selector's boundary.
+def test_fqn_starting_with_a_numeric_graph_operator_keeps_its_fqn_term(dbt_factory):
+    # A leading `N+` is read as parent depth only when dbt is inferring the method: bare `2+orders` selects
+    # `probe.orders` (the sibling plus two levels of its parents) — a wrong-node hit, not an empty one.
+    # Under an explicit `fqn:` it is literal, so the fqn term survives and stays exact. Both confirmed with
+    # `dbt ls` on dbt 1.12.0.
     nodes = dict([_model('pkg', '2+orders', fqn=['pkg', '2+orders'], path='models/2+orders.sql')])
 
     tasks = dbt_factory.create_tasks({'nodes': nodes})
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['2+orders_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.2+orders,package:pkg,file:2+orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg.2+orders,package:pkg,file:2+orders.sql,resource_type:model --target dev'
     ]
 
 
-def test_name_fallback_starting_with_a_numeric_graph_operator_is_refused(dbt_factory):
-    # The same name with an unusable fqn (a spacey directory) has nothing left to fall back on: the
-    # bare name `2+orders` *is* the whole raw selector, so dbt reads the leading `2+` as parent depth
-    # and selects a different model entirely. Two tests share the schema.yml, so `file:` cannot stand
-    # in for the name either — refuse rather than emit a task that runs the wrong node.
+def test_name_fallback_ending_in_a_graph_operator_is_refused(dbt_factory):
+    # The same name with an unusable fqn (a spacey directory) has nothing left to fall back on: a trailing
+    # `+1` is read as child depth even under an explicit `fqn:` prefix, so `fqn:orders+1` selects `orders`
+    # *and its children* — verified with `dbt ls` on dbt 1.12.0. Two tests share the schema.yml, so `file:`
+    # cannot stand in for the name either — refuse rather than emit a task that runs the wrong node.
+    #
+    # A *leading* `@` or `N+` is no longer refused: those are literal under `fqn:`, so refusing them cost a
+    # working project for nothing. See `test_leading_graph_operators_are_literal_under_an_explicit_fqn`.
     nodes = dict(
         [
             _test(
                 'pkg',
-                '2+orders',
+                'orders+1',
                 ['model.pkg.a'],
-                fqn=['pkg', 'my dir', '2+orders'],
+                fqn=['pkg', 'my dir', 'orders+1'],
                 path='models/my dir/schema.yml',
                 test_name='not_null',
             ),
@@ -819,9 +835,9 @@ def test_file_name_alone_never_addresses_a_resource(dbt_factory):
     # it is not one the manifest states directly. The rule is therefore: the fqn or the name must
     # survive.
     #
-    # Deliberately stricter than dbt requires — `package:pkg,file:2+orders.sql` does resolve to one
-    # node, confirmed with `dbt ls` on dbt 1.12.0 — and the error says to rename the file.
-    nodes = dict([_model('pkg', '2+orders', fqn=['pkg', 'my dir', '2+orders'], path='models/my dir/2+orders.sql')])
+    # Deliberately stricter than dbt requires — `package:pkg,file:orders+1.sql` does resolve to one node,
+    # confirmed with `dbt ls` on dbt 1.12.0 — and the error says to rename the file.
+    nodes = dict([_model('pkg', 'orders+1', fqn=['pkg', 'my dir', 'orders+1'], path='models/my dir/orders+1.sql')])
 
     with pytest.raises(ValueError, match='Cannot generate a task for'):
         dbt_factory.create_tasks({'nodes': nodes})
@@ -896,7 +912,7 @@ def test_a_usable_name_still_rescues_an_unusable_fqn(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes})
 
     assert [t['dbt_task']['commands'][0] for t in tasks] == [
-        'dbt run --select orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -909,7 +925,7 @@ def test_graph_operator_inside_a_segment_is_kept(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['+leading_model']['dbt_task']['commands'] == [
-        'dbt run --select pkg.+leading,package:pkg,file:+leading.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg.+leading,package:pkg,file:+leading.sql,resource_type:model --target dev'
     ]
 
 
@@ -956,7 +972,7 @@ def test_same_type_tests_in_one_file_get_distinct_selectors(dbt_factory):
 
     assert commands['not_null_a_id_test'] != commands['not_null_b_id_test']
     assert commands['not_null_a_id_test'] == (
-        'dbt test --select not_null_a_id,package:pkg,file:schema.yml,resource_type:test,test_name:not_null --target dev'
+        'dbt test --select fqn:not_null_a_id,package:pkg,file:schema.yml,resource_type:test,test_name:not_null --target dev --indirect-selection empty'
     )
 
 
@@ -982,36 +998,40 @@ def test_data_test_selector_includes_its_test_name(dbt_factory):
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['not_null_a_id_test']['dbt_task']['commands'] == [
-        'dbt test --select pkg.marts.not_null_a_id,package:pkg,file:schema.yml,resource_type:test,test_name:not_null --target dev'
+        'dbt test --select fqn:pkg.marts.not_null_a_id,package:pkg,file:schema.yml,resource_type:test,test_name:not_null --target dev --indirect-selection empty'
     ]
 
 
-def test_singular_test_sharing_a_models_fqn_is_refused_only_if_the_model_has_tests(dbt_factory):
-    # `models/beta.sql` and `tests/beta.sql` parse with the same fqn and base name. `resource_type:` is
-    # intersected *after* dbt expands indirect selection, so the test task's selector also reaches the
-    # model — but reaching it is harmless on its own: dbt will not build it, and with no other tests on
-    # the model the selector resolves to exactly the singular test (verified with `dbt ls` on dbt 1.12.0).
+def test_singular_test_sharing_a_models_fqn_generates_now_that_selection_is_empty(dbt_factory):
+    # `models/beta.sql` and `tests/beta.sql` parse with the same fqn and base name. Under dbt's default
+    # eager mode this had to be refused: the test task's selector also reached the model, and eager
+    # selection then added the model's *attached* tests, so the task ran `not_null_beta_id` before
+    # `beta_model` had built `beta`.
     #
-    # What leaks is the model's *attached* tests, which the singular test's task would then also run,
-    # before the model that owns them has been built. So the same layout is refused only once the model
-    # carries a test of its own.
+    # Pinning `--indirect-selection empty` removes that entirely — verified with `dbt ls` on dbt 1.12.0,
+    # where the same selector returns both tests under eager and only `test.probe.beta` under empty. So the
+    # layout is addressable and no longer refused, even with the model carrying its own test.
     model = _model('pkg', 'beta', fqn=['pkg', 'beta'], path='models/beta.sql')
     singular = _test('pkg', 'beta', [], fqn=['pkg', 'beta'], path='tests/beta.sql')
+    attached = _test('pkg', 'not_null_beta_id', ['model.pkg.beta'], path='models/schema.yml', test_name='not_null')
 
     commands = {
         t['task_key']: t['dbt_task']['commands'][0]
-        for t in dbt_factory.create_tasks({'nodes': dict([model, singular])})
+        for t in dbt_factory.create_tasks({'nodes': dict([model, singular, attached])})
     }
-    assert (
-        commands['beta_model'] == 'dbt run --select pkg.beta,package:pkg,file:beta.sql,resource_type:model --target dev'
-    )
-    assert (
-        commands['beta_test'] == 'dbt test --select pkg.beta,package:pkg,file:beta.sql,resource_type:test --target dev'
-    )
 
-    attached = _test('pkg', 'not_null_beta_id', ['model.pkg.beta'], path='models/schema.yml', test_name='not_null')
-    with pytest.raises(ValueError, match='also runs test.pkg.not_null_beta_id'):
-        dbt_factory.create_tasks({'nodes': dict([model, singular, attached])})
+    assert (
+        commands['beta_model']
+        == 'dbt run --select fqn:pkg.beta,package:pkg,file:beta.sql,resource_type:model --target dev'
+    )
+    assert commands['beta_test'] == (
+        'dbt test --select fqn:pkg.beta,package:pkg,file:beta.sql,resource_type:test'
+        ' --target dev --indirect-selection empty'
+    )
+    assert commands['not_null_beta_id_test'] == (
+        'dbt test --select fqn:pkg.not_null_beta_id,package:pkg,file:schema.yml,resource_type:test,'
+        'test_name:not_null --target dev --indirect-selection empty'
+    )
 
 
 def test_selector_is_shell_quoted_when_a_name_contains_a_quote(dbt_factory):
@@ -1027,7 +1047,7 @@ def test_selector_is_shell_quoted_when_a_name_contains_a_quote(dbt_factory):
         'dbt',
         'run',
         '--select',
-        "pkg.customer's,package:pkg,file:customer's.sql,resource_type:model",
+        "fqn:pkg.customer's,package:pkg,file:customer's.sql,resource_type:model",
         '--target',
         'dev',
     ]
@@ -1043,7 +1063,7 @@ def test_select_falls_back_to_the_bare_name_when_the_node_has_no_fqn(dbt_factory
     by_key = {t['task_key']: t for t in tasks}
 
     assert by_key['orders_model']['dbt_task']['commands'] == [
-        'dbt run --select orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -1164,8 +1184,8 @@ def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):
         {'task_key': 'dim_v2_model'},
     ]
     assert by_key['unit_test_pkg_dim_ut_a_v1']['dbt_task']['commands'] == [
-        'dbt test --select pkg.models.marts.dim.ut_a,package:pkg,file:dim_unit_tests.yml,'
-        'resource_type:unit_test --target dev'
+        'dbt test --select fqn:pkg.models.marts.dim.ut_a,package:pkg,file:dim_unit_tests.yml,'
+        'resource_type:unit_test --target dev --indirect-selection empty'
     ]
 
 
@@ -1221,7 +1241,7 @@ def test_single_segment_fqn_does_not_crash_generation(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes})
 
     assert [t['dbt_task']['commands'][0] for t in tasks] == [
-        'dbt run --select lonely,package:pkg,file:lonely.sql,resource_type:model --target dev'
+        'dbt run --select fqn:lonely,package:pkg,file:lonely.sql,resource_type:model --target dev'
     ]
 
 
@@ -1242,9 +1262,9 @@ def test_versioned_models_sharing_a_bare_name_still_generate(dbt_factory):
     commands = {t['task_key']: t['dbt_task']['commands'][0] for t in tasks}
 
     assert commands == {
-        'orders_v1_model': 'dbt run --select pkg.orders.v1,package:pkg,file:orders_v1.sql,resource_type:model'
+        'orders_v1_model': 'dbt run --select fqn:pkg.orders.v1,package:pkg,file:orders_v1.sql,resource_type:model'
         ' --target dev',
-        'orders_v2_model': 'dbt run --select pkg.orders.v2,package:pkg,file:orders_v2.sql,resource_type:model'
+        'orders_v2_model': 'dbt run --select fqn:pkg.orders.v2,package:pkg,file:orders_v2.sql,resource_type:model'
         ' --target dev',
     }
 
@@ -1258,7 +1278,7 @@ def test_windows_manifest_path_yields_the_bare_file_name(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes})
 
     assert [t['dbt_task']['commands'][0] for t in tasks] == [
-        'dbt run --select pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -1292,7 +1312,7 @@ def test_node_passed_as_a_copy_is_not_its_own_collision(dbt_factory):
     tasks = dbt_factory.create_tasks(manifest)
 
     assert [t['dbt_task']['commands'][0] for t in tasks] == [
-        'dbt run --select pkg.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
     ]
 
 
@@ -1322,3 +1342,44 @@ def test_selector_index_narrowing_matches_a_full_scan(dbt_factory):
             scanned = sorted(DbtFactory._matching_ids(select, peers, ignore_resource_type=ignore_resource_type))
             narrowed = sorted(DbtFactory._matching_ids(select, index, ignore_resource_type=ignore_resource_type))
             assert narrowed == scanned, f'{select!r} narrowed to {narrowed}, full scan gives {scanned}'
+
+
+def test_a_selector_that_reaches_nothing_is_refused(dbt_factory):
+    # The exactness check is an *equality*, not "no surplus". A selector matching nothing is as wrong as
+    # one matching too much, and far easier to miss: `dbt test` and `dbt run` both exit 0 on a zero-match
+    # selector, so the task would go green having asserted or built nothing at all.
+    #
+    # Provoked by a node whose manifest entry disagrees with itself — the emitted `package:pkg` cannot
+    # reach a node the manifest files under a different package. That is a selector-construction bug
+    # rather than a project problem, so the message says so.
+    node = {
+        'resource_type': 'model',
+        'unique_id': 'model.pkg.orders',
+        'name': 'orders',
+        'package_name': 'pkg',
+        'fqn': ['pkg', 'orders'],
+        'original_file_path': 'models/orders.sql',
+        'depends_on': {'nodes': []},
+    }
+    peers = DbtFactory._selector_index({'model.pkg.orders': dict(node, package_name='other')})
+
+    with pytest.raises(ValueError, match='does not reach model.pkg.orders'):
+        DbtFactory._node_select(node, peers=peers)
+
+
+@pytest.mark.parametrize('name', ['@weird', '2+orders'], ids=['at-prefix', 'numeric-prefix'])
+def test_leading_graph_operators_are_literal_under_an_explicit_fqn(dbt_factory, name):
+    # dbt's `RAW_SELECTOR_PATTERN` reads a leading `@` or `N+` as a graph operator only when it is
+    # inferring the method. Naming the method makes them literal: `fqn:@weird` and `fqn:2+orders` each
+    # resolve to exactly their node — verified with `dbt ls` on dbt 1.12.0 in a project where the models
+    # have children, so an operator would have visibly expanded the result.
+    #
+    # A *trailing* `+N` is different and still refused; see
+    # `test_name_fallback_ending_in_a_graph_operator_is_refused`.
+    nodes = dict([_model('pkg', name, fqn=['pkg', name], path=f'models/{name}.sql')])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+
+    assert [t['dbt_task']['commands'][0] for t in tasks] == [
+        f'dbt run --select fqn:pkg.{name},package:pkg,file:{name}.sql,resource_type:model --target dev'
+    ]

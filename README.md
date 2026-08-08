@@ -366,8 +366,10 @@ dbt test --select my_project.models.sql_model1.unique_zzz_game_details_game_id,p
 
 Each selector is then checked against the manifest, because an FQN is a *prefix* over dbt's flattened
 FQN rather than an identifier: a test named `check.nested` is also matched by its sibling `check`'s
-selector. Where a collision cannot be broken by any term dbt offers, generation fails rather than
-emitting a task that would run its neighbour's resource.
+selector. A directly exact test selector runs with indirect selection disabled. For an ambiguous test
+with one parent whose fqn/name discriminator does not also select that parent, the factory can instead
+intersect the test selector with the parent's exact selector under cautious indirect selection.
+Generation fails when neither plan can establish exactness.
 
 Sources use dbt's own form for them, `source:<package>.<source>.<table>`.
 
@@ -384,9 +386,10 @@ those. Sources additionally cannot contain a `.`, since dbt's `source:` form use
 Braces are excluded for a non-dbt reason: Databricks substitutes `{{...}}` in a task's commands as plain
 text before the task runs, so a selector containing one resolves locally and matches nothing in the job.
 
-Test tasks pin `--indirect-selection empty`, so a task runs exactly the test it names and nothing dbt
-would otherwise sweep in alongside it. Bundled tasks keep `cautious`, where sweeping a resource's tests is
-the point.
+Test tasks whose direct selector is exact pin `--indirect-selection empty`, so the task runs exactly the
+named test and nothing dbt would otherwise sweep in alongside it. A provably safe ambiguous
+single-parent test uses the exact-parent intersection described above with `--indirect-selection
+cautious`. Bundled tasks also use `cautious`, where sweeping a resource's tests is the point.
 
 > **Requires dbt 1.5 or newer at task runtime.** The `empty` indirect-selection mode first appears in
 > dbt-core 1.5.0 — 1.4.0 offers only `eager`, `cautious` and `buildable` (verified by reading the
@@ -394,10 +397,10 @@ the point.
 > is yours, not this tool's, so on an older dbt every generated test task fails on an invalid flag value.
 > It fails loudly rather than silently, but it is a hard floor.
 
-Generation also fails when a selector is valid but not *exact* — when two resources cannot be told apart
-by any term dbt has. Two generic tests may share an FQN outright (dbt allows duplicate test names), or a
-dotted test name may flatten onto a sibling's FQN. In each case the task would run the other resource too,
-before that resource's own dependencies had completed.
+Generation also fails when a selector is valid but not *provably exact*. Equal or prefix-colliding test
+FQNs are accepted when an exact single-parent scope isolates the intended node. A collision is refused
+only when the direct selector is ambiguous and no such parent-scoped plan proves that the task runs the
+intended test alone.
 
 Either way the CLI exits 1 naming the resource and the remedy, and writes no output file, so a
 partly-generated spec can never be deployed:
@@ -415,40 +418,31 @@ name in `schema.yml` can stay as it is).
 
 One Databricks task per dbt test node, running `dbt test --select <selector>`. Each test task's
 `depends_on` includes every model/seed/snapshot the test references, so multi-model tests
-(e.g. `relationships`) only run after all their endpoints are built. **Downstream models are
-gated only on error-severity tests**: every model/seed/snapshot task depends on the
-`severity: error` test tasks attached to its upstream resources, so a failing error test skips
-the downstream task. This matches `dbt build` semantics. **`severity: warn` tests still run as their own tasks but are
-kept out of downstream `depends_on`** — they surface findings without cluttering the DAG or
-blocking anything.
+(e.g. `relationships`) only run after all their endpoints are built. Exact direct test selectors run
+with `--indirect-selection empty`. When dbt gives several single-parent tests the same direct selector
+and the test discriminator does not select the parent itself, the task intersects that selector with the
+exact parent selector under `--indirect-selection cautious`. This isolates equal-FQN generic tests,
+installed-package collisions, and versioned unit-test clones.
+
+**Downstream models are gated only on error-severity tests.** A test first becomes a dependency at the
+downstream frontier where all of its refs are strict ancestors. Later nodes inherit that gate through
+their immediate emitted dependencies instead of repeating the same test edge throughout the DAG. Tests
+whose full ref set is not ancestral remain under this safe-subset rule and do not create a gate. This
+matches `dbt build` semantics while keeping `depends_on` compact and acyclic. **`severity: warn` tests
+still run as their own tasks but are kept out of downstream `depends_on`** — they surface findings
+without blocking anything.
 
 Unit tests get one task each, gated on the model under test. They have no severity and always fail
 the run when they fail, so they gate downstream models like error-severity data tests. On a
 *versioned* model, dbt clones the unit test per version but gives every clone the same FQN, name and
-file, and no dbt selector can tell them apart — so the clones share **one** task, which depends on
-every version's model and runs every version's assertions.
-
-A test that covers several versions of one model waits for *all* of them, so gating a downstream model
-on it can require that test to wait, transitively, for the very model being gated. Generation then
-**fails with an error** naming both tasks, rather than emit the task without its gate — a model that
-builds despite a failed test covering it is the worse outcome. Two shapes reach this, both rare:
-
-- two versioned models whose later versions reference each other's earlier version (`alpha.v2` refs
-  `beta.v1` while `beta.v2` refs `alpha.v1`), each carrying a unit test;
-- a data test spanning two versions of one model (`relationships` from `alpha.v1` to `alpha.v2`) where
-  a third model sits between those versions.
-
-`--bundle-tests` generates both, since it gates on a per-resource test task and never forms that edge.
-For the shared unit test it keeps an equivalent gate; for a multi-endpoint data test the test becomes a
-standalone task that gates nothing, so the run still fails on a bad assertion but does not block the
-downstream model. The alternative is to restructure the refs so the test no longer depends on the model
-it would gate.
+file. Each clone still receives its own parent-scoped task, depends only on its exact model version, and
+runs only that version's assertions.
 
 - **Pros:** per-test failures are individually visible in the Databricks UI; downstream
   execution halts on error-severity test failure just like `dbt build`; cross-model tests wait
   for every endpoint they reference; warn tests stay informational, no DAG gating.
 - **Cons:** larger DAG (one task per test, and dbt projects routinely have many more tests than
-  models); each downstream model's `depends_on` list grows with error-severity upstream tests.
+  models).
 
 ### Bundled (`--bundle-tests`) — recommended for performance
 

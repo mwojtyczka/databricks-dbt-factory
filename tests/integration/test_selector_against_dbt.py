@@ -214,11 +214,16 @@ def _assert_each_task_selects_its_own_node(tmp_path: Path, manifest: dict, bundl
     addresses the *wrong* node, so a constant selector substituted for `_node_select` went undetected.
     Comparing against the expected name closes that hole.
 
-    `--indirect-selection empty` isolates the selector from dbt's eager expansion, which would
-    otherwise add a selected model's attached tests and obscure what the selector itself matched.
+    Each test task is replayed with the indirect-selection mode in its emitted command, so both direct
+    `empty` plans and parent-scoped `cautious` plans must resolve to the task's intended manifest id.
     """
     expected_by_key = _task_key_to_unique_id(manifest, bundle_tests)
     unmapped = []
+    selectable = {**manifest.get('nodes', {}), **manifest.get('unit_tests', {}), **manifest.get('sources', {})}
+    tasks_by_key = {
+        task['task_key']: shlex.split(task['dbt_task']['commands'][-1])
+        for task in create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest)
+    }
     for task_key, select, _verb in _resource_selectors(manifest, bundle_tests):
         unique_id = expected_by_key.get(task_key)
         if unique_id is None:
@@ -227,7 +232,13 @@ def _assert_each_task_selects_its_own_node(tmp_path: Path, manifest: dict, bundl
         # Compare against the *manifest unique id*, not the name `dbt ls` displays. Two generic tests can
         # share a display name while separate files keep each selector individually addressable, so a
         # name-based assertion would be satisfied by pointing task A at task B's node.
-        selected = _selected_unique_ids(tmp_path, select, None, indirect_selection='empty')
+        resource_type = selectable[unique_id]['resource_type']
+        indirect_selection = 'empty'
+        if resource_type in {'test', 'unit_test'}:
+            command = tasks_by_key[task_key]
+            modes = [command[index + 1] for index, value in enumerate(command[:-1]) if value == '--indirect-selection']
+            indirect_selection = modes[-1]
+        selected = _selected_unique_ids(tmp_path, select, None, indirect_selection=indirect_selection)
         assert selected == (unique_id,), (
             f'{task_key} selects {selected} via {select!r}, expected exactly ({unique_id!r},) — '
             f'the node it is named for'
@@ -826,7 +837,7 @@ def test_random_layouts_are_not_degenerate(tmp_path):
     _parse(tmp_path)
 
 
-def test_fqn_prefix_collision_between_sibling_tests_is_refused(tmp_path):
+def test_fqn_prefix_collision_between_sibling_tests_is_parent_scoped(tmp_path):
     """
     A test named `check.nested` flattens to `[probe, check, nested]`, so the sibling `check`'s selector
     `probe.check` matches it as a subtree parent.
@@ -837,9 +848,8 @@ def test_fqn_prefix_collision_between_sibling_tests_is_refused(tmp_path):
         probe.check,package:probe,file:schema.yml,test_name:not_null
           -> ('test.probe.check.d0dfa850a3', 'test.probe.check.nested.484de86d57')
 
-    and nothing narrows it: `resource_type:test`, `fqn:probe.check` and all four terms together each
-    return both. So `check` must be refused. Without the refusal its task, which depends only on
-    `check_model`, would run `other`'s test before `other_model` had built `other`.
+    and no direct term narrows it. The exact parent intersection remains safe under per-term cautious
+    expansion because the parent-specific file term admits only the test attached to that parent.
     """
     _write_project(
         tmp_path,
@@ -864,8 +874,106 @@ def test_fqn_prefix_collision_between_sibling_tests_is_refused(tmp_path):
     both = _selected_ids(tmp_path, 'probe.check,package:probe,file:schema.yml,test_name:not_null', 'test')
     assert len(both) == 2, f'expected the prefix collision to select two tests, got {both}'
 
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
+
+
+def test_parent_scope_is_refused_when_a_test_term_also_selects_the_parent(tmp_path):
+    """
+    Both custom tests have the direct selector `fqn:probe.orders`, so their distinct parents appear to
+    provide an exact scope. Under `cautious`, however, that fqn term also selects the `orders` model and
+    expands its ordinary `not_null` sibling before dbt intersects the selector terms. The resulting task
+    cannot be proved to run only the intended custom test and must be refused.
+    """
+    _write_project(
+        tmp_path,
+        {'orders.sql': MODEL_SQL, 'other.sql': MODEL_SQL},
+        schema_yml=(
+            'models:\n'
+            '  - name: orders\n'
+            '    columns:\n'
+            '      - name: id\n'
+            '        data_tests:\n'
+            '          - not_null: {name: orders}\n'
+            '          - not_null\n'
+            '  - name: other\n'
+            '    columns:\n'
+            '      - name: id\n'
+            '        data_tests:\n'
+            '          - not_null: {name: orders}\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    custom_selector = 'fqn:probe.orders,package:probe,file:schema.yml,resource_type:test,test_name:not_null'
+    custom_tests = _selected_unique_ids(tmp_path, custom_selector, None, indirect_selection='empty')
+    assert len(custom_tests) == 2, f'fixture no longer produces the equal direct selectors: {custom_tests}'
+
+    intended = next(
+        unique_id
+        for unique_id in custom_tests
+        if 'model.probe.orders' in manifest['nodes'][unique_id]['depends_on']['nodes']
+    )
+    ordinary_sibling = next(
+        unique_id
+        for unique_id, info in manifest['nodes'].items()
+        if info['resource_type'] == 'test'
+        and unique_id not in custom_tests
+        and 'model.probe.orders' in info['depends_on']['nodes']
+    )
+    would_be_scoped = 'fqn:probe.orders,package:probe,file:orders.sql,resource_type:model,' f'{custom_selector}'
+    cautious_matches = _selected_unique_ids(tmp_path, would_be_scoped, None, indirect_selection='cautious')
+    assert intended in cautious_matches
+    assert (
+        ordinary_sibling in cautious_matches
+    ), f'fixture no longer demonstrates cautious sibling expansion: {cautious_matches}'
+
     with pytest.raises(ValueError, match='also runs'):
-        _resource_selectors(manifest, bundle_tests=False)
+        _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
+
+
+def test_parent_scope_is_refused_when_a_file_term_selects_the_parent(tmp_path):
+    """
+    The `check` test directly collides with `check.sql` through fqn-prefix and file-stem matching. Its
+    snapshot parent appears to isolate it, but the shared `file:check.sql` term directly selects that
+    parent and cautiously expands the snapshot's `check.child` sibling into the finished intersection.
+    """
+    _write_project(tmp_path, {'orders.sql': MODEL_SQL})
+    snapshots_dir = tmp_path / 'snapshots' / 'unrelated'
+    snapshots_dir.mkdir(parents=True)
+    (snapshots_dir / 'check.sql').write_text(
+        """{% snapshot other %}
+{{ config(target_schema='snapshots', strategy='check', unique_key='id', check_cols=['id']) }}
+select 1 as id
+{% endsnapshot %}
+""",
+        encoding='utf-8',
+    )
+    tests_dir = tmp_path / 'tests'
+    tests_dir.mkdir(parents=True)
+    (tests_dir / 'check.sql').write_text("select * from {{ ref('other') }} where id is null\n", encoding='utf-8')
+    (tests_dir / 'check.child.sql').write_text("select * from {{ ref('other') }} where id is null\n", encoding='utf-8')
+    (tests_dir / 'check.sql.sql').write_text("select * from {{ ref('orders') }} where id is null\n", encoding='utf-8')
+    manifest = _parse(tmp_path)
+
+    ids_by_path = {
+        info['original_file_path']: unique_id
+        for unique_id, info in manifest['nodes'].items()
+        if info['resource_type'] == 'test'
+    }
+    intended = ids_by_path['tests/check.sql']
+    sibling = ids_by_path['tests/check.child.sql']
+    direct = 'fqn:probe.check,package:probe,file:check.sql,resource_type:test'
+    direct_matches = _selected_unique_ids(tmp_path, direct, None, indirect_selection='empty')
+    assert intended in direct_matches
+    assert ids_by_path['tests/check.sql.sql'] in direct_matches
+
+    would_be_scoped = 'fqn:probe.unrelated.check.other,package:probe,file:check.sql,resource_type:snapshot,' f'{direct}'
+    cautious_matches = _selected_unique_ids(tmp_path, would_be_scoped, None, indirect_selection='cautious')
+    assert intended in cautious_matches
+    assert sibling in cautious_matches, f'fixture no longer demonstrates cautious sibling expansion: {cautious_matches}'
+
+    with pytest.raises(ValueError, match='also runs'):
+        _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
 def test_unit_test_and_data_test_flattening_alike_are_separated_by_resource_type(tmp_path):
@@ -907,19 +1015,22 @@ def test_unit_test_and_data_test_flattening_alike_are_separated_by_resource_type
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
-def test_versioned_unit_test_clones_share_one_task(tmp_path):
+def test_versioned_unit_test_clones_have_parent_scoped_tasks(tmp_path):
     """
     dbt clones a unit test once per model version, rewriting only `unique_id`, `depends_on.nodes[0]` and
     `version` — the fqn, name and file are identical. No selector separates them: on dbt 1.12.0
     `version:` accepts only `latest`/`prerelease`/`old`/`none`, none of which match a unit test.
 
-    An earlier revision emitted one task per clone, giving both the same selector, so each ran every
-    version's assertions while its name claimed one. One task for the group is the honest description,
-    and it must wait for every version's model.
+    Each clone therefore uses its exact model version as a parent scope under `cautious`, which yields one
+    task per clone without running the sibling version's assertions.
     """
     _write_project(
         tmp_path,
         {'orders_v1.sql': MODEL_SQL, 'orders_v2.sql': MODEL_SQL},
+        package_model_paths={
+            'probe/orders_v1.sql': MODEL_SQL,
+            'probe/orders_v2.sql': MODEL_SQL,
+        },
         schema_yml=(
             'models:\n'
             '  - name: orders\n'
@@ -936,32 +1047,48 @@ def test_versioned_unit_test_clones_share_one_task(tmp_path):
             '    expect: {rows: [{id: 1}]}\n'
         ),
     )
+    (tmp_path / 'libs' / 'other' / 'models' / 'probe' / 'schema.yml').write_text(
+        """\
+models:
+  - name: orders
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+""",
+        encoding='utf-8',
+    )
     manifest = _parse(tmp_path)
 
     # Guard the fixture: if dbt stops cloning with an identical fqn, this test proves nothing.
     clones = [info for info in manifest['unit_tests'].values() if info['name'] == 'ut_orders']
     assert len(clones) == 2, f'expected dbt to clone the unit test per version, got {len(clones)}'
-    assert clones[0]['fqn'] == clones[1]['fqn'], 'dbt now varies the fqn per version; revisit the grouping'
+    assert clones[0]['fqn'] == clones[1]['fqn'], 'dbt now varies the fqn per version; revisit parent scoping'
+    parent_collision = 'fqn:probe.orders.v1,file:orders_v1.sql,resource_type:model'
+    assert (
+        len(_selected_unique_ids(tmp_path, parent_collision, 'model', indirect_selection='empty')) == 2
+    ), 'fixture no longer makes the installed package collide through its package-stripped fqn'
 
     tasks = create_dbt_factory(bundle_tests=False).create_tasks(manifest)
     unit_tasks = [task for task in tasks if 'unit_test' in task['task_key']]
-    assert len(unit_tasks) == 1, f'expected the clones to share one task, got {[t["task_key"] for t in unit_tasks]}'
-    assert {dep['task_key'] for dep in unit_tasks[0]['depends_on']} == {'orders_v1_model', 'orders_v2_model'}
+    assert len(unit_tasks) == 2, f'expected one task per clone, got {[t["task_key"] for t in unit_tasks]}'
+    unique_id_by_task_key = _task_key_to_unique_id(manifest, bundle_tests=False)
+    task_key_by_unique_id = {unique_id: task_key for task_key, unique_id in unique_id_by_task_key.items()}
+    for task in unit_tasks:
+        clone = manifest['unit_tests'][unique_id_by_task_key[task['task_key']]]
+        parent_unique_id = clone['depends_on']['nodes'][0]
+        assert task['depends_on'] == [{'task_key': task_key_by_unique_id[parent_unique_id]}]
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
-    # The shared selector really does resolve to both clones, which is why one task is correct.
-    command = shlex.split(unit_tasks[0]['dbt_task']['commands'][-1])
-    select = command[command.index('--select') + 1]
-    assert len(_selected_ids(tmp_path, select, None, indirect_selection='empty')) == 2
 
-
-def test_duplicate_test_names_sharing_an_fqn_are_refused(tmp_path):
+def test_duplicate_test_names_sharing_an_fqn_are_parent_scoped(tmp_path):
     """
     dbt does not require generic-test names to be unique — it disambiguates in the `unique_id` hash only
     — so two models each carrying `not_null: {name: check_id}` produce two test nodes with the *same*
     fqn, name, file and test type. Confirmed on dbt 1.12.0: one selector, two nodes.
 
-    Distinct from the prefix collision: the fqns are equal, not prefix-related, so a prefix check alone
-    would miss it. Both must be refused.
+    Distinct from the prefix collision: the fqns are equal, not prefix-related. Each task remains exact
+    because its parent scope admits only the test attached to that parent.
     """
     _write_project(
         tmp_path,
@@ -985,8 +1112,7 @@ def test_duplicate_test_names_sharing_an_fqn_are_refused(tmp_path):
     fqns = [info['fqn'] for info in manifest['nodes'].values() if info['resource_type'] == 'test']
     assert fqns[0] == fqns[1], f'expected dbt to allow duplicate test names with one fqn, got {fqns}'
 
-    with pytest.raises(ValueError, match='also runs'):
-        _resource_selectors(manifest, bundle_tests=False)
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
 @pytest.mark.parametrize(
@@ -1063,7 +1189,7 @@ def _assert_acyclic(manifest, bundle_tests):
 
     Acyclicity is necessary but not sufficient: dropping *every* gate edge also satisfies it, so each
     caller is paired with an assertion that the gates which should survive do — see
-    `test_a_downstream_model_is_still_gated_on_a_versioned_unit_test` and
+    `test_a_downstream_model_is_gated_on_the_exact_versioned_unit_test` and
     `test_a_v_named_model_does_not_pick_up_an_unrelated_models_test`.
     """
     tasks = create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest)
@@ -1083,15 +1209,10 @@ def _assert_acyclic(manifest, bundle_tests):
     return graph
 
 
-def test_versioned_unit_test_group_does_not_create_a_dependency_cycle(tmp_path):
+def test_parent_scoped_versioned_unit_tests_do_not_create_a_dependency_cycle(tmp_path):
     """
-    The clones' shared task waits for every version's model, so its refs must be visible to the
-    cycle guard in `_extend_deps_with_upstream_tests` *before* that guard runs.
-
-    Merging them only at task-build time left `_index_tests_by_resource` holding the representative's
-    unmerged refs, so the guard still judged it safe to gate `orders.v2` on the group — producing
-    `orders_v2_model -> unit_test_..._v1 -> orders_v2_model`, a cycle Databricks rejects at deploy.
-    Reached whenever a later model version depends on an earlier one and the model has a unit test.
+    Each versioned unit-test clone waits only for its exact model version. A later version depending on an
+    earlier one can therefore inherit the earlier version's test without forming a dependency cycle.
     """
     _write_project(
         tmp_path,
@@ -1113,16 +1234,10 @@ def test_versioned_unit_test_group_does_not_create_a_dependency_cycle(tmp_path):
         _assert_acyclic(manifest, bundle_tests)
 
 
-def test_a_downstream_model_is_still_gated_on_a_versioned_unit_test(tmp_path):
+def test_a_downstream_model_is_gated_on_the_exact_versioned_unit_test(tmp_path):
     """
-    The companion to the cycle test above, and the reason acyclicity alone is not enough: a graph with
-    *every* gating edge removed is also acyclic, so that check passes while the quality gate is gone.
-
-    The shared unit-test task waits for both version models, so its refs are `{v1, v2}`. An earlier
-    revision required every ref of a test to be an ancestor of the node being gated, which `consumer` —
-    referencing only v1 — fails. The edge was dropped and a failing v1 assertion no longer blocked
-    `consumer`, contrary to the documented gating behaviour. The guard now tests the cycle condition
-    directly, so the gate survives.
+    A consumer of `orders.v1` is gated on the clone attached to v1, while the unrelated v2 clone remains
+    outside its dependency frontier.
     """
     _write_project(
         tmp_path,
@@ -1147,10 +1262,10 @@ def test_a_downstream_model_is_still_gated_on_a_versioned_unit_test(tmp_path):
     unit_keys = [key for key in by_key if key.startswith('unit_test')]
     assert unit_keys, f'expected a unit-test task, got {sorted(by_key)}'
 
-    assert any(key in by_key['consumer_model'] for key in unit_keys), (
-        f'consumer_model deps {sorted(by_key["consumer_model"])} include no unit-test task, so a failing '
-        f'v1 assertion would not block it'
-    )
+    v1_test = next(key for key in unit_keys if 'orders_v1_model' in by_key[key])
+    v2_test = next(key for key in unit_keys if 'orders_v2_model' in by_key[key])
+    assert v1_test in by_key['consumer_model']
+    assert v2_test not in by_key['consumer_model']
 
 
 def test_backslash_in_a_posix_file_name_keeps_its_file_term(tmp_path):
@@ -1193,11 +1308,9 @@ def test_file_stem_collision_is_refused(tmp_path):
 
 def test_singular_test_named_after_a_model_without_other_tests_is_kept(tmp_path):
     """
-    Reaching the model is not itself a problem: `resource_type:test` keeps dbt from building it, and with
-    no other tests on the model the selector resolves to exactly the singular test — confirmed with
-    `dbt ls` on dbt 1.12.0. Only the model's *attached* tests leak under eager selection, so refusing this
-    layout would reject a project dbt handles. The refusal case is
-    `test_singular_test_sharing_a_models_fqn_is_refused`, where the model does carry a test.
+    Reaching the model is not itself a problem for a direct plan: `resource_type:test` excludes it and
+    `--indirect-selection empty` prevents attached-test expansion. The selector resolves to exactly the
+    singular test, confirmed with `dbt ls` on dbt 1.12.0.
     """
     _write_project(tmp_path, {'orders.sql': MODEL_SQL})
     tests_dir = tmp_path / 'tests'
@@ -1231,7 +1344,8 @@ def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
     Each task is replayed with the exact flags its own command carries — the verb's resource type and its
     `--indirect-selection` mode — so the comparison is against what that task will really run. Bundled
     `<resource>_test` tasks are skipped: sweeping a resource's whole test set with `cautious` is their
-    purpose rather than a defect.
+    purpose rather than a defect. A per-test cautious plan is checked directly against the manifest id
+    assigned to its task because the direct-selector model does not represent cautious expansion.
     """
     peers = {
         **{k: v for k, v in manifest['nodes'].items() if (v.get('config') or {}).get('enabled') is not False},
@@ -1239,6 +1353,7 @@ def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
         **manifest.get('sources', {}),
     }
     index = DbtFactory._selector_index(peers)  # pylint: disable=protected-access
+    expected_by_key = _task_key_to_unique_id(manifest, bundle_tests)
     for task in create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest):
         command = shlex.split(task['dbt_task']['commands'][-1])
         verb = command[1]
@@ -1246,13 +1361,20 @@ def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
         if select.startswith('source:'):
             continue
         mode = command[command.index('--indirect-selection') + 1] if '--indirect-selection' in command else None
-        if mode == 'cautious':  # a bundled sweep, deliberately multi-node
+        if mode == 'cautious' and bundle_tests:  # a bundled sweep, deliberately multi-node
             continue
-        predicted = set(DbtFactory._matching_ids(select, index))  # pylint: disable=protected-access
         resource_type = None if verb == 'test' else {'run': 'model', 'seed': 'seed', 'snapshot': 'snapshot'}[verb]
         # Compare on unique ids: `_selected_ids` returns the *display* names `dbt ls` prints, which do not
         # match manifest keys, so intersecting those with `peers` would silently compare against nothing.
         actual = set(_selected_unique_ids(tmp_path, select, resource_type, indirect_selection=mode)) & set(peers)
+        if mode == 'cautious':
+            expected = {expected_by_key[task['task_key']]}
+            assert actual == expected, (
+                f'{task["task_key"]}: cautious plan runs {sorted(actual)}, expected exactly {sorted(expected)} '
+                f'for {select!r}'
+            )
+            continue
+        predicted = set(DbtFactory._matching_ids(select, index))  # pylint: disable=protected-access
         assert (
             predicted == actual
         ), f'{task["task_key"]}: model predicts {sorted(predicted)} but dbt runs {sorted(actual)} for {select!r}'
@@ -1270,6 +1392,15 @@ def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
             '  - name: b\n    columns:\n      - name: id\n        data_tests: [not_null]\n',
             None,
             id='attached-tests',
+        ),
+        pytest.param(
+            {'a.sql': MODEL_SQL, 'b.sql': MODEL_SQL},
+            'models:\n  - name: a\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - not_null: {name: check_id}\n'
+            '  - name: b\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - not_null: {name: check_id}\n',
+            None,
+            id='parent-scoped-tests',
         ),
         pytest.param(
             {'beta.sql': MODEL_SQL, 'delta.sql': MODEL_SQL},
@@ -1391,15 +1522,8 @@ def test_interlocking_cross_model_tests_do_not_create_a_cycle(tmp_path):
     """
     Two multi-endpoint tests pointing at each other's downstream models.
 
-    A gate edge is only safe to add when it respects the dbt graph's topological order, which the subset
-    rule enforces. Testing the cycle condition per edge instead is sound in isolation but not for a *set*
-    of edges: `ancestors_by_node` describes the dbt graph while the edges added are task edges, so once
-    several gates exist the reachability consulted no longer matches the graph being built.
-
-    This layout closes the loop under that weaker rule — verified on dbt 1.12.0, where it produced
-    `b_model -> relationships_c... -> n_model -> relationships_a... -> b_model`, which Databricks rejects
-    at deploy. `test_a_downstream_model_is_still_gated_on_a_versioned_unit_test` is the companion: acyclic
-    alone is satisfied by dropping every gate, so both properties need asserting.
+    A gate is eligible only when every test endpoint is a strict ancestor. The rule respects dbt's
+    topological order for the complete set of emitted edges, keeping this layout acyclic.
     """
     _write_project(
         tmp_path,
@@ -1429,12 +1553,8 @@ def test_interlocking_tests_on_v_prefixed_models_do_not_create_a_cycle(tmp_path)
     """
     `test_interlocking_cross_model_tests_do_not_create_a_cycle` with every model renamed to start with `v`.
 
-    The version-sibling exemption to the subset rule was matched with substring tests — `'.v' in ref` and
-    `startswith(f'{stem}.v')` — rather than by checking the final fqn segment is a real version. So for
-    `model.probe.vendors`, `'.v'` matched inside `.vendors` and any ancestor under `model.probe.v*`
-    counted as a "version sibling", handing ordinary non-versioned models the relaxed rule and reopening
-    exactly the loop the subset rule prevents. Verified on dbt 1.12.0: this produced
-    `vn_model -> relationships_va... -> vb_model -> relationships_vc... -> vn_model`.
+    Eligibility depends only on manifest ancestry, so ordinary names resembling version ids cannot alter
+    which tests gate them.
     """
     _write_project(
         tmp_path,
@@ -1461,12 +1581,7 @@ def test_interlocking_tests_on_v_prefixed_models_do_not_create_a_cycle(tmp_path)
 
 
 def _cross_referencing_versioned_project(tmp_path, first: str = 'alpha', second: str = 'beta') -> dict:
-    """
-    Two versioned models whose later versions reference each other's earlier version.
-
-    `first`/`second` name the models so a caller can vary only their *alphabetical order*, which is what
-    decided which model lost its gate back when this layout was resolved by dropping an edge.
-    """
+    """Builds two versioned models whose later versions reference each other's earlier version."""
     _write_project(
         tmp_path,
         {
@@ -1489,67 +1604,30 @@ def _cross_referencing_versioned_project(tmp_path, first: str = 'alpha', second:
     return _parse(tmp_path)
 
 
-def test_cross_referencing_versioned_models_are_refused(tmp_path):
+def test_cross_referencing_versioned_models_use_exact_clone_gates(tmp_path):
     """
     Two versioned models whose later versions reference each other's earlier version.
 
-    Each model's shared unit-test task waits for both of its versions, so the two gates together close a
-    loop — `alpha_v2_model -> unit_test...beta_v1 -> beta_v2_model -> unit_test...alpha_v1 ->
-    alpha_v2_model`, verified on dbt 1.12.0.
-
-    Dropping one of the two edges also restores acyclicity, and must not be the answer: the dropped gate is
-    real, so `beta_v2_model` would build with a failing `ut_beta` assertion and nothing said so. Generation
-    refuses instead, as `_ambiguous` does for a selector it cannot prove exact.
+    Each later version is gated on the exact clone attached to the earlier version it references. The
+    clone tasks depend only on those earlier versions, so both gates are safe at the first frontier.
     """
     manifest = _cross_referencing_versioned_project(tmp_path)
 
-    with pytest.raises(ValueError, match='Cannot generate a gate'):
-        create_dbt_factory(bundle_tests=False).create_tasks(manifest)
+    graph = _assert_acyclic(manifest, bundle_tests=False)
+    unit_by_parent = {
+        next(dep for dep in dependencies if dep.endswith('_model')): task_key
+        for task_key, dependencies in graph.items()
+        if task_key.startswith('unit_test_')
+    }
+    assert unit_by_parent['beta_v1_model'] in graph['alpha_v2_model']
+    assert unit_by_parent['alpha_v1_model'] in graph['beta_v2_model']
+    _assert_acyclic(manifest, bundle_tests=True)
 
 
-def test_the_refusal_does_not_depend_on_model_naming(tmp_path):
+def test_a_cross_model_data_test_uses_the_safe_subset_rule(tmp_path):
     """
-    The same layout with the models renamed so their alphabetical order flips.
-
-    Candidates are considered in sorted order, so resolving this by dropping an edge would let a model's
-    *name* decide which one goes ungated: renaming `alpha` to `zeta` moves the loss from `beta_v2` to
-    `zeta_v2`. The refusal is symmetric, and both spellings must produce it.
-    """
-    manifest = _cross_referencing_versioned_project(tmp_path, first='zeta', second='beta')
-
-    with pytest.raises(ValueError, match='Cannot generate a gate'):
-        create_dbt_factory(bundle_tests=False).create_tasks(manifest)
-
-
-def test_bundling_handles_the_cross_referencing_versioned_layout(tmp_path):
-    """
-    The refusal above is specific to per-test mode, and bundling is a real way out of it.
-
-    Bundle mode gates each model on the upstream's `<resource>_test` task rather than on a unit-test task
-    shared across versions, so no candidate edge arises and both models keep their gate with no cycle.
-    Asserted here so the remedy the refusal message offers is known to work, and because
-    `--indirect-selection` changes what a selector resolves to — per AGENTS.md, both modes get checked.
-    """
-    manifest = _cross_referencing_versioned_project(tmp_path)
-
-    graph = _assert_acyclic(manifest, bundle_tests=True)
-
-    for model in ('alpha_v2_model', 'beta_v2_model'):
-        assert any(dep.endswith('_test') for dep in graph[model]), (
-            f'{model} deps {sorted(graph[model])} include no test task, so bundling is not the '
-            f'workaround the refusal message claims'
-        )
-
-
-def test_a_cross_model_data_test_is_not_treated_as_a_version_group_test(tmp_path):
-    """
-    A `relationships` test spanning a versioned model and a plain one must not reach the version-sibling
-    exemption, which exists only for *"a test shared by the versions of a single model."*
-
-    Checking only that the test's *unsatisfied* refs are version siblings admits it, since one endpoint is a
-    versioned model — and then generation refuses a project that is not the exemption's target at all. It
-    must fall through to the plain subset rule, which drops the edge; verified on dbt 1.12.0.
-    `test_cross_referencing_versioned_models_are_refused` covers the shape that *should* refuse.
+    A `relationships` test spanning a versioned model and a plain one follows the ordinary safe-subset
+    rule. A node that is not downstream of both endpoints cannot be gated on that test.
     """
     _write_project(
         tmp_path,
@@ -1570,7 +1648,6 @@ def test_a_cross_model_data_test_is_not_treated_as_a_version_group_test(tmp_path
     )
     manifest = _parse(tmp_path)
 
-    # Generation must succeed: this is not the layout the refusal is for.
     graph = _assert_acyclic(manifest, bundle_tests=False)
 
     # And the edge is simply absent, as the subset rule always left it — `nn` is not downstream of
@@ -1580,12 +1657,12 @@ def test_a_cross_model_data_test_is_not_treated_as_a_version_group_test(tmp_path
     ), f'nn_model deps {sorted(graph["nn_model"])} include a cross-model test it is not downstream of'
 
 
-def _single_version_group_data_test_project(tmp_path) -> dict:
+def _cross_version_data_test_project(tmp_path) -> dict:
     """
-    A `relationships` data test whose *both* endpoints are versions of one model, wired so gating cycles.
+    A `relationships` data test whose endpoints are two versions of one model.
 
-    `nn` sits between the two versions (`nn` refs `alpha.v1`, `alpha.v2` refs `nn`), so the test — which
-    waits for both versions — transitively waits for `nn`. There is no unit test anywhere in this project.
+    `nn` sits between the versions (`nn` refs `alpha.v1`, `alpha.v2` refs `nn`), so it is not downstream
+    of the test's complete ref set. There is no unit test in this project.
     """
     _write_project(
         tmp_path,
@@ -1608,77 +1685,23 @@ def _single_version_group_data_test_project(tmp_path) -> dict:
     return _parse(tmp_path)
 
 
-@pytest.mark.parametrize(
-    'project, ungated_task',
-    [
-        (_cross_referencing_versioned_project, 'beta_v2_model'),
-        (_single_version_group_data_test_project, 'nn_model'),
-    ],
-    ids=['unit-test-group', 'data-test-group'],
-)
-def test_the_refusal_claims_no_more_than_it_established(tmp_path, project, ungated_task):
+def test_a_cross_version_data_test_uses_the_safe_subset_rule(tmp_path):
     """
-    The refusal identifies the two tasks and stops. The check establishes exactly one fact — adding this
-    edge closes a loop — so anything past that is inference, and both fixtures here are counterexamples to
-    the obvious guesses.
-
-    `data-test-group` contains no unit test at all, so naming one misdirects the reader; neither fixture is
-    a pair of models referencing *each other*; and in `unit-test-group` the test does not depend on the
-    gated task in the dbt project — `ut_alpha` refs only `alpha.v1`, and the reachability comes from a
-    sibling gate added moments earlier, so telling the reader to remove that dependency points at nothing.
-    Each phrase is pinned so it cannot come back.
+    A data test spanning two versions is eligible only after both exact versions are strict ancestors.
+    `nn` is downstream of v1 but upstream of v2, so it remains ungated and the emitted graph stays acyclic.
     """
-    manifest = project(tmp_path)
-
-    with pytest.raises(ValueError) as raised:
-        create_dbt_factory(bundle_tests=False).create_tasks(manifest)
-
-    message = str(raised.value)
-    assert ungated_task in message, f'the message does not name the task it refused to gate: {message}'
-    assert '--bundle-tests' in message, f'the message must name a working remedy: {message}'
-    for unfounded in ('unit test', 'each other', 'already waits for'):
-        assert unfounded not in message, f'message asserts {unfounded!r}, which it has not established: {message}'
-
-
-def test_a_single_version_group_data_test_that_cycles_is_refused(tmp_path):
-    """
-    A data test confined to one version group reaches the version-sibling exemption too.
-
-    `_covers_one_version_group` admits any test whose refs are all versions of one model, which is right —
-    such a test does gate a node downstream of those versions, and the benign case correctly gains that
-    gate. So the exemption is not unit-test-only, and this layout refuses for the same reason a shared unit
-    test does. The README describes the refusal by its condition rather than by a single layout because of
-    this second shape.
-    """
-    manifest = _single_version_group_data_test_project(tmp_path)
+    manifest = _cross_version_data_test_project(tmp_path)
 
     assert not manifest['unit_tests'], 'fixture must contain no unit tests for this to test what it claims'
-
-    with pytest.raises(ValueError, match='Cannot generate a gate'):
-        create_dbt_factory(bundle_tests=False).create_tasks(manifest)
-
-    # The advertised remedy has to at least *generate*. It is weaker than it looks here: this test spans
-    # two resources, so bundling emits it as a standalone task that gates nothing (`--indirect-selection
-    # cautious` keeps a multi-endpoint test out of the per-resource bundles). So the escape hatch is real
-    # but trades the gate away — which is why the message says bundling "does not create this edge" rather
-    # than claiming it preserves the gate.
-    graph = _assert_acyclic(manifest, bundle_tests=True)
-    assert 'relationships_alpha_v1_id__id__ref_alpha_v_2__test' in graph, 'the test task should still exist'
+    graph = _assert_acyclic(manifest, bundle_tests=False)
+    assert not any('relationships' in dep for dep in graph['nn_model'])
+    _assert_acyclic(manifest, bundle_tests=True)
 
 
 def test_a_v_named_model_does_not_pick_up_an_unrelated_models_test(tmp_path):
     """
-    The other half of the version-sibling substring bug, and the half acyclicity cannot see.
-
-    `_version_sibling_of_any` compared ids with `'.v' in ref` and `startswith(f'{stem}.v')`, so for
-    `model.probe.vendors` the `'.v'` matched inside `.vendors` and every `model.probe.v*` counted as a
-    version sibling. Besides closing cycles, that relaxation adds gate edges that are merely *wrong*:
-    here `downstream` refs only `vendors`, yet it waited on a `relationships` test of `visits` — a model
-    it has no dependency on. That edge does not close a loop, so the cycle tests pass with the bug still
-    present; only an assertion on the exact deps catches it.
-
-    Nothing about these models is versioned — dbt reports `version: None` for all three on dbt 1.12.0 —
-    so the exemption should never have been consulted at all.
+    A downstream model is eligible only for tests whose complete ref set is among its strict ancestors.
+    Naming models with a `v` prefix does not change that manifest-graph rule.
     """
     _write_project(
         tmp_path,
@@ -1705,7 +1728,7 @@ def test_a_v_named_model_does_not_pick_up_an_unrelated_models_test(tmp_path):
 
     assert deps['downstream_model'] == {'vendors_model'}, (
         f'downstream_model deps {sorted(deps["downstream_model"])} include a test of `visits`, which it '
-        f'does not depend on — the version-sibling exemption was applied to non-versioned models'
+        f'does not depend on'
     )
 
 
@@ -1715,9 +1738,8 @@ def _random_gating_project(rng: random.Random) -> tuple[dict[str, str], str]:
 
     Aimed at the gating graph rather than at selectors, so it draws the ingredients that produce gate
     edges: `ref()`s between models (which make ancestors), `relationships` tests (whose refs span two
-    models, the shape the subset rule judges), and versioned models with unit tests (the one exemption to
-    that rule). Half the names begin with `v` because that is what distinguished a version segment from an
-    ordinary name in the substring bug.
+    models, the shape the safe-subset rule judges), and versioned models with unit tests. Half the names
+    begin with `v` so ordinary identifiers resembling version segments remain covered.
     """
     names = ['va', 'vb', 'orders', 'items'][: rng.randint(2, 4)]
     versioned = {name for name in names if rng.random() < 0.4}
@@ -1779,15 +1801,9 @@ def _random_gating_project(rng: random.Random) -> tuple[dict[str, str], str]:
 @pytest.mark.parametrize('seed', range(12))
 def test_random_gating_layouts_never_emit_a_cycle(tmp_path, seed):
     """
-    The generative counterpart to the three enumerated cycle fixtures.
-
-    Every per-edge rule tried here was sound for the layouts someone thought to write down and wrong for
-    one nobody had — three rounds, three fresh cycles. So the property is asserted over randomised
-    ref/test/version wiring as well: whatever dbt parses, the emitted `depends_on` must be acyclic, in both
-    modes. A cycle is not a cosmetic defect — Databricks rejects the job at deploy.
-
-    Gating strength is asserted separately, by `test_a_downstream_model_is_still_gated_on_a_versioned_unit_test`:
-    a graph with every gate edge dropped is acyclic too, so this test alone cannot catch over-refusal.
+    Randomised ref/test/version wiring asserts that the safe-subset and first-frontier rules always emit
+    an acyclic `depends_on` graph in both modes. Gating strength is covered separately by
+    `test_a_downstream_model_is_gated_on_the_exact_versioned_unit_test`.
     """
     files, schema = _random_gating_project(random.Random(seed))
     _write_project(tmp_path, files, schema_yml=schema)

@@ -43,8 +43,8 @@ resources:
       - task_key: second_dbt_model_model
         depends_on:
         - task_key: first_dbt_model_model
-        - task_key: unique_first_dbt_model_id_test
         - task_key: not_null_first_dbt_model_id_test
+        - task_key: unique_first_dbt_model_id_test
         environment_key: Default
         dbt_task:
           commands:
@@ -225,19 +225,19 @@ resources:
       - task_key: zzz_win_loss_records_model
         depends_on:
         - task_key: zzz_game_details_model
-        - task_key: zzz_game_details_check_scores_test
-        - task_key: zzz_game_details_check_dates_test
-        - task_key: unique_zzz_game_details_game_id_test
-        - task_key: not_null_zzz_game_details_game_id_test
-        - task_key: not_null_zzz_game_details_home_test
         - task_key: accepted_values_zzz_game_details_home__Amsterdam__San_Francisco__Seattle_test
-        - task_key: not_null_zzz_game_details_visitor_test
         - task_key: accepted_values_zzz_game_details_visitor__Amsterdam__San_Francisco__Seattle_test
-        - task_key: not_null_zzz_game_details_home_score_test
-        - task_key: not_null_zzz_game_details_visitor_score_test
-        - task_key: not_null_zzz_game_details_winner_test
         - task_key: accepted_values_zzz_game_details_winner__Amsterdam__San_Francisco__Seattle_test
         - task_key: not_null_zzz_game_details_date_test
+        - task_key: not_null_zzz_game_details_game_id_test
+        - task_key: not_null_zzz_game_details_home_score_test
+        - task_key: not_null_zzz_game_details_home_test
+        - task_key: not_null_zzz_game_details_visitor_score_test
+        - task_key: not_null_zzz_game_details_visitor_test
+        - task_key: not_null_zzz_game_details_winner_test
+        - task_key: unique_zzz_game_details_game_id_test
+        - task_key: zzz_game_details_check_dates_test
+        - task_key: zzz_game_details_check_scores_test
         environment_key: Default
         dbt_task:
           commands:

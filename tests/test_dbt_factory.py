@@ -3,19 +3,31 @@ import shlex
 import subprocess
 import sys
 import textwrap
-from tempfile import NamedTemporaryFile
+from collections.abc import Iterator
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+
 import pytest
 import yaml
 
 from databricks_dbt_factory.DbtFactory import DbtFactory
-from databricks_dbt_factory.DbtTask import DbtTask, DbtTaskOptions, TaskType
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
 from databricks_dbt_factory.TaskFactory import DbtDependencyResolver
 from databricks_dbt_factory.Utils import read_dbt_manifest
 
-
 BASE_PATH = str(Path(__file__).resolve().parent)
+
+
+class _IterationCountingSet(set[str]):
+    """A set that records explicit scans of its members."""
+
+    def __init__(self, values: set[str]):
+        super().__init__(values)
+        self.iterations = 0
+
+    def __iter__(self) -> Iterator[str]:
+        self.iterations += 1
+        return super().__iter__()
 
 
 def _model(
@@ -352,6 +364,133 @@ def test_flat_mode_transitive_cross_model_test_does_not_create_cycle(dbt_factory
     # D's ancestors = {A, B, C}. T.refs = {A, C} ⊆ ancestors(D) → add T.
     d_deps = {dep['task_key'] for dep in by_key['d_model']['depends_on']}
     assert d_deps == {'c_model', 'relationship_a_c_test'}
+
+
+def test_flat_mode_adds_test_gates_only_at_the_first_downstream_frontier(dbt_factory):
+    nodes = {}
+    for index in range(100):
+        name = f'm{index}'
+        dependencies = [f'model.pkg.m{index - 1}'] if index else []
+        nodes.update([_model('pkg', name, depends_on=dependencies)])
+        nodes.update([_test('pkg', f'quality_{name}', [f'model.pkg.{name}'])])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    by_key = {task['task_key']: task for task in tasks}
+    gate_edges = []
+    for task_key, task in by_key.items():
+        if not task_key.endswith('_model'):
+            continue
+        for dependency in task['depends_on']:
+            if dependency['task_key'].startswith('quality_'):
+                gate_edges.append((task_key, dependency['task_key']))
+
+    assert len(gate_edges) == 99
+    assert gate_edges == [(f'm{index}_model', f'quality_m{index - 1}_test') for index in range(1, 100)]
+
+
+def test_flat_mode_handles_a_descending_999_model_chain_with_one_test(dbt_factory):
+    nodes = dict(
+        _model(
+            'pkg',
+            f'm{index:04d}',
+            depends_on=[f'model.pkg.m{index - 1:04d}'] if index else [],
+        )
+        for index in reversed(range(999))
+    )
+    nodes.update([_test('pkg', 'quality_m0000', ['model.pkg.m0000'])])
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+
+    assert len(tasks) == 1_000
+    by_key = {task['task_key']: task for task in tasks}
+    assert by_key['m0001_model']['depends_on'] == [
+        {'task_key': 'm0000_model'},
+        {'task_key': 'quality_m0000_test'},
+    ]
+    assert by_key['m0002_model']['depends_on'] == [{'task_key': 'm0001_model'}]
+
+
+def test_flat_mode_skips_ancestor_computation_when_no_tests_are_emitted(
+    dbt_factory: DbtFactory, monkeypatch: pytest.MonkeyPatch
+):
+    nodes = dict(
+        _model(
+            'pkg',
+            f'm{index:04d}',
+            depends_on=[f'model.pkg.m{index - 1:04d}'] if index else [],
+        )
+        for index in reversed(range(999))
+    )
+
+    def unexpected_ancestor_computation(*_args, **_kwargs):
+        pytest.fail('ancestor computation is unnecessary without emitted tests')
+
+    monkeypatch.setattr(dbt_factory, '_compute_ancestors', unexpected_ancestor_computation)
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+
+    assert len(tasks) == 999
+
+
+@pytest.mark.parametrize('reverse_order', [False, True])
+def test_flat_mode_refuses_a_cyclic_manifest_with_a_deterministic_remedy(dbt_factory, reverse_order):
+    entries = [
+        _model('pkg', 'a', depends_on=['model.pkg.b']),
+        _model('pkg', 'b', depends_on=['model.pkg.a']),
+        _test('pkg', 'quality_a', ['model.pkg.a']),
+    ]
+    nodes = dict(reversed(entries) if reverse_order else entries)
+
+    with pytest.raises(ValueError) as error:
+        dbt_factory.create_tasks({'nodes': nodes})
+
+    assert str(error.value) == (
+        'Cannot compute test gates because the manifest contains the dependency cycle '
+        'model.pkg.a -> model.pkg.b -> model.pkg.a. Regenerate the manifest after removing the cycle.'
+    )
+
+
+def test_first_frontier_union_caches_eligible_tests_for_converging_dependencies(
+    dbt_factory: DbtFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Eligibility is computed once per resource while converging frontiers inherit the full union."""
+    nodes = dict(
+        [
+            _model('pkg', 'a'),
+            _model('pkg', 'b'),
+            _model('pkg', 'left', depends_on=['model.pkg.a']),
+            _model('pkg', 'right', depends_on=['model.pkg.b']),
+            _model('pkg', 'join', depends_on=['model.pkg.left', 'model.pkg.right']),
+            _model('pkg', 'consumer_one', depends_on=['model.pkg.join']),
+            _model('pkg', 'consumer_two', depends_on=['model.pkg.join']),
+            _test('pkg', 'quality_a', ['model.pkg.a']),
+            _test('pkg', 'quality_b', ['model.pkg.b']),
+            _test('pkg', 'relationship_a_b', ['model.pkg.a', 'model.pkg.b']),
+        ]
+    )
+    compute_ancestors = dbt_factory._compute_ancestors  # pylint: disable=protected-access
+    tracked_ancestors: dict[str, _IterationCountingSet] = {}
+
+    def compute_tracked_ancestors(dbt_nodes: dict, dbt_sources: dict) -> dict[str, set[str]]:
+        tracked_ancestors.update(
+            {
+                resource: _IterationCountingSet(ancestors)
+                for resource, ancestors in compute_ancestors(dbt_nodes, dbt_sources).items()
+            }
+        )
+        return dict(tracked_ancestors)
+
+    monkeypatch.setattr(DbtFactory, '_compute_ancestors', staticmethod(compute_tracked_ancestors))
+
+    tasks = dbt_factory.create_tasks({'nodes': nodes})
+    deps_by_key = {task['task_key']: [dependency['task_key'] for dependency in task['depends_on']] for task in tasks}
+
+    assert deps_by_key['left_model'] == ['a_model', 'quality_a_test']
+    assert deps_by_key['right_model'] == ['b_model', 'quality_b_test']
+    assert deps_by_key['join_model'] == ['left_model', 'right_model', 'relationship_a_b_test']
+    assert deps_by_key['consumer_one_model'] == ['join_model']
+    assert deps_by_key['consumer_two_model'] == ['join_model']
+    assert tracked_ancestors['model.pkg.join'].iterations == 1
 
 
 def test_flat_mode_warn_severity_tests_do_not_gate_downstream(dbt_factory):
@@ -906,6 +1045,61 @@ def test_generation_fails_when_only_non_discriminating_terms_survive(dbt_factory
         dbt_factory.create_tasks({'nodes': nodes})
 
 
+def test_ambiguous_test_with_a_missing_parent_is_refused(dbt_factory):
+    nodes = dict(
+        [
+            _model('pkg', 'a'),
+            _model('pkg', 'b'),
+            _test(
+                'pkg',
+                'check',
+                ['model.pkg.a', 'model.pkg.missing'],
+                fqn=['pkg', 'check'],
+                path='models/schema.yml',
+                test_name='not_null',
+            ),
+            _test(
+                'pkg',
+                'check.nested',
+                ['model.pkg.b'],
+                fqn=['pkg', 'check', 'nested'],
+                path='models/schema.yml',
+                test_name='not_null',
+            ),
+        ]
+    )
+
+    with pytest.raises(ValueError, match='also runs'):
+        dbt_factory.create_tasks({'nodes': nodes})
+
+
+def test_ambiguous_test_with_only_a_missing_parent_is_refused(dbt_factory):
+    nodes = dict(
+        [
+            _model('pkg', 'b'),
+            _test(
+                'pkg',
+                'check',
+                ['model.pkg.missing'],
+                fqn=['pkg', 'check'],
+                path='models/schema.yml',
+                test_name='not_null',
+            ),
+            _test(
+                'pkg',
+                'check.nested',
+                ['model.pkg.b'],
+                fqn=['pkg', 'check', 'nested'],
+                path='models/schema.yml',
+                test_name='not_null',
+            ),
+        ]
+    )
+
+    with pytest.raises(ValueError, match='also runs'):
+        dbt_factory.create_tasks({'nodes': nodes})
+
+
 def test_a_usable_name_still_rescues_an_unusable_fqn(dbt_factory):
     # The boundary of the refusal above: only the fqn *or* the name has to survive. A space in the
     # directory kills the fqn, but `orders` is a fine selector and dbt matches a bare name against the
@@ -1173,24 +1367,13 @@ def test_flat_mode_unit_test_on_versioned_model_emits_task(dbt_factory):
     tasks = dbt_factory.create_tasks({'nodes': nodes, 'unit_tests': unit_tests})
     by_key = {t['task_key']: t for t in tasks}
 
-    # dbt clones a versioned unit test leaving both clones the same fqn, name and file (it rewrites only
-    # `unique_id`, `depends_on.nodes[0]` and `version`), and `version:` is not a unit-test discriminator
-    # at all — on dbt 1.12.0 it accepts only latest/prerelease/old/none, none of which match a unit test.
-    # So the clones cannot be told apart, and an earlier revision emitting one task per clone gave both
-    # the same selector, making each run every version's assertions while claiming to cover one.
-    # One task for the group is what dbt will actually run.
     unit_test_keys = sorted(key for key in by_key if key.startswith('unit_test_'))
-    assert unit_test_keys == ['unit_test_pkg_dim_ut_a_v1']
-
-    # It waits for every version's model, since the selector runs every version's assertions.
-    assert by_key['unit_test_pkg_dim_ut_a_v1']['depends_on'] == [
-        {'task_key': 'dim_v1_model'},
-        {'task_key': 'dim_v2_model'},
-    ]
-    assert by_key['unit_test_pkg_dim_ut_a_v1']['dbt_task']['commands'] == [
-        'dbt test --select fqn:pkg.models.marts.dim.ut_a,package:pkg,file:dim_unit_tests.yml,'
-        'resource_type:unit_test --target dev --indirect-selection empty'
-    ]
+    assert unit_test_keys == ['unit_test_pkg_dim_ut_a_v1', 'unit_test_pkg_dim_ut_a_v2']
+    assert by_key['unit_test_pkg_dim_ut_a_v1']['depends_on'] == [{'task_key': 'dim_v1_model'}]
+    assert by_key['unit_test_pkg_dim_ut_a_v2']['depends_on'] == [{'task_key': 'dim_v2_model'}]
+    for task_key in unit_test_keys:
+        command = by_key[task_key]['dbt_task']['commands'][-1]
+        assert command.endswith('--indirect-selection cautious')
 
 
 def test_bundled_mode_unit_test_on_versioned_model_emits_bundled_task(dbt_factory_bundled):
@@ -1286,15 +1469,9 @@ def test_windows_manifest_path_yields_the_bare_file_name(dbt_factory):
     ]
 
 
-def test_unit_test_group_is_built_from_emittable_clones_only(dbt_factory):
-    # Grouping runs over the clones whose target model is present, so the representative is always one
-    # that can actually be emitted. Grouping over every clone and filtering afterwards could pick a
-    # representative whose model is absent, and dropping it would drop the whole group.
-    #
-    # dbt itself never produces a half-present group — a disabled version yields no clone at all
-    # (verified on dbt 1.12.0: only `..._v2` appears in `unit_tests`, with `model.probe.orders.v1` in
-    # `disabled`) — so this asserts the single-clone shape dbt really emits, and that it is not
-    # mistaken for a group needing to share a task.
+def test_unit_test_clone_is_emitted_when_its_model_version_is_present(dbt_factory):
+    # dbt omits a clone for a disabled model version, so a manifest may contain only one clone of a
+    # versioned unit test. The remaining clone is emitted against its exact model version.
     nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'orders', 'v2'], version=2, path='models/orders_v2.sql')])
     unit_tests = dict([_unit_test('pkg', 'orders', 'ut_orders', depends_on=['model.pkg.orders.v2'], version=2)])
 
@@ -1320,8 +1497,7 @@ def test_node_passed_as_a_copy_is_not_its_own_collision(dbt_factory):
     ]
 
 
-# The only test that reaches into internals: it asserts an *optimisation* is equivalent to the
-# unoptimised path, and "scan every peer" has no public surface to express that through.
+# The selector-index test reaches into internals because "scan every peer" has no public surface.
 # pylint: disable=protected-access
 def test_selector_index_narrowing_matches_a_full_scan(dbt_factory):
     # `_SelectorIndex` exists only to keep the exactness check off a full manifest scan, which measured
@@ -1348,6 +1524,19 @@ def test_selector_index_narrowing_matches_a_full_scan(dbt_factory):
             assert narrowed == scanned, f'{select!r} narrowed to {narrowed}, full scan gives {scanned}'
 
 
+def test_source_term_matches_only_the_named_source():
+    peers = dict(
+        [
+            _source('pkg', 'raw', 'orders'),
+            _source('pkg', 'raw', 'customers'),
+            _source('other', 'raw', 'orders'),
+            _model('pkg', 'orders'),
+        ]
+    )
+
+    assert DbtFactory._matching_ids('source:pkg.raw.orders', peers) == ['source.pkg.raw.orders']
+
+
 def test_a_selector_that_reaches_nothing_is_refused(dbt_factory):
     # The exactness check is an *equality*, not "no surplus". A selector matching nothing is as wrong as
     # one matching too much, and far easier to miss: `dbt test` and `dbt run` both exit 0 on a zero-match
@@ -1369,67 +1558,6 @@ def test_a_selector_that_reaches_nothing_is_refused(dbt_factory):
 
     with pytest.raises(ValueError, match='does not reach model.pkg.orders'):
         DbtFactory._node_select(node, peers=peers)
-
-
-def _dbt_task(task_key: str, depends_on: list[str] | None = None) -> DbtTask:
-    return DbtTask(task_key, ['dbt run'], DbtTaskOptions(task_type=TaskType.DBT), depends_on or [])
-
-
-def test_gate_candidate_for_an_absent_task_is_skipped():
-    # Cannot arise from `_create_tasks`, which keys candidates by a task in the same list — but the
-    # lookup used to be an unguarded `graph[task_key]`, so a future caller that filtered tasks after
-    # collecting candidates would have failed with a `KeyError` far from the cause.
-    tasks = [_dbt_task('a_model', ['b_test']), _dbt_task('b_test')]
-
-    result = DbtFactory._add_safe_gate_candidates(tasks, {'ghost_model': ['b_test']})
-
-    assert [(t.task_key, t.depends_on) for t in result] == [('a_model', ['b_test']), ('b_test', [])]
-
-
-@pytest.mark.parametrize(
-    'refs, expected',
-    [
-        (['model.pkg.orders.v1', 'model.pkg.orders.v2'], True),
-        (['model.pkg.orders.v2'], True),
-        # A cross-model data test: one endpoint is versioned, the other is not. Admitting these is what
-        # made the refusal cite a versioned pair for a project that had none.
-        (['model.pkg.orders.v1', 'model.pkg.consumer'], False),
-        # Two *different* models' versions — still not "the versions of a single model".
-        (['model.pkg.orders.v1', 'model.pkg.beta.v1'], False),
-        (['model.pkg.consumer'], False),
-        ([], False),
-    ],
-    ids=['two-versions', 'one-version', 'versioned-plus-plain', 'two-models', 'plain-only', 'empty'],
-)
-def test_covers_one_version_group_admits_only_a_single_models_versions(refs, expected):
-    version_groups = {
-        'model.pkg.orders.v1': 'pkg.orders',
-        'model.pkg.orders.v2': 'pkg.orders',
-        'model.pkg.beta.v1': 'pkg.beta',
-    }
-
-    assert DbtFactory._covers_one_version_group(frozenset(refs), version_groups) is expected
-
-
-def test_a_gate_candidate_that_would_close_a_loop_is_refused():
-    # The structural check in isolation: `b_test` already depends on `a_model`, so gating `a_model` on
-    # `b_test` would cycle. Refused rather than dropped — dropping is silent and loses a real quality
-    # gate, and which edge got dropped depended on nothing but sort order.
-    tasks = [_dbt_task('a_model'), _dbt_task('b_test', ['a_model'])]
-
-    with pytest.raises(ValueError, match='Cannot generate a gate'):
-        DbtFactory._add_safe_gate_candidates(tasks, {'a_model': ['b_test']})
-
-
-def test_acyclic_gate_candidates_are_all_added():
-    # The passing side of the same check: nothing here reaches back to `a_model`, so both candidate
-    # edges are added, in sorted order so the result does not depend on `PYTHONHASHSEED`.
-    tasks = [_dbt_task('a_model'), _dbt_task('c_test'), _dbt_task('b_test')]
-
-    result = DbtFactory._add_safe_gate_candidates(tasks, {'a_model': ['c_test', 'b_test']})
-
-    by_key = {t.task_key: t.depends_on for t in result}
-    assert by_key['a_model'] == ['b_test', 'c_test'], f'expected both edges sorted, got {by_key["a_model"]}'
 
 
 def test_gating_test_deps_are_ordered_deterministically_across_processes():
@@ -1458,13 +1586,11 @@ def test_gating_test_deps_are_ordered_deterministically_across_processes():
                 'fqn': ['pkg', name], 'original_file_path': f'models/{name}.yml',
                 'depends_on': {'nodes': list(deps)}, 'config': {'severity': 'error'}}
 
-        # A chain a -> b -> c -> d -> e with a test on each of the first four, so `e` is gated on all
-        # four and the append order is observable.
+        # Three tests become eligible at the same first frontier, so their append order is observable.
         nodes = dict([
             model('a'), model('b', ['model.pkg.a']), model('c', ['model.pkg.b']),
             model('d', ['model.pkg.c']), model('e', ['model.pkg.d']),
-            test('t_a', ['model.pkg.a']), test('t_b', ['model.pkg.b']),
-            test('t_c', ['model.pkg.c']), test('t_d', ['model.pkg.d']),
+            test('t_z', ['model.pkg.d']), test('t_a', ['model.pkg.d']), test('t_m', ['model.pkg.d']),
         ])
         tasks = create_dbt_factory().create_tasks({'nodes': nodes})
         by_key = {t['task_key']: [d['task_key'] for d in (t.get('depends_on') or [])] for t in tasks}
@@ -1487,7 +1613,7 @@ def test_gating_test_deps_are_ordered_deterministically_across_processes():
         assert result.returncode == 0, f'seed {seed} failed:\n{result.stderr}'
         orderings.add(result.stdout.strip())
 
-    assert len(orderings) == 1, f'depends_on ordering varies with PYTHONHASHSEED: {sorted(orderings)}'
+    assert orderings == {'["d_model", "t_a_test", "t_m_test", "t_z_test"]'}
 
 
 @pytest.mark.parametrize('name', ['@weird', '2+orders'], ids=['at-prefix', 'numeric-prefix'])

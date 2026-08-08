@@ -194,7 +194,13 @@ class TestTaskFactory(TaskFactory):
     """Factory for creating test tasks."""
 
     def create_task(
-        self, select: str, deps_command_name: str, dbt_node_info: dict, task_key: str, task_keys: dict[str, str]
+        self,
+        select: str,
+        deps_command_name: str,
+        dbt_node_info: dict,
+        task_key: str,
+        task_keys: dict[str, str],
+        indirect_selection: str = 'empty',
     ) -> DbtTask:
         """
         Creates a test task for a single dbt test node.
@@ -205,6 +211,7 @@ class TestTaskFactory(TaskFactory):
             dbt_node_info (dict): Information about the DBT node.
             task_key (str): Key for the task.
             task_keys (dict[str, str]): Task key per dbt node, for resolving dependencies.
+            indirect_selection (str): dbt indirect-selection mode required by the selection plan.
 
         Returns:
             DbtTask: An instance of Task.
@@ -219,16 +226,12 @@ class TestTaskFactory(TaskFactory):
 
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        # `--indirect-selection empty` is appended *after* the user's options so it cannot be overridden:
-        # this task selects its test node directly, and dbt's default eager mode would additionally run
-        # every test attached to anything the selector happens to touch. Verified with `dbt ls` on dbt
-        # 1.12.0 that `empty` preserves the direct match for generic, singular, relationships and unit
-        # tests alike, so the flag costs nothing and removes the whole class of leak. Bundled tasks keep
-        # `cautious`, where sweeping a resource's tests is the point.
+        # The plan's mode is appended after user options so the command cannot override the selector's
+        # correctness contract. Direct test selectors use `empty`; parent-scoped selectors use `cautious`.
         commands.append(
             f"dbt test --select {shlex.quote(select)}"
             + (f" {self.dbt_options}" if self.dbt_options else "")
-            + " --indirect-selection empty"
+            + f" --indirect-selection {shlex.quote(indirect_selection)}"
         )
 
         return DbtTask(task_key, commands, self.task_options, depends_on)

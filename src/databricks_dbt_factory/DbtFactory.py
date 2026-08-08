@@ -1,10 +1,12 @@
+import heapq
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath, PureWindowsPath
+from typing import cast
 
-from databricks_dbt_factory.TaskFactory import TaskFactory
 from databricks_dbt_factory.DbtTask import DbtTask
+from databricks_dbt_factory.TaskFactory import TaskFactory, TestTaskFactory
 from databricks_dbt_factory.Utils import build_task_key_maps
-
 
 # The `unique_id` prefixes of resources a test can be attached to.
 _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
@@ -22,34 +24,27 @@ def _flatten_fqn(fqn: list[str]) -> list[str]:
 
 
 @dataclass
+class _SelectionPlan:
+    """A dbt selector paired with the indirect-selection mode needed to keep it exact."""
+
+    select: str
+    indirect_selection: str
+
+
+@dataclass
 class _Gating:
     """
     What deciding a node's gating test edges needs, in per-test mode.
 
-    Grouped because the three are only ever read together, and only by
-    `_extend_deps_with_upstream_tests`: `tests` is the test index, `ancestors` the dbt-graph reachability
-    it is judged against, and `version_groups` the versioned-model grouping behind the one exemption to
-    the subset rule. `candidates` collects the edges that exemption produces, for
-    `_add_safe_gate_candidates` to settle against the finished task graph.
+    `tests` indexes each test under its referenced resources, `ancestors` records strict dbt ancestors,
+    `resources_by_task_key` maps immediate emitted dependencies back to manifest resource ids, and
+    `eligible_test_keys` memoizes the tests eligible at each resource's downstream frontier.
     """
 
     tests: dict[str, list[tuple[str, frozenset[str]]]] = field(default_factory=dict)
     ancestors: dict[str, set[str]] = field(default_factory=dict)
-    version_groups: dict[str, str] = field(default_factory=dict)
-    candidates: dict[str, list[str]] = field(default_factory=dict)
-
-
-def _reaches(graph: dict[str, set[str]], start: str, target: str) -> bool:
-    """Whether `target` is reachable from `start` by following `graph`'s dependency edges."""
-    seen, stack = {start}, [start]
-    while stack:
-        for dep in graph.get(stack.pop(), ()):
-            if dep == target:
-                return True
-            if dep not in seen:
-                seen.add(dep)
-                stack.append(dep)
-    return False
+    resources_by_task_key: dict[str, str] = field(default_factory=dict)
+    eligible_test_keys: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 def _base_file_name(original_file_path: str) -> str:
@@ -144,7 +139,6 @@ class DbtFactory:
         node_info: dict,
         source_info: dict | None = None,
         peers: dict | None = None,
-        expected_ids: set[str] | None = None,
     ) -> str:
         """
         Returns the dbt `--select` argument addressing exactly one node.
@@ -152,9 +146,7 @@ class DbtFactory:
         `peers` is every selectable resource in the manifest, keyed by id, used to prove the finished
         selector matches only `node_info` (see `_assert_exact`). It is optional so the library API and
         unit tests can build a selector for a lone node, but callers with a manifest should pass it:
-        without it, exactness is assumed rather than established. `expected_ids` names the `peers` keys
-        the selector is *allowed* to match besides this node, for the version-clone group that shares a
-        task.
+        without it, exactness is assumed rather than established.
 
         Every node is addressed the same way — the intersection (`,`, dbt's AND) of every independent
         fact the manifest gives us about it:
@@ -193,18 +185,12 @@ class DbtFactory:
         * a unit test on `orders` (`[probe, orders, unit_orders]`) and a data test named
           `orders.unit_orders` (`[probe, orders.unit_orders]`) flatten identically, which `resource_type:`
           does separate;
-        * dbt clones a unit test per model version leaving both clones the same fqn, name and file, and
-          `version:` does not apply to unit tests at all (it accepts only `latest`/`prerelease`/`old`/
-          `none`), so the clones cannot be told apart — `_unit_test_groups` emits one task for the group
-          instead;
+        * dbt clones a unit test per model version leaving both clones the same fqn, name and file;
         * two generic tests may simply *share* an fqn: dbt does not require test names to be unique and
           disambiguates in the `unique_id` hash only.
 
-        So `_assert_exact` intersects the finished selector against the manifest — mirroring dbt's own
-        matching, pinned against `dbt ls` in `tests/integration/test_selector_against_dbt.py` — and
-        refuses the node when it is not alone. Refusing is the last resort but the only honest one: for
-        an equal-fqn or prefix collision dbt offers no term that separates the nodes, so the alternative
-        is a task that runs its neighbour's resource before that neighbour's dependencies have run.
+        `_assert_exact` checks direct selectors against the manifest. Test tasks whose direct selector is
+        ambiguous may instead use `_test_selection_plan`, which scopes the selector to one exact parent.
 
         All of this is a per-node check against the rest of the manifest, which is stricter than dbt
         needs in one direction and unavoidable in the other: exactness genuinely is a property of the
@@ -273,35 +259,107 @@ class DbtFactory:
 
         select = ','.join(terms)
         if peers is not None:
-            cls._assert_exact(select, node_info, peers, expected_ids)
+            cls._assert_exact(select, node_info, peers)
         return select
 
     @classmethod
-    def _assert_exact(cls, select: str, node_info: dict, peers: dict, expected_ids: set[str] | None = None) -> None:
+    def _test_selection_plan(cls, test_info: dict, peers: dict) -> _SelectionPlan:
+        """
+        Builds an exact plan for one direct test task.
+
+        An already-exact test selector runs with indirect selection disabled. If the direct selector
+        matches multiple tests, a test with exactly one manifest parent can be isolated by intersecting
+        the parent's exact selector with the test selector under `cautious`, provided the conservative
+        per-term expansion proof shows that the finished selector can run only the intended test.
+        """
+        select = cls._node_select(test_info)
+        intended = cls._own_ids(test_info, peers)
+        selected = set(cls._matching_ids(select, peers))
+        if selected == intended:
+            return _SelectionPlan(select, 'empty')
+
+        surplus = selected - intended
+        missing = intended - selected
+        if missing or not surplus:
+            cls._assert_exact(select, test_info, peers)
+
+        parents = cls._test_parent_ids(test_info)
+        if len(parents) != 1:
+            cls._assert_exact(select, test_info, peers)
+        parent_id = next(iter(parents))
+        if parent_id not in peers:
+            cls._assert_exact(select, test_info, peers)
+        parent_info = peers[parent_id]
+        parent_select = cls._node_select(
+            parent_info,
+            source_info=parent_info if parent_info.get('resource_type') == 'source' else None,
+            peers=peers,
+        )
+        scoped_select = f'{parent_select},{select}'
+        if cls._eager_expansion_superset(scoped_select, peers) != intended:
+            cls._assert_exact(select, test_info, peers)
+        return _SelectionPlan(scoped_select, 'cautious')
+
+    @classmethod
+    def _eager_expansion_superset(cls, select: str, peers: dict) -> set[str]:
+        """
+        Returns a conservative superset of a cautious selector's result.
+
+        dbt expands every comma-separated term before intersecting the term results. For each term this
+        proof uses eager expansion: its direct matches plus every test with any directly matched parent.
+        Cautious expansion can only admit fewer tests, so intersecting these eager term sets remains a
+        superset of the finished cautious result. A parent-scoped plan is accepted only when that superset
+        is exactly the intended test.
+
+        The intended single-parent test is present by construction: every test term matches it directly,
+        and every exact-parent term matches its sole parent and therefore adds the test indirectly.
+        """
+        possible: set[str] | None = None
+        for term in select.split(','):
+            direct = set(cls._matching_ids(term, peers))
+            expanded = direct | cls._tests_attached_to_any(direct, peers)
+            possible = expanded if possible is None else possible & expanded
+        return possible or set()
+
+    @classmethod
+    def _tests_attached_to_any(cls, parent_ids: set[str], peers: dict) -> set[str]:
+        """Returns enabled test ids having at least one manifest parent in `parent_ids`."""
+        if isinstance(peers, _SelectorIndex):
+            return peers.tests_attached_to_any(parent_ids)
+        return {
+            full_name
+            for full_name, info in peers.items()
+            if info.get('resource_type') in {'test', 'unit_test'} and cls._test_parent_ids(info) & parent_ids
+        }
+
+    @classmethod
+    def _test_parent_ids(cls, test_info: dict) -> frozenset[str]:
+        """Returns every model, seed, snapshot, or source dependency id, including absent resources."""
+        return frozenset(
+            dep
+            for dep in test_info.get('depends_on', {}).get('nodes', [])
+            if dep.startswith(cls._DBT_TEST_TARGET_PREFIXES)
+        )
+
+    @classmethod
+    def _assert_exact(cls, select: str, node_info: dict, peers: dict) -> None:
         """
         Raises unless `select` runs only the node it was built for.
 
-        Every task selects its own resource directly and pins the indirect-selection mode, so this is a
-        plain intersection of the emitted terms — no model of dbt's eager expansion is needed.
-
-        That is what `--indirect-selection empty` buys. Under dbt's default eager mode the check had to
-        mirror dbt's real pipeline (*expand each component, then intersect* — see
-        `NodeSelector.select_nodes_recursively`), because a component could reach a model the intersection
-        later excluded while the model's attached tests were added *inside that component* and survived on
-        their own terms. Pinning `empty` removes the expansion entirely rather than emulating it: verified
-        with `dbt ls` on dbt 1.12.0 that `empty` preserves the direct match for generic, singular,
-        `relationships` and unit tests alike. Bundled tasks keep `cautious` and are not checked here —
-        sweeping a resource's tests is their purpose.
+        Direct test plans pin `--indirect-selection empty`, so their exactness is a plain intersection of
+        the emitted terms. Parent-scoped cautious plans apply their additional proof in
+        `_test_selection_plan`; bundled tasks deliberately sweep a resource's tests and are not checked
+        here.
 
         The contract is **equality**, not "no surplus". A selector that matches nothing is just as wrong as
         one that matches too much: `dbt test` and `dbt run` both exit 0 on a zero-match selector, so the
         task would go green having asserted or built nothing.
 
-        `expected_ids` names additional ids the selector may legitimately run. The node recognises itself
-        by object identity *or* by `unique_id`: identity alone would call a node its own collision if a
-        caller passed a copy, and `unique_id` alone fails on hand-written fixtures that omit the field.
+        The node recognises itself by object identity *or* by `unique_id`: identity alone would call a
+        node its own collision if a caller passed a copy, and `unique_id` alone fails on hand-written
+        fixtures that omit the field.
         """
-        allowed = cls._own_ids(node_info, peers) | (expected_ids or set())
+        allowed = cls._own_ids(node_info, peers)
         run = set(cls._matching_ids(select, peers))
         surplus = run - allowed
         if surplus:
@@ -462,6 +520,15 @@ class DbtFactory:
             # A bare value is still accepted so a hand-written selector keeps working; everything the
             # factory emits now carries the explicit `fqn:` method.
             return cls._fqn_term_matches(value if method == 'fqn' else term, node_info)
+        if method == 'source':
+            parts = value.split('.')
+            return (
+                len(parts) == 3
+                and node_info.get('resource_type') == 'source'
+                and (node_info.get('package_name') or '') == parts[0]
+                and (node_info.get('source_name') or '') == parts[1]
+                and (node_info.get('name') or '') == parts[2]
+            )
         if method == 'package':
             return (node_info.get('package_name') or '') == value
         if method == 'file':
@@ -475,7 +542,6 @@ class DbtFactory:
             return (node_info.get('resource_type') or '') == value
         if method == 'test_name':
             return ((node_info.get('test_metadata') or {}).get('name') or '') == value
-        # `source:` selectors are validated by `_source_select`, which needs no manifest context.
         return True  # pragma: no cover - no other method is emitted
 
     @staticmethod
@@ -518,9 +584,10 @@ class DbtFactory:
         path = node_info.get('original_file_path')
         return ValueError(
             f'Cannot generate a task for {name!r} ({path}): the only selector dbt offers for it '
-            f'({select}) also runs {", ".join(sorted(also_matched))}. dbt has no way to address these '
-            f'separately, so the task would run the others too — before their own dependencies have '
-            f'completed. Rename {name!r} so that its dotted name neither matches nor prefixes a '
+            f'({select}) also runs {", ".join(sorted(also_matched))}. dbt has no unique-id selector, so '
+            f'the factory cannot prove a task addresses these separately and refuses to risk running the '
+            f'others before their own dependencies have completed. Rename {name!r} so that its dotted '
+            f'name neither matches nor prefixes a '
             f"sibling's, or move it to a file of its own."
         )
 
@@ -572,13 +639,10 @@ class DbtFactory:
         """
         dbt_nodes = self._enabled_only(dbt_manifest.get('nodes', {}))
         dbt_sources = self._enabled_only(dbt_manifest.get('sources', {}))
-        dbt_unit_tests = self._merge_unit_test_group_deps(
-            self._enabled_only(dbt_manifest.get('unit_tests', {})), dbt_nodes
-        )
+        dbt_unit_tests = self._enabled_only(dbt_manifest.get('unit_tests', {}))
 
-        # Everything a selector could match, for the exactness check in `_node_select`. Sources are
-        # included even though no emitted command runs one: a task's `dbt test` uses dbt's default
-        # eager indirect selection, so a selector reaching a source pulls in the tests on it.
+        # All directly selectable resources participate in selector exactness and test selection-plan
+        # checks, including sources even though no emitted command builds a source directly.
         peers = _SelectorIndex({**dbt_nodes, **dbt_unit_tests, **dbt_sources})
 
         bundle = 'test' in self.task_factories and self.bundle_tests
@@ -606,10 +670,11 @@ class DbtFactory:
 
         gating = _Gating()
         if not bundle and 'test' in self.task_factories:
+            indexed_tests = self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests, task_keys)
             gating = _Gating(
-                tests=self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests, task_keys),
-                ancestors=self._compute_ancestors(dbt_nodes, dbt_sources),
-                version_groups=self._version_group(dbt_nodes),
+                tests=indexed_tests,
+                ancestors=self._compute_ancestors(dbt_nodes, dbt_sources) if indexed_tests else {},
+                resources_by_task_key={task_key: full_name for full_name, task_key in task_keys.items()},
             )
 
         tasks = self._build_resource_tasks(
@@ -634,11 +699,9 @@ class DbtFactory:
             )
             tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys, peers))
         elif 'test' in self.task_factories:
-            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, dbt_nodes, task_keys, peers))
+            tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys, peers))
 
-        # Last, so the graph walked is the complete one: the candidates gate on unit-test tasks, which
-        # only exist after the branch above, and their own deps are what close the loops being detected.
-        return self._add_safe_gate_candidates(tasks, gating.candidates)
+        return tasks
 
     @staticmethod
     def _enabled_only(entries: dict) -> dict:
@@ -680,52 +743,14 @@ class DbtFactory:
         unit tests — the returned ids enter `task_ids`, so a unit test's presence in `task_keys`
         is how every consumer knows it was emitted.
 
-        Version clones are folded into one representative id (see
-        `_unit_test_groups`), so a versioned model's unit test yields one task rather
-        than one per version running the whole group.
+        Each versioned unit-test clone receives its own task and depends on its exact model version.
         """
-        groups = self._unit_test_groups(dbt_unit_tests, dbt_nodes)
-        return [full_name for full_name, members in groups.items() if members[0] == full_name]
-
-    def _unit_test_groups(self, dbt_unit_tests: dict, dbt_nodes: dict) -> dict[str, list[str]]:
-        """
-        Maps each emittable unit test id to the sorted group of ids that share its task.
-
-        dbt clones a unit test declaration once per model version, rewriting only `unique_id`,
-        `depends_on.nodes[0]` and `version` — the fqn, name and file are identical across the clones.
-        No selector separates them: `version:` is not a unit-test discriminator at all (dbt 1.12.0
-        accepts only `latest`, `prerelease`, `old` and `none` there, none of which match a unit test),
-        so emitting one task per clone gives every task the same selector, and each runs every
-        version's assertions while claiming to cover one.
-
-        Grouping them into a single task is therefore not a compromise but the accurate description of
-        what dbt will run. The task depends on every version's model, so the assertions still run after
-        the models they read. Keyed by the fields dbt leaves identical; `members[0]` is the representative,
-        stable across manifest orderings because the group is sorted.
-
-        Only unit tests whose target model is present are grouped, and this is the single authority for
-        both the emission decision and task building, so the two cannot disagree. Grouping every
-        clone and filtering afterwards would let the representative be one whose own model is absent —
-        dropping it would then drop the whole group, silently losing an emittable unit test.
-        """
-        by_identity: dict[tuple, list[str]] = {}
+        emitted: list[str] = []
         for full_name, info in dbt_unit_tests.items():
             model_full_name = self._unit_test_model(info)
-            if model_full_name is None or model_full_name not in dbt_nodes:
-                continue
-            identity = (
-                tuple(info.get('fqn') or []),
-                info.get('name') or '',
-                info.get('package_name') or '',
-                info.get('original_file_path') or '',
-            )
-            by_identity.setdefault(identity, []).append(full_name)
-        groups: dict[str, list[str]] = {}
-        for members in by_identity.values():
-            ordered = sorted(members)
-            for member in ordered:
-                groups[member] = ordered
-        return groups
+            if model_full_name is not None and model_full_name in dbt_nodes:
+                emitted.append(full_name)
+        return emitted
 
     def _compute_ancestors(self, dbt_nodes: dict, dbt_sources: dict) -> dict[str, set[str]]:
         """
@@ -736,25 +761,80 @@ class DbtFactory:
         transitively. Otherwise adding `T` would create a cycle (since `T` depends on each
         ref, and some ref might depend on `N`).
         """
+        resources = {**dbt_nodes, **dbt_sources}
+        dependencies: dict[str, set[str]] = {}
+        dependents: dict[str, list[str]] = {full_name: [] for full_name in resources}
+        for full_name, info in resources.items():
+            direct_dependencies = {
+                dependency for dependency in info.get('depends_on', {}).get('nodes', []) if dependency in resources
+            }
+            dependencies[full_name] = direct_dependencies
+            for dependency in direct_dependencies:
+                dependents[dependency].append(full_name)
+
+        unresolved_counts = {
+            full_name: len(direct_dependencies) for full_name, direct_dependencies in dependencies.items()
+        }
+        ready = [full_name for full_name, count in unresolved_counts.items() if count == 0]
+        heapq.heapify(ready)
         ancestors: dict[str, set[str]] = {}
+        while ready:
+            full_name = heapq.heappop(ready)
+            node_ancestors: set[str] = set()
+            for dependency in sorted(dependencies[full_name]):
+                node_ancestors.add(dependency)
+                node_ancestors.update(ancestors[dependency])
+            ancestors[full_name] = node_ancestors
 
-        def visit(full_name: str) -> set[str]:
-            cached = ancestors.get(full_name)
-            if cached is not None:
-                return cached
-            result: set[str] = set()
-            info = dbt_nodes.get(full_name) or dbt_sources.get(full_name)
-            if info is not None:
-                for dep in info.get('depends_on', {}).get('nodes', []):
-                    if dep in dbt_nodes or dep in dbt_sources:
-                        result.add(dep)
-                        result.update(visit(dep))
-            ancestors[full_name] = result
-            return result
+            for dependent in sorted(dependents[full_name]):
+                unresolved_counts[dependent] -= 1
+                if unresolved_counts[dependent] == 0:
+                    heapq.heappush(ready, dependent)
 
-        for full_name in list(dbt_nodes.keys()) + list(dbt_sources.keys()):
-            visit(full_name)
+        if len(ancestors) != len(resources):
+            unresolved = {full_name for full_name, count in unresolved_counts.items() if count > 0}
+            cycle = self._dependency_cycle(dependencies, unresolved)
+            raise ValueError(
+                f'Cannot compute test gates because the manifest contains the dependency cycle '
+                f'{" -> ".join(cycle)}. Regenerate the manifest after removing the cycle.'
+            )
         return ancestors
+
+    @staticmethod
+    def _dependency_cycle(dependencies: dict[str, set[str]], candidates: set[str]) -> list[str]:
+        """Returns one deterministic cycle from a graph that could not be topologically ordered."""
+        active = 1
+        complete = 2
+        state: dict[str, int] = {}
+        for start in sorted(candidates):
+            if state.get(start) == complete:
+                continue
+
+            path = [start]
+            positions = {start: 0}
+            state[start] = active
+            stack: list[tuple[str, Iterator[str]]] = [(start, iter(sorted(dependencies[start] & candidates)))]
+            while stack:
+                full_name, direct_dependencies = stack[-1]
+                try:
+                    dependency = next(direct_dependencies)
+                except StopIteration:
+                    stack.pop()
+                    path.pop()
+                    positions.pop(full_name)
+                    state[full_name] = complete
+                    continue
+
+                dependency_state = state.get(dependency)
+                if dependency_state is None:
+                    positions[dependency] = len(path)
+                    path.append(dependency)
+                    state[dependency] = active
+                    stack.append((dependency, iter(sorted(dependencies[dependency] & candidates))))
+                elif dependency_state == active:
+                    return path[positions[dependency] :] + [dependency]
+
+        raise RuntimeError('A non-topological dependency graph did not contain a cycle.')
 
     def _index_tests_by_resource(
         self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict, task_keys: dict[str, str]
@@ -848,191 +928,40 @@ class DbtFactory:
         node_full_name: str,
         existing_deps: list[str] | None,
         gating: _Gating,
-    ) -> tuple[list[str], list[str]]:
+    ) -> list[str]:
         """
-        Appends the task keys of tests that can safely gate this node.
+        Adds safe test gates at the first downstream frontier.
 
-        A test `T` gates node `N` only when every ref of `T` is an ancestor of `N`. That is what keeps the
-        emitted graph acyclic: it forces every gate edge to respect the dbt graph's own topological order,
-        so no combination of edges can close a loop.
-
-        The one exception is a test covering the *versions* of a single model: `_unit_test_groups` gives a
-        versioned model's cloned unit test one task depending on every version, so its refs are
-        `{orders.v1, orders.v2}` while a `consumer` referencing only v1 has just `{orders.v1}` among its
-        ancestors. The subset rule alone drops that edge, leaving `consumer` ungated against a failing v1
-        assertion. It is confined to tests whose refs lie entirely in one version group — see
-        `_covers_one_version_group`; anything else, including a cross-model `relationships` test that happens
-        to reference a versioned model, falls through to the subset rule.
-
-        Such an edge is returned as a *candidate*, because no local predicate can establish it is safe.
-        Testing the cycle condition here — "no ref of `T` is `N` or has `N` as an ancestor" — is sound for
-        one edge and unsound for a set of them: `gating.ancestors` describes the *dbt* graph while these are
-        *task* edges, so once several gates exist the reachability it consults no longer matches the graph
-        being built. `_add_safe_gate_candidates` settles them against the real, assembled graph instead.
-
-        Returns:
-            (deps, candidates): the node's dependency list, and the gating test keys whose safety must be
-            settled against the finished graph.
+        A test is eligible for node `N` when all of its refs are strict ancestors of `N`. Tests already
+        eligible at an immediate emitted dependency are inherited through that dependency and need not be
+        repeated. The remaining tests are the first frontier where the full ref set has become available.
         """
         deps: list[str] = list(existing_deps or [])
-        seen = set(deps)
-        candidates: list[str] = []
-        node_ancestors = gating.ancestors.get(node_full_name, set())
-        # `sorted` rather than plain set iteration: the append order below decides the order of the
-        # emitted `depends_on`, and a set's is `PYTHONHASHSEED`-dependent. The spec is checked in, so
-        # that showed up as a spurious diff on every regeneration. Same reasoning as the sorted passes
-        # in `build_task_key_maps`: the output should be a function of the node ids alone.
-        for ancestor in sorted(node_ancestors):
+        eligible = cls._eligible_test_keys(node_full_name, gating)
+        inherited: set[str] = set()
+        for dependency_key in deps:
+            dependency = gating.resources_by_task_key.get(dependency_key)
+            if dependency is not None:
+                inherited.update(cls._eligible_test_keys(dependency, gating))
+        deps.extend(sorted(eligible - inherited - set(deps)))
+        return deps
+
+    @staticmethod
+    def _eligible_test_keys(node_full_name: str, gating: _Gating) -> frozenset[str]:
+        """Returns and caches tests whose complete ref set is among the node's strict ancestors."""
+        cached = gating.eligible_test_keys.get(node_full_name)
+        if cached is not None:
+            return cached
+
+        ancestors = gating.ancestors.get(node_full_name, set())
+        eligible: set[str] = set()
+        for ancestor in ancestors:
             for test_key, test_refs in gating.tests.get(ancestor, []):
-                if test_key in seen:
-                    continue
-                unsatisfied = [ref for ref in test_refs if ref not in node_ancestors]
-                if not unsatisfied:
-                    deps.append(test_key)
-                    seen.add(test_key)
-                    continue
-                if not cls._covers_one_version_group(test_refs, gating.version_groups):
-                    continue
-                if not all(
-                    cls._version_sibling_of_any(ref, node_ancestors, gating.version_groups) for ref in unsatisfied
-                ):
-                    continue
-                seen.add(test_key)
-                if node_full_name in test_refs:
-                    # The test covers this very node, so it necessarily runs *after* it — `_unit_test_groups`
-                    # makes the shared task wait for every version, including this one. There is no gate to
-                    # lose here and never was: a test of `orders.v2` cannot also gate `orders.v2`. Skipping
-                    # quietly (rather than offering it as a candidate, which would then be refused) is what
-                    # keeps the ordinary `orders.v2 = ref(orders.v1)` layout working.
-                    continue
-                candidates.append(test_key)
-        return deps, candidates
-
-    @staticmethod
-    def _version_group(dbt_nodes: dict) -> dict[str, str]:
-        """
-        Maps each versioned model's id to the `<package>.<name>` group its versions share.
-
-        Read from the manifest's `version` field rather than parsed out of the id. The id is
-        `model.<pkg>.<name>.v<version>` with the version rendered verbatim, so its final segment cannot be
-        told apart from a model *name*: a dotted version gives `model.probe.orders.v1.1` while an ordinary
-        model named `vendors` gives `model.probe.vendors`. Both were confirmed on dbt 1.12.0, where
-        `version` is `None` for every non-versioned model.
-        """
-        groups: dict[str, str] = {}
-        for full_name, info in dbt_nodes.items():
-            if info.get('resource_type') != 'model' or info.get('version') is None:
-                continue
-            groups[full_name] = f"{info.get('package_name')}.{info.get('name')}"
-        return groups
-
-    @staticmethod
-    def _covers_one_version_group(test_refs: frozenset[str], version_groups: dict[str, str]) -> bool:
-        """
-        Whether every resource `test_refs` names is a version of the *same* model.
-
-        This is the precondition for the version-sibling exemption, which applies to a test covering the
-        versions of one model. `_unit_test_groups` is the usual source of that shape, but not the only one —
-        a `relationships` test from `alpha.v1` to `alpha.v2` qualifies too, and correctly so: it does gate a
-        node downstream of those versions. So the test is about the *refs*, not about the kind of test.
-
-        All of them, not just the ones an ancestor does not already cover: a cross-model test with refs
-        `{alpha.v2, xm}` is not shared across versions and belongs to the plain subset rule.
-        """
-        groups = {version_groups.get(ref) for ref in test_refs}
-        return len(groups) == 1 and None not in groups
-
-    @staticmethod
-    def _version_sibling_of_any(ref: str, ancestors: set[str], version_groups: dict[str, str]) -> bool:
-        """
-        Whether `ref` is another *version* of a model already among `ancestors`.
-
-        Used only to keep a shared unit-test task gating a node that references one version of the model it
-        covers; every other ref must be an ancestor outright.
-
-        Both sides must be versions of the *same* model, decided by `_version_group` — which reads the
-        manifest's `version` field, so a model merely *named* `vendors` is not taken for a version of
-        `visits`. Comparing the ids by substring cannot make that distinction and grants the exemption to
-        ordinary models, reopening the cycle the subset rule prevents.
-        """
-        group = version_groups.get(ref)
-        if group is None:
-            return False
-        return any(ancestor != ref and version_groups.get(ancestor) == group for ancestor in ancestors)
-
-    @staticmethod
-    def _add_safe_gate_candidates(tasks: list[DbtTask], candidates: dict[str, list[str]]) -> list[DbtTask]:
-        """
-        Adds the candidate gate edges, refusing generation if any of them would close a loop.
-
-        This is the check that replaces the local proxies: it walks the real `depends_on` graph — every
-        task, gate edges included — so it cannot be fooled by the dbt-graph/task-graph mismatch that made
-        each per-edge predicate wrong for a *set* of edges. Candidates are considered in sorted order, so
-        the outcome is a function of the task keys alone.
-
-        A candidate that closes a loop is a *refusal*, not a dropped edge. Dropping keeps the graph acyclic
-        and is tempting — the subset rule would have dropped the same edge — but the edge is a real quality
-        gate, and losing it silently means a model builds even though a unit test covering it failed.
-        Worse, which model lost its gate depended only on alphabetical order, so renaming a model
-        relocated the missing gate. Refusing matches how `_ambiguous` and `_unaddressable` treat a
-        selector whose correctness cannot be established: fail at build time, naming the resources and the
-        remedy. Only two versioned models whose later versions cross-reference each other's earlier
-        version reach this, and `--bundle-tests` represents that layout without the ambiguity.
-
-        Raises:
-            ValueError: when a candidate edge cannot be added without creating a cycle.
-        """
-        if not candidates:
-            return tasks
-        graph = {task.task_key: set(task.depends_on or ()) for task in tasks}
-
-        added: dict[str, list[str]] = {}
-        for task_key in sorted(candidates):
-            if task_key not in graph:
-                # Cannot happen today: candidates are keyed by the `task_key` of a task in this very
-                # list. Skipping rather than raising keeps a future caller that filters tasks after
-                # collecting candidates from failing with a `KeyError` in an unrelated place.
-                continue
-            for test_key in sorted(candidates[task_key]):
-                # The edge is `task_key -> test_key`, so it closes a loop exactly when `test_key`
-                # already reaches back to `task_key`.
-                if _reaches(graph, test_key, task_key):
-                    raise DbtFactory._ungateable(task_key, test_key)
-                graph[task_key].add(test_key)
-                added.setdefault(task_key, []).append(test_key)
-        if not added:
-            return tasks
-
-        extended: list[DbtTask] = []
-        for task in tasks:
-            new_deps = added.get(task.task_key)
-            extended.append(replace(task, depends_on=[*(task.depends_on or []), *new_deps]) if new_deps else task)
-        return extended
-
-    @staticmethod
-    def _ungateable(task_key: str, test_key: str) -> ValueError:
-        """
-        Builds the error raised when a quality gate cannot be added without creating a cycle.
-
-        Like `_ambiguous` and `_unaddressable`, this is the whole of what a CLI user sees, so it leads with
-        the resources and the remedy. `--bundle-tests` is offered because it gates on a per-resource test
-        task and so never builds this edge — but the message only claims it *generates*, not that the gate
-        survives: for a shared unit test bundling keeps an equivalent gate, while a multi-endpoint data test
-        becomes a standalone task that gates nothing under `--indirect-selection cautious`. Both verified on
-        dbt 1.12.0.
-
-        It names the two task keys and stops: the caller establishes one fact — adding this edge closes a
-        loop — so explaining *why* the project is shaped that way would assert what the check never verified.
-        The reachability can come from a sibling gate added moments earlier, which is no dependency the
-        reader could find in their own refs. The README documents the shapes that cause it.
-        """
-        return ValueError(
-            f'Cannot generate a gate for {task_key!r} on {test_key!r}: the two are mutually dependent once '
-            f'that gate is added, and Databricks rejects a cyclic depends_on at deploy. Run with '
-            f'--bundle-tests, which gates on a per-resource test task and does not form this edge. '
-            f'Emitting the task without the gate would let {task_key!r} build even though a test covering '
-            f'it had failed. See "Handling dbt tests" in the README for the project shapes that cause this.'
-        )
+                if test_refs <= ancestors:
+                    eligible.add(test_key)
+        result = frozenset(eligible)
+        gating.eligible_test_keys[node_full_name] = result
+        return result
 
     def _classify_tests(
         self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict
@@ -1085,12 +1014,7 @@ class DbtFactory:
         gating: _Gating,
         peers: dict,
     ) -> list[DbtTask]:
-        """
-        Builds tasks for every non-test resource (plus per-test tasks when not bundling).
-
-        Gate edges the subset rule cannot prove safe are recorded in `gating.candidates`, keyed by task
-        key, for `_add_safe_gate_candidates` to settle once every task exists.
-        """
+        """Builds tasks for every non-test resource, plus per-test tasks when not bundling."""
         # Maps a tested resource's task key (what `depends_on` holds) to its gating bundled test
         # task key, for rewiring in bundle mode. Sources have a bundled test key but no run task,
         # so they are absent from `task_keys` and skipped.
@@ -1106,13 +1030,24 @@ class DbtFactory:
             resource_type = node_info['resource_type']
             task_key = task_keys[node_full_name]
             factory = self.task_factories[resource_type]
-            task = factory.create_task(
-                self._node_select(node_info, peers=peers),
-                node_info['name'],
-                node_info,
-                task_key,
-                task_keys,
-            )
+            if resource_type == 'test':
+                plan = self._test_selection_plan(node_info, peers)
+                task = cast(TestTaskFactory, factory).create_task(
+                    plan.select,
+                    node_info['name'],
+                    node_info,
+                    task_key,
+                    task_keys,
+                    indirect_selection=plan.indirect_selection,
+                )
+            else:
+                task = factory.create_task(
+                    self._node_select(node_info, peers=peers),
+                    node_info['name'],
+                    node_info,
+                    task_key,
+                    task_keys,
+                )
 
             if resource_type in self._GATEABLE_TYPES:
                 task = self._gate_task(task, node_full_name, bundle, bundled_test_key_by_task_key, gating)
@@ -1132,9 +1067,7 @@ class DbtFactory:
             return replace(task, depends_on=self._rewire_deps(task.depends_on, bundled_test_key_by_task_key))
         if not gating.tests:
             return task
-        deps, candidates = self._extend_deps_with_upstream_tests(node_full_name, task.depends_on, gating)
-        if candidates:
-            gating.candidates[task.task_key] = candidates
+        deps = self._extend_deps_with_upstream_tests(node_full_name, task.depends_on, gating)
         return replace(task, depends_on=deps)
 
     @staticmethod
@@ -1152,7 +1085,7 @@ class DbtFactory:
         peers: dict,
     ) -> list[DbtTask]:
         """Emits one bundled `<resource>_test` task per tested resource via `TestTaskFactory.create_bundled_task`."""
-        test_factory = self.task_factories['test']
+        test_factory = cast(TestTaskFactory, self.task_factories['test'])
         tasks: list[DbtTask] = []
         for full_name in sorted(nodes_with_tests):
             is_source = full_name.startswith('source.')
@@ -1179,60 +1112,26 @@ class DbtFactory:
         Emits one task per standalone test — cross-model tests (e.g. `relationships`) gated on
         every referenced resource, plus any zero-dep singular tests that bundles can't cover.
         """
-        test_factory = self.task_factories['test']
+        test_factory = cast(TestTaskFactory, self.task_factories['test'])
         tasks: list[DbtTask] = []
         for test_full_name, test_info in sorted(standalone_tests, key=lambda item: item[0]):
             test_task_key = task_keys[test_full_name]
+            plan = self._test_selection_plan(test_info, peers)
             tasks.append(
                 test_factory.create_task(
-                    self._node_select(test_info, peers=peers),
+                    plan.select,
                     test_info['name'],
                     test_info,
                     test_task_key,
                     task_keys,
+                    indirect_selection=plan.indirect_selection,
                 )
             )
         return tasks
 
-    def _merge_unit_test_group_deps(self, dbt_unit_tests: dict, dbt_nodes: dict) -> dict:
-        """
-        Returns `dbt_unit_tests` with each shared-task group's `depends_on` replaced by the group union.
-
-        Version clones share one task (see `_unit_test_groups`), and that task runs every clone's
-        assertions, so it must wait for every clone's model. Merging here — before indexing, gating and
-        task building all read the manifest — is what keeps those three in agreement.
-
-        Merging later, at task-build time only, silently broke the cycle guard: `_index_tests_by_resource`
-        recorded the representative's *unmerged* refs, so `_extend_deps_with_upstream_tests` still judged
-        it safe to gate a later model version on the group. With `orders.v2` depending on `orders.v1` plus
-        a unit test, that produced `orders_v2_model -> unit_test_..._v1 -> orders_v2_model`, a two-node
-        cycle Databricks rejects at deploy. With the union visible up front, the guard sees that the
-        group's refs are not all ancestors of `orders.v2` and declines to add the edge.
-        """
-        groups = self._unit_test_groups(dbt_unit_tests, dbt_nodes)
-        merged_view = dict(dbt_unit_tests)
-        for representative, members in groups.items():
-            if len(members) < 2 or representative != members[0]:
-                continue
-            info = dbt_unit_tests[representative]
-            merged = self._union_of_deps(dbt_unit_tests, members)
-            merged_view[representative] = {**info, 'depends_on': {**info.get('depends_on', {}), 'nodes': merged}}
-        return merged_view
-
-    @staticmethod
-    def _union_of_deps(dbt_unit_tests: dict, members: list[str]) -> list[str]:
-        """The union of `depends_on.nodes` across `members`, preserving first-seen order."""
-        merged: list[str] = []
-        for member in members:
-            for dep in dbt_unit_tests[member].get('depends_on', {}).get('nodes', []):
-                if dep not in merged:
-                    merged.append(dep)
-        return merged
-
     def _build_unit_test_tasks(
         self,
         dbt_unit_tests: dict,
-        dbt_nodes: dict,
         task_keys: dict[str, str],
         peers: dict,
     ) -> list[DbtTask]:
@@ -1243,26 +1142,24 @@ class DbtFactory:
         their task can't gate on a model task that is never created. Used in per-test mode; in
         bundled mode a model's bundled test task covers its unit tests via `--indirect-selection cautious`.
 
-        A versioned model's unit-test clones share one task, since no selector separates them (see
-        `_unit_test_groups`). Its `depends_on` is already the union of the clones' — merged into the
-        manifest view by `_merge_unit_test_group_deps` — so it waits for every version's model, which it
-        must, since the selector runs all of their assertions.
+        Versioned unit-test clones receive independent parent-scoped selection plans, so each task waits
+        only for and runs only against its exact model version.
         """
-        test_factory = self.task_factories['test']
-        groups = self._unit_test_groups(dbt_unit_tests, dbt_nodes)
+        test_factory = cast(TestTaskFactory, self.task_factories['test'])
 
         tasks: list[DbtTask] = []
         for unit_test_full_name, unit_test_info in sorted(dbt_unit_tests.items()):
             if unit_test_full_name not in task_keys:
                 continue
-            members = groups.get(unit_test_full_name, [unit_test_full_name])
+            plan = self._test_selection_plan(unit_test_info, peers)
             tasks.append(
                 test_factory.create_task(
-                    self._node_select(unit_test_info, peers=peers, expected_ids=set(members)),
+                    plan.select,
                     unit_test_info['name'],
                     unit_test_info,
                     task_keys[unit_test_full_name],
                     task_keys,
+                    indirect_selection=plan.indirect_selection,
                 )
             )
         return tasks
@@ -1291,8 +1188,18 @@ class _SelectorIndex(dict):
         self._by_file: dict[str, dict] = {}
         self._by_test_name: dict[str, dict] = {}
         self._by_fqn_key: dict[str, dict] = {}
+        self._tests_by_parent: dict[str, set[str]] = {}
         for full_name, info in peers.items():
             self._add(full_name, info)
+            self._index_test_parents(full_name, info, peers)
+
+    def _index_test_parents(self, full_name: str, info: dict, peers: dict) -> None:
+        """Indexes a test under each enabled testable parent."""
+        if info.get('resource_type') not in {'test', 'unit_test'}:
+            return
+        for parent in info.get('depends_on', {}).get('nodes', []):
+            if parent.startswith(_DBT_TEST_TARGET_PREFIXES) and parent in peers:
+                self._tests_by_parent.setdefault(parent, set()).add(full_name)
 
     def _add(self, full_name: str, info: dict) -> None:
         """Files one node under every key a selector term could reach it by."""
@@ -1306,6 +1213,13 @@ class _SelectorIndex(dict):
             self._by_test_name.setdefault(test_name, {})[full_name] = info
         for key in self._fqn_keys(info):
             self._by_fqn_key.setdefault(key, {})[full_name] = info
+
+    def tests_attached_to_any(self, parent_ids: set[str]) -> set[str]:
+        """Returns indexed tests having at least one parent in `parent_ids`."""
+        tests: set[str] = set()
+        for parent_id in parent_ids:
+            tests.update(self._tests_by_parent.get(parent_id, ()))
+        return tests
 
     @staticmethod
     def _fqn_keys(info: dict) -> set[str]:

@@ -43,9 +43,11 @@ Source = "https://github.com/mwojtyczka/databricks-dbt-factory"
 [tool.hatch.version]
 path = "src/databricks_dbt_factory/__about__.py"
 
-[tool.hatch.build]
-sources = ["src"]
+[tool.hatch.build.targets.sdist]
 include = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/databricks_dbt_factory"]
 
 [tool.hatch.envs.default]
 dependencies = [

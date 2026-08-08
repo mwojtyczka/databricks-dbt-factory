@@ -44,6 +44,7 @@ def create_dbt_factory(
     task_type: str = "dbt",
     notebook_path: str | None = None,
     bundle_tests: bool = False,
+    dbt_options: str = "--target dev",
 ) -> DbtFactory:
     resolver = DbtDependencyResolver()
     task_options = DbtTaskOptions(
@@ -54,8 +55,6 @@ def create_dbt_factory(
         task_type=task_type,
         notebook_path=notebook_path,
     )
-    dbt_options = "--target dev"
-
     task_factories = {
         'model': ModelTaskFactory(resolver, task_options, dbt_options),
         'snapshot': SnapshotTaskFactory(resolver, task_options, dbt_options),

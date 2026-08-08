@@ -97,13 +97,13 @@ With `--task-type dbt`, each dbt object becomes a native Databricks `dbt_task`:
 flowchart LR
     subgraph workflow["Generated Databricks Workflow — native dbt tasks"]
         direction LR
-        seed1["dbt seed --select seed1"] --> model1["dbt model --select model1"]
+        seed1["dbt seed --select seed1"] --> model1["dbt run --select model1"]
         seed2["dbt seed --select seed2"] --> model1
         model1 --> test1["dbt test --select test1"]
         model1 --> test2["dbt test --select test2"]
         model1 --> snap1["dbt snapshot --select snapshot1"]
-        snap1 --> model3["dbt deps<br/>dbt model --select model3"]
-        model2["dbt model --select model2"] --> test3["dbt test --select test3"]
+        snap1 --> model3["dbt deps<br/>dbt run --select model3"]
+        model2["dbt run --select model2"] --> test3["dbt test --select test3"]
     end
 
     classDef seed fill:#fde68a,stroke:#d97706,color:#000
@@ -120,20 +120,20 @@ flowchart LR
 ## Notebook runner tasks (default, recommended for best performance)
 
 With the default task type, each task runs the packaged runner notebook
-(`run_dbt_command.py`), which triggers the dbt commands programmatically using dbt core package. This gives much faster task
+(`run_dbt_command_<sha256>.py`), which triggers the dbt commands programmatically using dbt core package. This gives much faster task
 start times — see [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
 
 ```mermaid
 flowchart LR
     subgraph workflow["Generated Databricks Workflow — notebook runner tasks"]
         direction LR
-        seed1["run_dbt_command.py<br/>dbt seed --select seed1"] --> model1["run_dbt_command.py<br/>dbt model --select model1"]
-        seed2["run_dbt_command.py<br/>dbt seed --select seed2"] --> model1
-        model1 --> test1["run_dbt_command.py<br/>dbt test --select test1"]
-        model1 --> test2["run_dbt_command.py<br/>dbt test --select test2"]
-        model1 --> snap1["run_dbt_command.py<br/>dbt snapshot --select snapshot1"]
-        snap1 --> model3["run_dbt_command.py<br/>dbt deps + dbt model --select model3"]
-        model2["run_dbt_command.py<br/>dbt model --select model2"] --> test3["run_dbt_command.py<br/>dbt test --select test3"]
+        seed1["run_dbt_command_sha256.py<br/>dbt seed --select seed1"] --> model1["run_dbt_command_sha256.py<br/>dbt run --select model1"]
+        seed2["run_dbt_command_sha256.py<br/>dbt seed --select seed2"] --> model1
+        model1 --> test1["run_dbt_command_sha256.py<br/>dbt test --select test1"]
+        model1 --> test2["run_dbt_command_sha256.py<br/>dbt test --select test2"]
+        model1 --> snap1["run_dbt_command_sha256.py<br/>dbt snapshot --select snapshot1"]
+        snap1 --> model3["run_dbt_command_sha256.py<br/>dbt deps + dbt run --select model3"]
+        model2["run_dbt_command_sha256.py<br/>dbt run --select model2"] --> test3["run_dbt_command_sha256.py<br/>dbt test --select test3"]
     end
 
     classDef seed fill:#fde68a,stroke:#d97706,color:#000
@@ -182,6 +182,22 @@ Run `databricks_dbt_factory --version` afterwards to confirm the upgrade.
 The factory reads a **job template** (a minimal DAB-style YAML with an empty tasks list) and
 a **dbt manifest**, then outputs a complete job definition with one task per dbt node.
 
+## Manifest and runtime graph contract
+
+Selector exactness is relative to the supplied manifest. Each generated task invokes dbt against the
+runtime project, and manifest schema v12 does not record enough parse context for the factory to prove
+that runtime dbt will reconstruct the same graph. The runtime project and packages, dbt Core and adapter
+versions, target, profile, vars, and any environment variables that affect parsing must produce the same
+enabled resources and dependencies as the context that generated `manifest.json`.
+
+Generate a manifest and job definition for each target, profile, vars set, or environment context that
+can change the graph. Pass the matching target through the factory's dedicated `--target` argument.
+`--extra-dbt-command-options` refuses explicit parse-context overrides (`--vars`, `--profile`,
+`--profiles-dir`, `--project-dir`, and `--target`/`-t`) as well as selector overrides. Use
+`--profiles-directory`, `--project-directory`, and `--target` where applicable. This validation prevents
+an emitted command from explicitly replacing the manifest context; it cannot establish that the runtime
+files and environment are otherwise identical.
+
 ## Job template
 
 Create a minimal job template YAML. This is the skeleton the factory injects tasks into:
@@ -196,10 +212,19 @@ resources:
       environments:
       - environment_key: Default
         spec:
-          client: '1'
+          environment_version: '5'
           dependencies:
-          - dbt-databricks
+          - dbt-databricks==<exact-version>
 ```
+
+Replace `<exact-version>` with the exact `dbt-databricks` version used to generate
+`target/manifest.json`. Use that same exact pin in every environment that executes the generated
+commands, whether it backs native dbt tasks or notebook tasks. Databricks recommends
+`dbt-databricks>=1.6.0`; matching the manifest-generation version exactly is the stronger
+compatibility requirement.
+
+The example uses [serverless environment version 5](https://docs.databricks.com/aws/en/release-notes/serverless/environment-version/five),
+the current Databricks environment version. Use the latest version available in your workspace.
 
 To use a workspace base environment instead of inline dependencies (recommended for
 notebook tasks on serverless — requires Databricks CLI >= 0.292.0):
@@ -211,7 +236,7 @@ notebook tasks on serverless — requires Databricks CLI >= 0.292.0):
           base_environment: "/Workspace/Shared/envs/my_base_env.yaml"
 ```
 
-Note: `client` and `base_environment` are mutually exclusive — use one or the other.
+Note: `environment_version` and `base_environment` are mutually exclusive — use one or the other.
 
 ## Generating native dbt tasks within Databricks Workflows
 
@@ -246,16 +271,35 @@ databricks_dbt_factory  \
   --input-job-spec-path job_template.yaml \
   --target-job-spec-path job_definition.yaml \
   --task-type notebook \
-  --source GIT \
+  --source WORKSPACE \
   --target dev
 ```
 
-The packaged runner notebook (`run_dbt_command.py`) is copied next to the generated job spec
-automatically. The `databricks bundle deploy` DAB command uploads it to the workspace along with the job.
-Pass `--notebook-path <path>` if you want to pin the notebook elsewhere and manage it yourself.
+The packaged runner is copied into the bundle as
+`run_dbt_command_<64-lowercase-hex-SHA-256>.py`, where the suffix is the full SHA-256 of its
+contents. Every generated task references that immutable relative path, and `databricks bundle
+deploy` uploads it with the job. An unchanged runner reuses the same name; changed contents get a new
+name without overwriting a runner referenced by an existing deployment.
+
+Databricks bundle guidance uses `WORKSPACE` for notebooks deployed from the local bundle tree, so
+auto-copy mode uses `--source WORKSPACE`. For a caller-managed notebook, use `GIT` only when
+`--notebook-path` identifies a notebook inside the job's configured remote Git source. Pass
+`--notebook-path <path>` to manage the runner yourself.
+
+Both artifacts are normally prepared and validated before publication. The content-addressed runner is
+atomically published or reused first. The factory then rechecks filesystem aliases between its
+destination and the spec destination before atomically committing the job spec. This ordering prevents
+a published spec from
+referencing a runner that was not published first. Write failures leave the previous spec
+unchanged and remove temporary files; a spec failure can leave a valid unreferenced runner for reuse.
+The two replacements are not a cross-file transaction and are not guaranteed durable across a process
+crash, operating-system crash, or power loss.
+
+Generation assumes the output directory and its ancestors are trusted. It does not defend against an
+untrusted concurrent process replacing directory entries or retargeting ancestor paths during publication.
 
 > **When pinning `--notebook-path`, always provide `--project-directory` as an absolute workspace path to make sure the dbt project directory is resolved correctly.**
-> In auto-copy mode the factory places the runner at the project root and rewrites paths accordingly. When you pin the notebook somewhere else, the factory can't know where your project lives relative to it — only an absolute `--project-directory` (e.g. `/Workspace/Users/you@example.com/my_dbt_project`) is guaranteed to work at runtime.
+> With a relative `--project-directory`, auto-copy places the runner at that project root and rewrites paths accordingly; otherwise it places the runner next to the generated spec. When you pin the notebook somewhere else, the factory cannot infer where the project lives relative to it — only an absolute `--project-directory` (for example, `/Workspace/Users/you@example.com/my_dbt_project`) is guaranteed to work at runtime.
 
 If your dbt project lives in the workspace instead of git (`--source WORKSPACE`), also pass `--project-directory` and `--profiles-directory` pointing at the absolute workspace paths of the uploaded project, e.g.:
 
@@ -294,7 +338,7 @@ databricks_dbt_factory  \
   --target-job-spec-path job_definition.yaml \
   --task-type notebook \
   --job-cluster-key dbt_cluster \
-  --source GIT \
+  --source WORKSPACE \
   --target dev
 ```
 
@@ -304,20 +348,20 @@ databricks_dbt_factory  \
 - `--dbt-manifest-path` (type: str, required): Path to the dbt manifest file.
 - `--input-job-spec-path` (type: str, required): Path to the input job spec file (the job template).
 - `--target-job-spec-path` (type: str, required): Path to the target job spec file.
-- `--target` (type: str, optional): dbt target to use. If not provided, the default target from the dbt profile will be used.
-- `--source` (type: str, optional, default: None): Project source (`GIT` or `WORKSPACE`). If not provided, `WORKSPACE` will be used.
+- `--target` (type: str, optional): dbt target to use. If not provided, the default target from the dbt profile will be used. The selected target must produce the same graph as the supplied manifest.
+- `--source` (type: str, optional, default: None): Project source (`GIT` or `WORKSPACE`). Auto-copied notebook runners explicitly use `WORKSPACE`. Otherwise, omission emits no task-level source, so Databricks uses `GIT` when the job defines `git_source` and `WORKSPACE` otherwise. For notebook tasks, reserve explicit `GIT` for a caller-managed notebook in the job's remote Git source.
 - `--task-type` (type: str, optional, default: "notebook"): Task type to generate — `notebook` for notebook_task wrapper, `dbt` for native dbt_task.
-- `--notebook-path` (type: str, optional): Path to the dbt runner notebook used when `--task-type notebook`. If omitted, the packaged runner notebook is copied next to the generated job spec and referenced relatively, so `databricks bundle deploy` uploads it automatically. **When provided, also pass `--project-directory` as an absolute workspace path** — see the note in [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
+- `--notebook-path` (type: str, optional): Path to the dbt runner notebook used when `--task-type notebook`. If omitted, the packaged runner is copied into the bundle under its full content-addressed SHA-256 filename and referenced relatively, so `databricks bundle deploy` uploads it automatically. **When provided, also pass `--project-directory` as an absolute workspace path** — see the note in [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
 - `--warehouse_id` (type: str, optional): SQL Warehouse ID. Only used with native dbt_task.
 - `--schema` (type: str, optional): Metastore schema. Only used with native dbt_task.
 - `--catalog` (type: str, optional): Metastore catalog. Only used with native dbt_task.
-- `--profiles-directory` (type: str, optional): Path to the profiles directory.
-- `--project-directory` (type: str, optional): Path to the dbt project directory.
+- `--profiles-directory` (type: str, optional): Runtime path to the profiles directory used for the supplied manifest context.
+- `--project-directory` (type: str, optional): Runtime path to the dbt project represented by the supplied manifest.
 - `--environment-key` (type: str, optional, default: Default): Key of the serverless environment. Mutually exclusive with `--job-cluster-key`.
 - `--job-cluster-key` (type: str, optional): Job cluster key for running tasks on job compute instead of serverless. Mutually exclusive with `--environment-key`.
-- `--extra-dbt-command-options` (type: str, optional, default: ""): Additional dbt command options to include.
+- `--extra-dbt-command-options` (type: str, optional, default: ""): Additional static dbt command options that do not alter resource selection or parse context. The factory rejects selector filters, Databricks dynamic value references, and explicit `--vars`, `--profile`, `--profiles-dir`, `--project-dir`, or `--target`/`-t` overrides. Use the dedicated factory arguments where available; the runtime parse context must match the supplied manifest. Allowed values that begin with a reserved short-option prefix, such as `-m` or `-s`, must use the unambiguous `--option=value` form.
 - `--no-run-tests` (flag, default: tests enabled): Skip generating dbt test tasks. Tests are included by default.
-- `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle single-model tests per resource into one `dbt test --select <resource>` task. Fewer Databricks tasks means fewer task startups, fewer dbt cold starts, and noticeably faster end-to-end runtime for projects with many tests. Downstream models/seeds/snapshots gate on the upstream's `<resource>_test` task so failing tests still halt the DAG. Cross-model tests are emitted as their own tasks with multi-resource deps. See [Handling dbt tests](#handling-dbt-tests).
+- `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle exact selectors for data tests with one testable parent (model, seed, snapshot, or source) and unit tests into one Databricks task per parent, using at most one `dbt test` union per indirect-selection mode. Data tests with zero or multiple testable parents remain standalone. Fewer Databricks tasks means fewer task startups and dbt cold starts. Downstream models/seeds/snapshots gate on the upstream's `<resource>_test` task. See [Handling dbt tests](#handling-dbt-tests).
 - `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
 - `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
@@ -348,6 +392,17 @@ Keys are stable as long as the set of resources is. Adding a resource whose key 
 existing disambiguated key can shift that key (e.g. to a `_2` suffix), which repoints that task's run
 history and alerts.
 
+## Databricks job limits
+
+Databricks jobs support at most 1,000 tasks. The factory refuses to generate a job that exceeds that
+limit. Enable `--bundle-tests` to reduce task count; if the job is still too large, split the workload
+across jobs.
+
+When notebook tasks share a job cluster, each concurrently running task uses a separate execution
+context, and one cluster supports at most 150 execution contexts. Use bundled tests to reduce
+concurrency pressure, or prefer serverless notebook tasks when the generated DAG needs greater
+parallelism instead of concentrating it on one shared cluster.
+
 ## Handling dbt tests
 
 The factory produces tasks for dbt tests (both data tests and unit tests) from the manifest by
@@ -360,8 +415,8 @@ Each task selects its resource by several facts at once, joined with commas (dbt
 AND), so that exactly one resource matches:
 
 ```
-dbt run  --select my_project.sql_model1.zzz_game_details,package:my_project,file:zzz_game_details.sql,resource_type:model
-dbt test --select my_project.models.sql_model1.unique_zzz_game_details_game_id,package:my_project,file:schemas.yml,resource_type:test,test_name:unique
+dbt run  --select fqn:my_project.sql_model1.zzz_game_details,package:my_project,file:zzz_game_details.sql,resource_type:model
+dbt test --select fqn:my_project.models.sql_model1.unique_zzz_game_details_game_id,package:my_project,file:schemas.yml,resource_type:test,test_name:unique
 ```
 
 Each selector is then checked against the manifest, because an FQN is a *prefix* over dbt's flattened
@@ -371,7 +426,15 @@ with one parent whose fqn/name discriminator does not also select that parent, t
 intersect the test selector with the parent's exact selector under cautious indirect selection.
 Generation fails when neither plan can establish exactness.
 
-Sources use dbt's own form for them, `source:<package>.<source>.<table>`.
+This proof covers the supplied manifest's graph. It depends on the runtime project producing that same
+graph under the contract described in [Manifest and runtime graph contract](#manifest-and-runtime-graph-contract).
+
+For other resources, the factory does not search alternate selector spellings after choosing a usable
+FQN. It conservatively refuses an ambiguous generated selector even when a rare alternate spelling
+might be exact.
+
+When an ambiguous test needs its source as an exact parent scope, sources use dbt's own form,
+`source:<package>.<source>.<table>`.
 
 Resources dbt has disabled are skipped, including the few that stay in `nodes` with `enabled: false`
 rather than moving to the manifest's `disabled` section.
@@ -380,22 +443,24 @@ rather than moving to the manifest's `disabled` section.
 
 Selectors name the `fqn:` method explicitly rather than letting dbt infer it from the value's shape, so
 most awkward names cost nothing: a `/`, a `:`, or a `.sql` suffix in a resource name is matched literally.
-What still cannot be expressed is a name containing a space, comma, brace or one of `*?[]`, or one that
-ends with something dbt reads as a graph operator (a trailing `+2`) — the `fqn:` prefix does not neutralise
+What still cannot be expressed is a name containing a space, comma or one of `*?[]`, or one that ends
+with something dbt reads as a graph operator (a trailing `+2`) — the `fqn:` prefix does not neutralise
 those. Sources additionally cannot contain a `.`, since dbt's `source:` form uses it as its own separator.
-Braces are excluded for a non-dbt reason: Databricks substitutes `{{...}}` in a task's commands as plain
-text before the task runs, so a selector containing one resolves locally and matches nothing in the job.
+
+Literal or incomplete braces, such as `orders{draft}` or `orders{{draft`, remain ordinary selector text
+and are supported. Only a complete `{{...}}` sequence is unsafe: Databricks interprets it as a dynamic
+value reference and substitutes it before dbt runs. The factory can omit an unsafe optional FQN or file
+term when the remaining generated selector is exact. A source selector cannot omit any of its three
+parts, so a complete reference in its assembled selector is refused even when dbt resolves it exactly.
 
 Test tasks whose direct selector is exact pin `--indirect-selection empty`, so the task runs exactly the
 named test and nothing dbt would otherwise sweep in alongside it. A provably safe ambiguous
 single-parent test uses the exact-parent intersection described above with `--indirect-selection
-cautious`. Bundled tasks also use `cautious`, where sweeping a resource's tests is the point.
+cautious`. Bundled tasks preserve the mode required by each test's exact selection plan.
 
-> **Requires dbt 1.5 or newer at task runtime.** The `empty` indirect-selection mode first appears in
-> dbt-core 1.5.0 — 1.4.0 offers only `eager`, `cautious` and `buildable` (verified by reading the
-> `IndirectSelection` enum in each released source tarball). The dbt that runs inside your Databricks job
-> is yours, not this tool's, so on an older dbt every generated test task fails on an invalid flag value.
-> It fails loudly rather than silently, but it is a hard floor.
+> **Pin the runtime adapter exactly.** Generated test commands use the `empty` indirect-selection mode,
+> which requires dbt-core 1.5 or newer. Databricks recommends `dbt-databricks>=1.6.0`; select a supported
+> version and pin that exact version both when generating the manifest and in every task runtime.
 
 Generation also fails when a selector is valid but not *provably exact*. Equal or prefix-colliding test
 FQNs are accepted when an exact single-parent scope isolates the intended node. A collision is refused
@@ -417,20 +482,20 @@ name in `schema.yml` can stay as it is).
 ### Per-test (default)
 
 One Databricks task per dbt test node, running `dbt test --select <selector>`. Each test task's
-`depends_on` includes every model/seed/snapshot the test references, so multi-model tests
+`depends_on` includes every model/seed/snapshot the test references, so multi-resource tests
 (e.g. `relationships`) only run after all their endpoints are built. Exact direct test selectors run
 with `--indirect-selection empty`. When dbt gives several single-parent tests the same direct selector
 and the test discriminator does not select the parent itself, the task intersects that selector with the
 exact parent selector under `--indirect-selection cautious`. This isolates equal-FQN generic tests,
 installed-package collisions, and versioned unit-test clones.
 
-**Downstream models are gated only on error-severity tests.** A test first becomes a dependency at the
-downstream frontier where all of its refs are strict ancestors. Later nodes inherit that gate through
-their immediate emitted dependencies instead of repeating the same test edge throughout the DAG. Tests
-whose full ref set is not ancestral remain under this safe-subset rule and do not create a gate. This
-matches `dbt build` semantics while keeping `depends_on` compact and acyclic. **`severity: warn` tests
-still run as their own tasks but are kept out of downstream `depends_on`** — they surface findings
-without blocking anything.
+**Every emitted test gates its first safe downstream frontier.** A test first becomes a dependency where
+all of its refs are strict ancestors. Later nodes inherit that gate through their immediate emitted
+dependencies instead of repeating the same test edge throughout the DAG. Tests whose full ref set is not
+ancestral remain under this safe-subset rule and do not create a gate. This keeps `depends_on` compact and
+acyclic while preserving `dbt build` ordering. A `severity: warn` test normally succeeds and therefore
+does not block its dependants; if dbt is run with `--warn-error`, its failure blocks them without changing
+the generated graph.
 
 Unit tests get one task each, gated on the model under test. They have no severity and always fail
 the run when they fail, so they gate downstream models like error-severity data tests. On a
@@ -439,8 +504,9 @@ file. Each clone still receives its own parent-scoped task, depends only on its 
 runs only that version's assertions.
 
 - **Pros:** per-test failures are individually visible in the Databricks UI; downstream
-  execution halts on error-severity test failure just like `dbt build`; cross-model tests wait
-  for every endpoint they reference; warn tests stay informational, no DAG gating.
+  execution halts on error-severity test failure just like `dbt build`; cross-resource tests wait
+  for every referenced model, seed, or snapshot task; warn tests stay informational unless dbt is
+  configured with `--warn-error`.
 - **Cons:** larger DAG (one task per test, and dbt projects routinely have many more tests than
   models).
 
@@ -452,42 +518,46 @@ more tests than models), bundling dramatically reduces end-to-end runtime by cut
 - **Task startup overhead.** Every Databricks task pays a cold-start tax. Going from N test
   tasks per resource down to one means N−1 fewer cold starts per resource.
 - **Repeated dbt initialization.** Each `dbt test` invocation parses the manifest, connects to
-  the warehouse, and sets up the adapter. Bundling reduces this from once-per-test to
-  once-per-resource.
+  the warehouse, and sets up the adapter. Bundling reduces this from once per test to at most twice
+  per resource: one command for direct `empty` plans and one for parent-scoped `cautious` plans.
 - **DAG coordination.** Fewer tasks means less scheduler pressure on the job run.
 
-For a 100-model project with ~5 tests per model, that's ~500 test tasks collapsing to ~100 —
-typically a large wall-clock win.
+For a 100-model project with ~5 tests per model, that's ~500 test tasks collapsing to ~100 tasks —
+typically a large wall-clock win even when a few tasks need both selection modes.
 
-The factory classifies each dbt test node into one of two buckets based on its `depends_on`:
+The factory classifies each dbt data-test node by the testable resources in its `depends_on`. Testable
+resources are models, seeds, snapshots, and sources:
 
-- **Single-model tests** (most tests: `unique`, `not_null`, `accepted_values`, column-level
-  checks, …) — collapsed into one Databricks task per tested resource, with task key
-  `<resource_name>_test` (e.g. `customers_test`) that runs all the
-  resource's single-model tests together.
+- **One testable parent** (most tests: `unique`, `not_null`, `accepted_values`, column-level
+  checks, …) — bundled into one Databricks task per tested resource, with task key
+  `<resource_name>_test` (e.g. `customers_test`). Unit tests join the bundle for their resolved model.
 
-- **Cross-model tests** (e.g. `relationships`, custom tests that reference multiple models) —
-  emitted as their own tasks, one per test node, with deps on **every** resource the test
-  references. These run in parallel with the bundled tasks; they don't fit inside a bundle
-  because their correctness requires all their endpoints to be built first.
+- **Zero or multiple testable parents** — emitted as standalone tasks, one per test node. This includes
+  singular/custom tests that do not call `ref()` or `source()`, plus cross-resource tests such as
+  `relationships`. A multi-resource task depends on every referenced model, seed, or snapshot task.
+  Standalone tasks run alongside the bundles because no single resource owns them.
 
-A resource's `<resource>_test` task selects the resource by the same selector with
-`--indirect-selection cautious`, which also runs the resource's unit tests. A model whose only
-test is a unit test still gets a `<resource>_test` task so its unit test is not dropped.
+A resource's `<resource>_test` task contains the exact data-test and unit-test nodes assigned to that
+resource. The factory builds the same exact per-test selection plan used in per-test mode, groups those
+selectors by indirect-selection mode, and emits a deterministic union per mode. It never selects the
+parent resource to discover tests indirectly. A bundle therefore has at most two `dbt test` commands
+(`empty` followed by `cautious`), plus an optional `dbt deps` command. A model whose only test is a unit
+test still gets a `<resource>_test` task.
 
 Downstream models/seeds/snapshots that depend on a tested resource are rewired to depend on
 the upstream's `<resource>_test` task, so data only flows downstream after its upstream
-single-model tests pass. Cross-model test tasks don't gate downstream execution — they run
-as leaf assertions.
+single-resource tests pass. Standalone test tasks don't gate downstream execution — they run as leaf
+assertions.
 
-Severity behaves the same as in per-test mode — warn never blocks, error does — here because dbt
-itself exits 0 on a warn-severity failure and non-zero on an error-severity one.
+Severity behaves the same as in per-test mode: dbt normally exits 0 for a warn-severity failure and
+non-zero for an error-severity one, while `--warn-error` escalates warnings so the bundle blocks its
+dependants.
 
 - **Pros:** **faster** — fewer task startups and fewer dbt invocations translate directly into
   shorter end-to-end run times; smaller, cleaner DAG in the UI.
 - **Cons:** per-test failure visibility is lost inside a bundle — a failure shows up as one red
   `<resource>_test` task rather than a specific red `<test_name>` task in the UI; drill into
-  the task logs to see which individual test(s) failed. (Cross-model test tasks retain their
+  the task logs to see which individual test(s) failed. (Standalone test tasks retain their
   per-test visibility because they aren't bundled.)
 
 ## Task types
@@ -505,12 +575,13 @@ or environment variables. If you need either of these, use the `notebook` task t
 ### `notebook` (default)
 
 Generates `notebook_task` entries that wrap dbt execution via the `dbtRunner` Python API.
-Each task calls a shared runner notebook (`run_dbt_command.py`) with parameterized dbt commands.
+Each task calls the shared content-addressed
+`run_dbt_command_<64-lowercase-hex-SHA-256>.py` notebook with parameterized dbt commands.
 
 **Advantages over native dbt_task:**
 - Faster execution by avoiding the cold-start problem — all dependencies can be pre-cached inside `base_environment`
 - Supports running the dbt process on job compute via `--job-cluster-key` (SQL execution still uses the warehouse in `profiles.yml`)
-- More flexibility - The runner notebook is editable. Want to load secrets from a scope before dbt runs? Run dbt, then call a Python API with the result? Emit a Slack message on failure? Tag the run with Git SHA? Add a few lines to the runner notebook.
+- More flexibility — pass `--notebook-path` to manage and extend your own runner when you need custom secrets, APIs, notifications, or run metadata.
 
 #### Faster parsing on large projects (pre-built msgpack)
 
@@ -529,9 +600,11 @@ project `target/`.
 | `target/partial_parse.msgpack` | Task runtime | **Read** by every task and injected into `dbtRunner` to skip parsing. **The only file you sync to the workspace**; tasks never rewrite it. |
 | per-task local `target/` | Task runtime | **Written** by dbt (compiled SQL, etc.) to a private local dir, off the shared project `target/`. |
 
-Build the msgpack with the **same dbt version your tasks run**. Optionally add `--extra-dbt-command-options
-"--no-write-json --no-populate-cache"` to also skip JSON artifact writes and the warehouse
-relation-cache scan.
+Build the manifest and msgpack with the **exact same `dbt-databricks` version and parse context your
+tasks run**. If target, profile, vars, or environment can change the graph, build and deploy a separate
+pair for each context.
+Optionally add `--extra-dbt-command-options "--no-write-json --no-populate-cache"` to also skip JSON
+artifact writes and the warehouse relation-cache scan.
 
 > **Note:** In this mode a task's run artifacts (`run_results.json`, compiled SQL, etc.) are written to
 > a private local dir and are **not** synced back to the shared workspace `target/`. The local dir is
@@ -555,8 +628,10 @@ The steps below walk through running it end-to-end.
 2. **Install dependencies.**
 
     ```shell
-    pip install dbt-databricks databricks-dbt-factory
+    pip install "dbt-databricks==<exact-version>" databricks-dbt-factory
     ```
+
+    Use the same `<exact-version>` in the Databricks task environment.
 
     Install the [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install):
 
@@ -575,7 +650,7 @@ The steps below walk through running it end-to-end.
 4. **Compile the dbt project** to produce dbt manifest file (`target/manifest.json`), which the factory reads:
 
     ```shell
-    dbt compile
+    dbt compile --target dev
     ```
 
 5. **Create Databricks Workflow.** This reads the manifest and the job template (`resources/dbt_sql_job.yml`) and writes a new, fully-expanded job spec to `resources/dbt_sql_job_explicit_tasks.yml` — one task per dbt node, wired up with the right dependencies:
@@ -585,12 +660,16 @@ The steps below walk through running it end-to-end.
       --dbt-manifest-path target/manifest.json \
       --input-job-spec-path resources/dbt_sql_job.yml \
       --target-job-spec-path resources/dbt_sql_job_explicit_tasks.yml \
-      --target '${bundle.target}' \
+      --target dev \
       --project-directory ../ \
       --profiles-directory . \
+      --source WORKSPACE \
       --environment-key Default \
       --new-job-name dbt_sql_job_explicit_tasks
     ```
+
+    This example compiles and generates with the `dev` target. Repeat both steps with the same target
+    value for every target whose parse context can produce a different graph.
 
     This uses the default `notebook` task type, which routes dbt execution through the packaged runner notebook (pre-cached base environments, faster cold starts). See [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance) for the full rationale, or pass `--task-type dbt` for native dbt tasks.
 

@@ -11,7 +11,9 @@ job spec from ``tests/test_data`` and writes a generated spec, which we compare 
 committed golden files.
 """
 
+import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -86,7 +88,7 @@ def test_cli_dbt_task_matches_golden_spec(tmp_path):
 
 
 def test_cli_notebook_mode_packages_and_copies_runner(tmp_path):
-    """In notebook mode the CLI copies the packaged runner notebook next to the spec.
+    """In notebook mode the CLI publishes the packaged runner next to the spec.
 
     This asserts the runner notebook data file is actually shipped in the installed
     package (resolved via importlib.resources at runtime), which the in-process tests
@@ -105,13 +107,18 @@ def test_cli_notebook_mode_packages_and_copies_runner(tmp_path):
         "notebook",
     )
 
-    copied_runner = tmp_path / "run_dbt_command.py"
-    assert copied_runner.exists(), "runner notebook should be copied next to the generated spec"
+    copied_runners = list(tmp_path.glob("run_dbt_command_*.py"))
+    assert len(copied_runners) == 1, "exactly one content-addressed runner should be published"
+    copied_runner = copied_runners[0]
+    match = re.fullmatch(r"run_dbt_command_([0-9a-f]{64})\.py", copied_runner.name)
+    assert match is not None, "runner should use its full lowercase SHA-256 digest"
+    assert hashlib.sha256(copied_runner.read_bytes()).hexdigest() == match.group(1)
     assert "dbtRunner" in copied_runner.read_text(encoding="utf-8"), "copied file should be the packaged runner"
 
     tasks = _load(target)["resources"]["jobs"]["dbt_sql_job"]["tasks"]
     for task in tasks:
-        assert task["notebook_task"]["notebook_path"] == "./run_dbt_command.py"
+        assert task["notebook_task"]["notebook_path"] == f"./{copied_runner.name}"
+        assert task["notebook_task"]["source"] == "WORKSPACE"
 
 
 def test_cli_help_runs():

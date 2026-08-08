@@ -18,9 +18,12 @@ tests never skip. A skip would defeat the point: it would let a selector regress
 machine where dbt happened to be missing.
 """
 
+# pylint: disable=too-many-lines
+
 import functools
 import json
 import random
+import re
 import shlex
 from pathlib import Path
 
@@ -170,81 +173,145 @@ def _task_key_to_unique_id(manifest: dict, bundle_tests: bool) -> dict[str, str]
     """
     Maps each resource task's key back to the manifest id it is supposed to address.
 
-    Without this, an assertion can only count what a selector resolved to, not check *which* node it
-    found — and "resolves to one node" is satisfied just as well by the wrong node. Replacing
-    `_node_select` with a constant selector used to leave the whole suite green for that reason.
-
     Built by re-deriving the task key from each id the same way the factory does, rather than by
-    parsing the selector, so the check is independent of the thing under test.
-
-    In bundled mode the tested resources are passed as `bundled_test_ids` so their `<resource>_test` keys
-    are mapped too. An earlier revision passed `[]`, leaving `bundled_test_keys` empty and every bundled
-    test task silently unchecked — the `if bundle_tests:` branch could not fire, so the
-    `bundle_tests=True` parametrisations only ever exercised the model and seed tasks.
+    parsing the selector. Bundled task keys map to their parent resource here; their exact member sets
+    are checked separately by `_bundled_test_ids_by_task_key`.
     """
-    nodes = {**manifest.get('nodes', {}), **manifest.get('unit_tests', {})}
-    ids = [full_name for full_name, info in nodes.items() if (info.get('config') or {}).get('enabled') is not False]
-    tested = _tested_resources(manifest, ids) if bundle_tests else set()
-    task_keys, bundled_test_keys = build_task_key_maps(sorted(ids), sorted(tested))
+    nodes = _enabled_entries(manifest.get('nodes', {}))
+    unit_tests = _enabled_entries(manifest.get('unit_tests', {}))
+    bundle_members = _bundled_test_membership(manifest) if bundle_tests else {}
+    bundled_test_ids = {test_id for test_ids in bundle_members.values() for test_id in test_ids}
+
+    task_ids = []
+    for full_name, info in nodes.items():
+        if info.get('resource_type') in {'model', 'seed', 'snapshot', 'test'} and (
+            not bundle_tests or full_name not in bundled_test_ids
+        ):
+            task_ids.append(full_name)
+    if not bundle_tests:
+        task_ids.extend(
+            full_name
+            for full_name, info in unit_tests.items()
+            if (model_id := _unit_test_model_id(info)) is not None and model_id in nodes
+        )
+
+    task_keys, bundled_test_keys = build_task_key_maps(sorted(task_ids), sorted(bundle_members))
     mapping = {key: full_name for full_name, key in task_keys.items()}
     if bundle_tests:
         mapping.update({key: full_name for full_name, key in bundled_test_keys.items()})
     return mapping
 
 
-def _tested_resources(manifest: dict, ids: list[str]) -> set[str]:
-    """The resources that receive a bundled `<resource>_test` task: anything a test depends on."""
-    nodes = {**manifest.get('nodes', {}), **manifest.get('unit_tests', {})}
-    tested: set[str] = set()
-    for full_name in ids:
-        info = nodes[full_name]
-        if (info.get('resource_type') or '') not in ('test', 'unit_test'):
+def _enabled_entries(entries: dict) -> dict:
+    """Returns the manifest entries dbt can select."""
+    return {
+        full_name: info for full_name, info in entries.items() if (info.get('config') or {}).get('enabled') is not False
+    }
+
+
+def _unit_test_model_id(unit_test_info: dict) -> str | None:
+    """Returns the model id dbt resolved for a unit test."""
+    for dep in unit_test_info.get('depends_on', {}).get('nodes', []):
+        if dep.startswith('model.'):
+            return dep
+    model = unit_test_info.get('model')
+    package = unit_test_info.get('package_name')
+    return f'model.{package}.{model}' if model and package else None
+
+
+def _bundled_test_membership(manifest: dict) -> dict[str, set[str]]:
+    """Groups enabled single-resource data and unit test ids by their exact bundle resource."""
+    nodes = _enabled_entries(manifest.get('nodes', {}))
+    sources = _enabled_entries(manifest.get('sources', {}))
+    unit_tests = _enabled_entries(manifest.get('unit_tests', {}))
+    resources = nodes.keys() | sources.keys()
+    membership: dict[str, set[str]] = {}
+
+    for test_id, info in nodes.items():
+        if info.get('resource_type') != 'test':
             continue
-        for dep in info.get('depends_on', {}).get('nodes', []):
-            if dep in nodes or dep in manifest.get('sources', {}):
-                tested.add(dep)
-    return tested
+        parents = {
+            dep
+            for dep in info.get('depends_on', {}).get('nodes', [])
+            if dep.startswith(('model.', 'seed.', 'snapshot.', 'source.')) and dep in resources
+        }
+        if len(parents) == 1:
+            membership.setdefault(next(iter(parents)), set()).add(test_id)
+
+    for test_id, info in unit_tests.items():
+        model_id = _unit_test_model_id(info)
+        if model_id is not None and model_id in nodes:
+            membership.setdefault(model_id, set()).add(test_id)
+    return membership
+
+
+def _bundled_test_ids_by_task_key(manifest: dict) -> dict[str, set[str]]:
+    """Maps each emitted bundled task key to the exact test and unit-test ids it must run."""
+    membership = _bundled_test_membership(manifest)
+    if not membership:
+        return {}
+    expected_by_key = _task_key_to_unique_id(manifest, bundle_tests=True)
+    return {
+        task_key: membership[resource_id]
+        for task_key, resource_id in expected_by_key.items()
+        if resource_id in membership and task_key.endswith('_test')
+    }
+
+
+def _selected_by_bundled_commands(tmp_path: Path, task: dict) -> set[str]:
+    """Replays every test command in a bundle with its final indirect-selection mode."""
+    selected: set[str] = set()
+    test_commands = [command for command in task['dbt_task']['commands'] if command.startswith('dbt test ')]
+    assert test_commands, f'{task["task_key"]} has no dbt test command'
+    for raw_command in test_commands:
+        command = shlex.split(raw_command)
+        select = command[command.index('--select') + 1]
+        modes = [command[index + 1] for index, value in enumerate(command[:-1]) if value == '--indirect-selection']
+        assert modes, f'{task["task_key"]} does not pin indirect selection: {raw_command}'
+        selected.update(_selected_unique_ids(tmp_path, select, None, indirect_selection=modes[-1]))
+    return selected
 
 
 def _assert_each_task_selects_its_own_node(tmp_path: Path, manifest: dict, bundle_tests: bool) -> None:
     """
-    Asserts every resource task resolves to exactly the node it is named for.
-
-    This is the check the suite was missing: `len(selected) == 1` passes just as happily when a task
-    addresses the *wrong* node, so a constant selector substituted for `_node_select` went undetected.
-    Comparing against the expected name closes that hole.
+    Asserts every resource task resolves to its exact manifest node or bundled member set.
 
     Each test task is replayed with the indirect-selection mode in its emitted command, so both direct
-    `empty` plans and parent-scoped `cautious` plans must resolve to the task's intended manifest id.
+    `empty` plans and parent-scoped `cautious` plans must resolve to their intended manifest ids.
     """
     expected_by_key = _task_key_to_unique_id(manifest, bundle_tests)
+    bundled_by_key = _bundled_test_ids_by_task_key(manifest) if bundle_tests else {}
     unmapped = []
     selectable = {**manifest.get('nodes', {}), **manifest.get('unit_tests', {}), **manifest.get('sources', {})}
-    tasks_by_key = {
-        task['task_key']: shlex.split(task['dbt_task']['commands'][-1])
-        for task in create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest)
-    }
-    for task_key, select, _verb in _resource_selectors(manifest, bundle_tests):
+    for task in create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest):
+        task_key = task['task_key']
+        if task_key in bundled_by_key:
+            bundle_selection = _selected_by_bundled_commands(tmp_path, task)
+            expected = bundled_by_key[task_key]
+            assert (
+                bundle_selection == expected
+            ), f'{task_key} runs {sorted(bundle_selection)}, expected exact bundle membership {sorted(expected)}'
+            continue
+
         unique_id = expected_by_key.get(task_key)
         if unique_id is None:
             unmapped.append(task_key)
             continue
+        command = shlex.split(task['dbt_task']['commands'][-1])
+        select = command[command.index('--select') + 1]
         # Compare against the *manifest unique id*, not the name `dbt ls` displays. Two generic tests can
         # share a display name while separate files keep each selector individually addressable, so a
         # name-based assertion would be satisfied by pointing task A at task B's node.
         resource_type = selectable[unique_id]['resource_type']
         indirect_selection = 'empty'
         if resource_type in {'test', 'unit_test'}:
-            command = tasks_by_key[task_key]
             modes = [command[index + 1] for index, value in enumerate(command[:-1]) if value == '--indirect-selection']
             indirect_selection = modes[-1]
-        selected = _selected_unique_ids(tmp_path, select, None, indirect_selection=indirect_selection)
-        assert selected == (unique_id,), (
-            f'{task_key} selects {selected} via {select!r}, expected exactly ({unique_id!r},) — '
+        node_selection = _selected_unique_ids(tmp_path, select, None, indirect_selection=indirect_selection)
+        assert node_selection == (unique_id,), (
+            f'{task_key} selects {node_selection} via {select!r}, expected exactly ({unique_id!r},) — '
             f'the node it is named for'
         )
-    # No task may go unchecked: an unmapped key means this helper has drifted from the factory's keying,
-    # which is how bundled test tasks previously escaped the assertion entirely.
     assert not unmapped, f'no expected node known for {unmapped}; the key mapping has drifted'
 
 
@@ -284,10 +351,9 @@ def test_regression_layouts_select_exactly_one_node(tmp_path, layout_name, bundl
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests)
 
 
-def test_bundled_test_task_sweeps_only_its_own_resources_tests(tmp_path):
+def test_bundled_test_task_unions_only_its_own_resources_tests(tmp_path):
     """
-    A bundled `<model>_test` task must pick up its own model's tests and none of the nested
-    sibling's, which the prefix behaviour would otherwise sweep in.
+    A bundled `<model>_test` task unions its own test-node selectors and none of the nested sibling's.
     """
     _write_project(
         tmp_path,
@@ -310,13 +376,13 @@ def test_bundled_test_task_sweeps_only_its_own_resources_tests(tmp_path):
         key: select for key, select, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test'
     }
     orders_select = next(select for key, select in selectors.items() if key == 'orders_test')
-    selected = _selected_ids(tmp_path, orders_select, resource_type=None, indirect=True)
+    selected = _selected_ids(tmp_path, orders_select, resource_type=None, indirect_selection='empty')
 
     # A schema test's fqn is [package, <test name>] — the models/ subdirectory is not part of it.
-    assert 'probe.unique_items_id' not in selected, f'orders_test swept in the sibling model tests: {selected}'
+    assert 'probe.unique_items_id' not in selected, f'orders_test included the sibling model tests: {selected}'
     assert 'probe.unique_orders_id' in selected
     assert 'probe.not_null_orders_id' in selected
-    assert 'probe.marts.orders.items' not in selected, f'orders_test would build the sibling model: {selected}'
+    assert 'probe.marts.orders.items' not in selected, f'orders_test selected the sibling model: {selected}'
 
 
 def test_tests_sharing_a_schema_file_are_separated_by_test_name(tmp_path):
@@ -424,6 +490,397 @@ def test_singular_test_sharing_a_models_fqn_is_addressable_under_empty(tmp_path)
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
+def test_bundled_selector_runs_only_tests_attached_to_its_resource(tmp_path):
+    _write_project(
+        tmp_path,
+        {'beta.sql': MODEL_SQL, 'gamma.sql': MODEL_SQL},
+        schema_yml=(
+            'models:\n'
+            '  - name: beta\n    columns:\n      - name: id\n        data_tests: [not_null]\n'
+            '  - name: gamma\n    columns:\n      - name: id\n        data_tests: [not_null]\n'
+        ),
+    )
+    tests_dir = tmp_path / 'tests'
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / 'beta.sql').write_text("select * from {{ ref('gamma') }} where id is null\n", encoding='utf-8')
+    manifest = _parse(tmp_path)
+
+    expected_by_parent: dict[str, set[str]] = {}
+    for unique_id, info in manifest['nodes'].items():
+        if info['resource_type'] != 'test':
+            continue
+        model_parents = {dep for dep in info['depends_on']['nodes'] if dep.startswith('model.')}
+        if len(model_parents) == 1:
+            expected_by_parent.setdefault(next(iter(model_parents)), set()).add(unique_id)
+
+    tasks = {task['task_key']: task for task in create_dbt_factory(bundle_tests=True).create_tasks(manifest)}
+    for model_name in ('beta', 'gamma'):
+        commands = []
+        for raw_command in tasks[f'{model_name}_test']['dbt_task']['commands']:
+            if raw_command.startswith('dbt test '):
+                commands.append(shlex.split(raw_command))
+        selected: set[str] = set()
+        for command in commands:
+            select = command[command.index('--select') + 1]
+            assert select.split() == sorted(select.split()), f'non-deterministic bundled union: {select}'
+            result = _dbt(
+                tmp_path,
+                'ls',
+                '--quiet',
+                *command[2:],
+                '--resource-type',
+                'test',
+                '--output',
+                'json',
+                '--output-keys',
+                'unique_id',
+            )
+            assert result.success, f'dbt ls failed for bundled {model_name!r} selector: {result.exception}'
+            assert isinstance(result.result, list)
+            selected.update(json.loads(entry)['unique_id'] for entry in result.result)
+        assert selected == expected_by_parent[f'model.probe.{model_name}']
+
+
+def test_bundled_selector_unions_are_exact_in_empty_and_cautious_modes(tmp_path):
+    _write_project(
+        tmp_path,
+        {'alpha.sql': MODEL_SQL, 'beta.sql': MODEL_SQL},
+        schema_yml=(
+            'models:\n'
+            '  - name: alpha\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - unique\n          - not_null: {name: check}\n'
+            '  - name: beta\n    columns:\n      - name: id\n        data_tests:\n'
+            '          - not_null: {name: check.nested}\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+    alpha_id = 'model.probe.alpha'
+    expected = {
+        unique_id
+        for unique_id, info in manifest['nodes'].items()
+        if info['resource_type'] == 'test' and alpha_id in info.get('depends_on', {}).get('nodes', [])
+    }
+
+    alpha_task = next(
+        task
+        for task in create_dbt_factory(bundle_tests=True).create_tasks(manifest)
+        if task['task_key'] == 'alpha_test'
+    )
+    commands = []
+    for raw_command in alpha_task['dbt_task']['commands']:
+        if raw_command.startswith('dbt test '):
+            commands.append(shlex.split(raw_command))
+    modes = [command[command.index('--indirect-selection') + 1] for command in commands]
+    assert modes == ['empty', 'cautious']
+
+    selected: set[str] = set()
+    for command in commands:
+        select = command[command.index('--select') + 1]
+        assert select.split() == sorted(select.split())
+        result = _dbt(
+            tmp_path,
+            'ls',
+            '--quiet',
+            *command[2:],
+            '--resource-type',
+            'test',
+            '--output',
+            'json',
+            '--output-keys',
+            'unique_id',
+        )
+        assert result.success, f'dbt ls failed for {select!r}: {result.exception}'
+        assert isinstance(result.result, list)
+        selected.update(json.loads(entry)['unique_id'] for entry in result.result)
+    assert selected == expected
+
+
+def test_bundled_data_and_unit_tests_match_their_exact_manifest_membership(tmp_path):
+    _write_project(
+        tmp_path,
+        {'orders.sql': MODEL_SQL},
+        schema_yml=(
+            'models:\n'
+            '  - name: orders\n'
+            '    columns:\n'
+            '      - name: id\n'
+            '        data_tests: [not_null]\n'
+            'unit_tests:\n'
+            '  - name: totals\n'
+            '    model: orders\n'
+            '    given: []\n'
+            '    expect: {rows: [{id: 1}]}\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    data_test_ids = {unique_id for unique_id, info in manifest['nodes'].items() if info['resource_type'] == 'test'}
+    unit_test_ids = set(manifest.get('unit_tests', {}))
+    assert data_test_ids and unit_test_ids, 'dbt did not parse both test kinds'
+
+    task = next(
+        task
+        for task in create_dbt_factory(bundle_tests=True).create_tasks(manifest)
+        if task['task_key'] == 'orders_test'
+    )
+    assert _selected_by_bundled_commands(tmp_path, task) == data_test_ids | unit_test_ids
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=True)
+
+
+def test_bundled_task_last_indirect_selection_option_controls_dbt(tmp_path):
+    """dbt applies the final repeated indirect-selection option emitted by a bundled test task."""
+    _write_project(
+        tmp_path,
+        {'alpha.sql': MODEL_SQL, 'beta.sql': MODEL_SQL},
+        schema_yml=(
+            'models:\n'
+            '  - name: alpha\n    columns:\n      - name: id\n        data_tests: [not_null]\n'
+            '  - name: beta\n    columns:\n      - name: id\n'
+        ),
+    )
+    tests_dir = tmp_path / 'tests'
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / 'alpha.sql').write_text("select * from {{ ref('beta') }} where id is null\n", encoding='utf-8')
+    manifest = _parse(tmp_path)
+    factory = create_dbt_factory(bundle_tests=True)
+    factory.task_factories['test'].dbt_options = '--target dev --indirect-selection eager'
+    task = next(task for task in factory.create_tasks(manifest) if task['task_key'] == 'beta_test')
+    command = shlex.split(task['dbt_task']['commands'][-1])
+    modes = [command[index + 1] for index, value in enumerate(command[:-1]) if value == '--indirect-selection']
+    assert modes == ['eager', 'empty']
+
+    select = command[command.index('--select') + 1]
+    eager = _selected_unique_ids(tmp_path, select, 'test', indirect_selection='eager')
+    empty = _selected_unique_ids(tmp_path, select, 'test', indirect_selection='empty')
+    assert len(eager) == 2
+    assert len(empty) == 1
+
+    result = _dbt(
+        tmp_path,
+        'ls',
+        '--quiet',
+        *command[2:],
+        '--resource-type',
+        'test',
+        '--output',
+        'json',
+        '--output-keys',
+        'unique_id',
+    )
+    assert result.success, f'dbt ls failed for emitted options: {result.exception}'
+    assert isinstance(result.result, list), f'expected dbt ls to return a list, got {type(result.result)}'
+    selected = tuple(sorted(json.loads(entry)['unique_id'] for entry in result.result))
+    assert selected == empty
+    assert selected != eager
+
+
+def test_selection_changing_extra_options_are_refused_after_live_dbt_proves_the_risk(tmp_path):
+    """Repeated includes union and exclusions can silently widen or empty an otherwise exact selection."""
+    _write_project(tmp_path, {'alpha.sql': MODEL_SQL, 'beta.sql': MODEL_SQL})
+    _parse(tmp_path)
+
+    union = _dbt(
+        tmp_path,
+        'ls',
+        '--quiet',
+        '--select',
+        'alpha',
+        '--select',
+        'beta',
+        '--output',
+        'json',
+        '--output-keys',
+        'unique_id',
+    )
+    assert union.success, f'dbt ls failed for repeated --select: {union.exception}'
+    assert isinstance(union.result, list)
+    assert tuple(sorted(json.loads(entry)['unique_id'] for entry in union.result)) == (
+        'model.probe.alpha',
+        'model.probe.beta',
+    )
+
+    excluded = _dbt(
+        tmp_path,
+        'ls',
+        '--quiet',
+        '--select',
+        'alpha',
+        '--exclude',
+        'alpha',
+        '--output',
+        'json',
+        '--output-keys',
+        'unique_id',
+    )
+    assert excluded.success, f'dbt ls failed for --exclude: {excluded.exception}'
+    assert excluded.result == []
+
+    clustered = _dbt(
+        tmp_path,
+        'ls',
+        '--quiet',
+        '-xsbeta',
+        '--output',
+        'json',
+        '--output-keys',
+        'unique_id',
+    )
+    assert clustered.success, f'dbt ls failed for clustered -x -s: {clustered.exception}'
+    assert isinstance(clustered.result, list)
+    assert tuple(json.loads(entry)['unique_id'] for entry in clustered.result) == ('model.probe.beta',)
+
+    for dbt_options in ('--select beta', '--exclude alpha', '-xsbeta'):
+        with pytest.raises(ValueError, match='selection'):
+            create_dbt_factory(dbt_options=dbt_options)
+
+
+def test_parse_context_override_is_refused_after_live_dbt_proves_manifest_drift(tmp_path):
+    """A runtime vars override can remove a node that an exact manifest-derived selector names."""
+    _write_project(
+        tmp_path,
+        {
+            'alpha.sql': "{{ config(enabled=var('enable_alpha', true)) }}\nselect 1 as id\n",
+            'beta.sql': MODEL_SQL,
+        },
+    )
+    manifest = _parse(tmp_path)
+    assert 'model.probe.alpha' in manifest['nodes']
+
+    alpha_task = next(task for task in create_dbt_factory().create_tasks(manifest) if task['task_key'] == 'alpha_model')
+    command = shlex.split(alpha_task['dbt_task']['commands'][-1])
+    selector = command[command.index('--select') + 1]
+    assert _selected_unique_ids(tmp_path, selector, 'model') == ('model.probe.alpha',)
+
+    drifted = _dbt(
+        tmp_path,
+        'ls',
+        '--quiet',
+        '--select',
+        selector,
+        '--vars',
+        '{enable_alpha: false}',
+        '--resource-type',
+        'model',
+        '--output',
+        'json',
+        '--output-keys',
+        'unique_id',
+    )
+    assert drifted.success, f'dbt ls failed for the vars override: {drifted.exception}'
+    assert drifted.result == []
+
+    with pytest.raises(ValueError, match='runtime parse context'):
+        create_dbt_factory(dbt_options="--vars '{enable_alpha: false}'")
+
+
+def test_duplicate_target_is_refused_after_live_dbt_proves_last_target_drift(tmp_path):
+    """dbt uses the last repeated target, which can remove a node parsed under the controlled target."""
+    _write_project(
+        tmp_path,
+        {
+            'dev_only.sql': "{{ config(enabled=target.name == 'dev') }}\nselect 1 as id\n",
+            'shared.sql': MODEL_SQL,
+        },
+    )
+    (tmp_path / 'profiles.yml').write_text(
+        PROFILES
+        + """\
+    prod:
+      type: databricks
+      host: example.databricks.com
+      http_path: /sql/1.0/warehouses/x
+      token: dummy
+      schema: default
+""",
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+    assert 'model.probe.dev_only' in manifest['nodes']
+
+    dev_only_task = next(
+        task for task in create_dbt_factory().create_tasks(manifest) if task['task_key'] == 'dev_only_model'
+    )
+    command = shlex.split(dev_only_task['dbt_task']['commands'][-1])
+    selector = command[command.index('--select') + 1]
+    assert _selected_unique_ids(tmp_path, selector, 'model') == ('model.probe.dev_only',)
+
+    drifted = _dbt(
+        tmp_path,
+        'ls',
+        '--quiet',
+        '--target',
+        'dev',
+        '--target',
+        'prod',
+        '--select',
+        selector,
+        '--resource-type',
+        'model',
+        '--output',
+        'json',
+        '--output-keys',
+        'unique_id',
+    )
+    assert drifted.success, f'dbt ls failed for repeated targets: {drifted.exception}'
+    assert drifted.result == []
+
+    with pytest.raises(ValueError, match='at most one target'):
+        create_dbt_factory(dbt_options='--target dev --target prod')
+
+
+@pytest.mark.parametrize(
+    ('target_args', 'dbt_options'),
+    [
+        pytest.param(('--target',), '--target', id='long-missing'),
+        pytest.param(('-t',), '-t', id='short-missing'),
+        pytest.param(('--target=',), '--target=', id='long-empty-attached'),
+        pytest.param(('--target', ''), "--target ''", id='long-empty-separate'),
+        pytest.param(('-t', ''), "-t ''", id='short-empty-separate'),
+    ],
+)
+def test_target_without_value_is_refused_after_live_dbt_proves_it_is_incomplete(tmp_path, target_args, dbt_options):
+    """A controlled target token must include the value dbt requires."""
+    _write_project(tmp_path, {'intended.sql': MODEL_SQL})
+
+    incomplete = _dbt(tmp_path, 'ls', '--quiet', *target_args)
+    assert not incomplete.success, f'dbt unexpectedly accepted {dbt_options!r} without a value'
+
+    with pytest.raises(ValueError, match='target requires a nonempty value'):
+        create_dbt_factory(dbt_options=dbt_options)
+
+
+def test_option_value_cannot_hide_a_second_selector_after_command_assembly(tmp_path, monkeypatch):
+    """A value-taking global option cannot consume a target flag and expose its value as a selector."""
+    _write_project(tmp_path, {'intended.sql': MODEL_SQL, 'other.sql': MODEL_SQL})
+    _parse(tmp_path)
+
+    monkeypatch.chdir(tmp_path)
+    widened = _dbt(
+        tmp_path,
+        'ls',
+        '--quiet',
+        '--select',
+        'intended',
+        '--log-path',
+        '--target',
+        '-sother',
+        '--output',
+        'json',
+        '--output-keys',
+        'unique_id',
+    )
+    assert widened.success, f'dbt rejected the full option sequence: {widened.exception}'
+    assert isinstance(widened.result, list)
+    assert tuple(sorted(json.loads(entry)['unique_id'] for entry in widened.result)) == (
+        'model.probe.intended',
+        'model.probe.other',
+    )
+
+    for dbt_options in ('--log-path --target -sother', '--log-path -t -sother'):
+        with pytest.raises(ValueError, match='at most one target'):
+            create_dbt_factory(dbt_options=dbt_options)
+
+
 def test_singular_test_not_sharing_a_models_fqn_is_kept(tmp_path):
     """
     The boundary of the refusal above: a singular test whose name does *not* collide with a model is
@@ -440,8 +897,8 @@ def test_singular_test_not_sharing_a_models_fqn_is_kept(tmp_path):
 
 
 def test_bundled_source_test_selector_is_exact(tmp_path):
-    """A source's tests are selected by `source:<pkg>.<src>.<table>`; that must resolve exactly."""
-    _write_project(tmp_path, {'downstream.sql': MODEL_SQL})
+    """A source bundle resolves exactly and gates a model that consumes the source."""
+    _write_project(tmp_path, {'downstream.sql': "select * from {{ source('raw', 'orders') }}\n"})
     (tmp_path / 'models' / 'sources.yml').write_text(
         'sources:\n'
         '  - name: raw\n'
@@ -454,13 +911,49 @@ def test_bundled_source_test_selector_is_exact(tmp_path):
         encoding='utf-8',
     )
     manifest = _parse(tmp_path)
+    tasks = create_dbt_factory(bundle_tests=True).create_tasks(manifest)
+    by_key = {task['task_key']: task for task in tasks}
 
     selectors = [s for _, s, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
-    source_selectors = [s for s in selectors if s.startswith('source:')]
-    assert source_selectors, f'expected a bundled source test task, got {selectors}'
-    for select in source_selectors:
-        selected = _selected_ids(tmp_path, select, 'test', indirect=True)
+    assert selectors, 'expected a bundled source test task'
+    assert by_key['downstream_model']['depends_on'] == [{'task_key': 'raw_orders_test'}]
+    assert not any(select.startswith('source:') for select in selectors)
+    for select in selectors:
+        selected = _selected_ids(tmp_path, select, 'test', indirect_selection='empty')
         assert len(selected) == 1, f'{select!r} selects {selected}, expected exactly one test'
+
+
+def test_bundled_seed_test_gates_snapshot_that_consumes_the_seed(tmp_path):
+    _write_project(
+        tmp_path,
+        {'placeholder.sql': MODEL_SQL},
+        schema_yml="""seeds:
+  - name: countries
+    columns:
+      - name: id
+        data_tests: [not_null]
+""",
+    )
+    seeds_dir = tmp_path / 'seeds'
+    seeds_dir.mkdir()
+    (seeds_dir / 'countries.csv').write_text('id,name\n1,France\n', encoding='utf-8')
+    snapshots_dir = tmp_path / 'snapshots'
+    snapshots_dir.mkdir()
+    (snapshots_dir / 'country_history.sql').write_text(
+        """{% snapshot country_history %}
+{{ config(target_schema='snapshots', strategy='check', unique_key='id', check_cols=['name']) }}
+select * from {{ ref('countries') }}
+{% endsnapshot %}
+""",
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    tasks = create_dbt_factory(bundle_tests=True).create_tasks(manifest)
+    by_key = {task['task_key']: task for task in tasks}
+
+    assert by_key['countries_test']['depends_on'] == [{'task_key': 'countries_seed'}]
+    assert by_key['country_history_snapshot']['depends_on'] == [{'task_key': 'countries_test'}]
 
 
 def test_every_task_selector_resolves_to_one_node(tmp_path):
@@ -564,11 +1057,11 @@ def test_leading_numeric_graph_operator_in_a_name_is_addressable_under_an_explic
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
-def test_source_with_a_trailing_graph_operator_is_refused(tmp_path):
+def test_source_with_a_trailing_graph_operator_uses_an_exact_test_selector(tmp_path):
     """
     The whole `source:...` string is one raw selector, so a table ending in `+N` is read as a graph
     operator: `source:probe.raw.orders+1` matches nothing while `dbt test` still exits 0, so the
-    source's tests would silently never run. Generation must refuse.
+    source's tests would silently never run. Bundled mode instead selects the attached test node exactly.
     """
     _write_project(tmp_path, {'downstream.sql': "select * from {{ source('raw','orders+1') }}\n"})
     (tmp_path / 'models' / 'sources.yml').write_text(
@@ -588,8 +1081,9 @@ def test_source_with_a_trailing_graph_operator_is_refused(tmp_path):
     # The selector we would otherwise have emitted matches nothing, and dbt still exits 0 for it.
     assert not _selected_ids(tmp_path, 'source:probe.raw.orders+1', None, indirect=True)
 
-    with pytest.raises(ValueError, match='Cannot generate a task for'):
-        _resource_selectors(manifest, bundle_tests=True)
+    selectors = [select for _, select, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
+    assert selectors and not any(select.startswith('source:') for select in selectors)
+    assert _selected_unique_ids(tmp_path, selectors[0], 'test', indirect_selection='empty')
 
 
 def test_source_keeps_an_operator_away_from_the_boundary(tmp_path):
@@ -612,10 +1106,75 @@ def test_source_keeps_an_operator_away_from_the_boundary(tmp_path):
     )
     manifest = _parse(tmp_path)
 
-    source_selectors = [s for _, s, verb in _resource_selectors(manifest, bundle_tests=True) if s.startswith('source:')]
-    assert source_selectors, 'expected a bundled source test task'
-    for select in source_selectors:
-        assert _selected_ids(tmp_path, select, 'test', indirect=True), f'{select!r} matched nothing'
+    test_selectors = [s for _, s, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
+    assert test_selectors and not any(select.startswith('source:') for select in test_selectors)
+    for select in test_selectors:
+        assert _selected_ids(tmp_path, select, 'test', indirect_selection='empty'), f'{select!r} matched nothing'
+
+
+def test_literal_and_incomplete_braces_in_a_source_still_allow_an_exact_test_bundle(tmp_path):
+    """Literal source braces do not enter the bundle when the attached test is directly addressable."""
+    _write_project(tmp_path, {'downstream.sql': MODEL_SQL})
+    (tmp_path / 'models' / 'sources.yml').write_text(
+        'sources:\n'
+        "  - name: \"raw{{ '{' }}{{ '{' }}draft\"\n"
+        '    schema: default\n'
+        '    tables:\n'
+        '      - name: "orders{v1}"\n'
+        '        identifier: ord\n'
+        '        columns:\n'
+        '          - name: id\n'
+        '            data_tests: [not_null]\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    source_id, source = next(iter(manifest['sources'].items()))
+    assert source_id == 'source.probe.raw{{draft.orders{v1}'
+    assert source['source_name'] == 'raw{{draft'
+    assert source['name'] == 'orders{v1}'
+
+    source_select = 'source:probe.raw{{draft.orders{v1}'
+    assert _selected_unique_ids(tmp_path, source_select, 'source') == (source_id,)
+    expected_tests = tuple(
+        sorted(
+            unique_id
+            for unique_id, info in manifest['nodes'].items()
+            if source_id in info.get('depends_on', {}).get('nodes', [])
+        )
+    )
+    assert expected_tests
+    test_selectors = [select for _, select, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
+    assert test_selectors and not any(select.startswith('source:') for select in test_selectors)
+    assert _selected_unique_ids(tmp_path, test_selectors[0], 'test', indirect_selection='empty') == expected_tests
+
+
+def test_source_dynamic_reference_in_the_generated_test_name_is_refused(tmp_path):
+    """dbt carries the source reference into the test name, so no safe direct selector survives."""
+    _write_project(tmp_path, {'downstream.sql': MODEL_SQL})
+    (tmp_path / 'models' / 'sources.yml').write_text(
+        'sources:\n'
+        "  - name: \"{{ '{' }}{{ '{' }}job\"\n"
+        '    schema: default\n'
+        '    tables:\n'
+        "      - name: \"id{{ '}' }}{{ '}' }}\"\n"
+        '        identifier: ord\n'
+        '        columns:\n'
+        '          - name: id\n'
+        '            data_tests: [not_null]\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    source_id, source = next(iter(manifest['sources'].items()))
+    assert source_id == 'source.probe.{{job.id}}'
+    assert source['source_name'] == '{{job'
+    assert source['name'] == 'id}}'
+    assembled = 'source:probe.{{job.id}}'
+    assert _selected_unique_ids(tmp_path, assembled, 'source') == (source_id,)
+
+    with pytest.raises(ValueError, match='Cannot generate a task for'):
+        _resource_selectors(manifest, bundle_tests=True)
 
 
 def test_tests_sharing_a_file_with_no_usable_name_are_refused(tmp_path):
@@ -695,14 +1254,13 @@ def test_a_usable_name_still_rescues_an_unusable_fqn(tmp_path):
         pytest.param('raw', 'ord.v1', id='dotted-table-name'),
     ],
 )
-def test_dotted_source_part_is_refused_rather_than_emitted(tmp_path, source_name, table):
+def test_dotted_source_part_uses_an_exact_test_selector(tmp_path, source_name, table):
     """
     `.` delimits dbt's source grammar, which takes at most `pkg.source.table`. A dot inside one part
     makes four, and dbt rejects the selector with a Runtime Error rather than selecting nothing — so
-    the bundled task would fail at run time. Generation must refuse instead.
+    the source selector would fail at run time. Bundled mode does not emit it; it addresses the test node.
 
-    Asserted from both ends: dbt really does reject the naive string, and the factory really does
-    refuse to emit it.
+    Asserted from both ends: dbt rejects the naive string, while the emitted selector resolves the test.
     """
     _write_project(tmp_path, {'downstream.sql': f"select * from {{{{ source('{source_name}','{table}') }}}}\n"})
     (tmp_path / 'models' / 'sources.yml').write_text(
@@ -723,8 +1281,9 @@ def test_dotted_source_part_is_refused_rather_than_emitted(tmp_path, source_name
     rejected = _dbt(tmp_path, 'ls', '--quiet', '--select', f'source:probe.{source_name}.{table}')
     assert not rejected.success, 'dbt accepted a four-part source selector; this test is no longer meaningful'
 
-    with pytest.raises(ValueError, match='Cannot generate a task for'):
-        _resource_selectors(manifest, bundle_tests=True)
+    selectors = [select for _, select, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
+    assert selectors and not any(select.startswith('source:') for select in selectors)
+    assert _selected_unique_ids(tmp_path, selectors[0], 'test', indirect_selection='empty')
 
 
 def test_disabled_node_left_in_the_manifest_gets_no_task(tmp_path):
@@ -988,7 +1547,11 @@ def test_unit_test_and_data_test_flattening_alike_are_separated_by_resource_type
     """
     _write_project(
         tmp_path,
-        {'orders.sql': MODEL_SQL, 'customers.sql': MODEL_SQL},
+        {
+            'upstream.sql': MODEL_SQL,
+            'orders.sql': "select * from {{ ref('upstream') }}\n",
+            'customers.sql': MODEL_SQL,
+        },
         schema_yml=(
             'models:\n'
             '  - name: orders\n'
@@ -1002,11 +1565,15 @@ def test_unit_test_and_data_test_flattening_alike_are_separated_by_resource_type
             'unit_tests:\n'
             '  - name: unit_orders\n'
             '    model: orders\n'
-            '    given: []\n'
+            '    given:\n'
+            "      - input: ref('upstream')\n"
+            '        rows: [{id: 1}]\n'
             '    expect: {rows: [{id: 1}]}\n'
         ),
     )
     manifest = _parse(tmp_path)
+    unit_test = next(iter(manifest['unit_tests'].values()))
+    assert unit_test['depends_on']['nodes'] == ['model.probe.orders']
 
     # Without the resource-type term the two are indistinguishable.
     both = _selected_ids(tmp_path, 'probe.orders.unit_orders,package:probe,file:schema.yml', None)
@@ -1183,6 +1750,35 @@ def test_dynamic_reference_in_a_path_is_dropped_from_the_selector(tmp_path):
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
+def test_literal_braces_are_preserved_and_select_the_real_dbt_node(tmp_path):
+    _write_project(tmp_path, {'orders{draft}.sql': MODEL_SQL, 'plain.sql': MODEL_SQL})
+    manifest = _parse(tmp_path)
+
+    brace_node = next(info for info in manifest['nodes'].values() if info['name'] == 'orders{draft}')
+    assert brace_node['fqn'][-1] == 'orders{draft}'
+
+    selectors = _resource_selectors(manifest, bundle_tests=False)
+    brace_select = next(select for _task_key, select, _verb in selectors if '{draft}' in select)
+    assert '{draft}' in brace_select
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
+
+
+def test_selector_terms_cannot_compose_a_dynamic_reference(tmp_path):
+    _write_project(tmp_path, {'orders.sql': MODEL_SQL})
+    (tmp_path / 'models' / 'schema}}.yml').write_text(
+        'models:\n  - name: orders\n    columns:\n      - name: id\n        data_tests:\n'
+        '          - not_null: {name: "check{{"}\n',
+        encoding='utf-8',
+    )
+    manifest = _parse(tmp_path)
+
+    selectors = _resource_selectors(manifest, bundle_tests=False)
+    test_select = next(select for _task_key, select, verb in selectors if verb == 'test')
+    assert 'file:schema}}.yml' not in test_select
+    assert re.search(r'\{\{[^{}]+\}\}', test_select) is None
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
+
+
 def _assert_acyclic(manifest, bundle_tests):
     """
     Fails if any emitted task reaches itself through `depends_on`, which Databricks rejects at deploy.
@@ -1281,11 +1877,10 @@ def test_backslash_in_a_posix_file_name_keeps_its_file_term(tmp_path):
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
-def test_file_stem_collision_is_refused(tmp_path):
+def test_file_stem_collision_uses_an_exact_parent_scope(tmp_path):
     """
-    dbt's `FileSelectorMethod` matches the base name *or* its stem, so `file:a.yml` also matches a node
-    declared in `a.yml.yml`. Mirroring only the base name let that collision past the exactness check:
-    the `a.yml` task's selector resolved to both tests, running the second before its model was built.
+    `file:a.yml` reaches nodes declared in both `a.yml` and `a.yml.yml`. The shorter test fqn also
+    prefixes the nested test, so its direct selector is ambiguous and requires an exact-parent scope.
     """
     _write_project(tmp_path, {'q.sql': MODEL_SQL, 'r.sql': MODEL_SQL})
     (tmp_path / 'models' / 'a.yml').write_text(
@@ -1300,10 +1895,23 @@ def test_file_stem_collision_is_refused(tmp_path):
     )
     manifest = _parse(tmp_path)
 
-    both = _selected_ids(tmp_path, 'probe.chk,package:probe,file:a.yml,resource_type:test,test_name:not_null', None)
-    assert len(both) == 2, f'expected the stem match to collide, got {both}'
-    with pytest.raises(ValueError, match='also runs'):
-        _resource_selectors(manifest, bundle_tests=False)
+    bare = _selected_unique_ids(
+        tmp_path, 'probe.chk,package:probe,file:a.yml,resource_type:test,test_name:not_null', None
+    )
+    explicit = _selected_unique_ids(
+        tmp_path, 'fqn:probe.chk,package:probe,file:a.yml,resource_type:test,test_name:not_null', None
+    )
+    assert len(bare) == 2
+    assert explicit == bare
+
+    tasks = create_dbt_factory(bundle_tests=False).create_tasks(manifest)
+    test_commands = []
+    for task in tasks:
+        if task['dbt_task']['commands'][-1].startswith('dbt test'):
+            test_commands.append(shlex.split(task['dbt_task']['commands'][-1]))
+    modes = [command[command.index('--indirect-selection') + 1] for command in test_commands]
+    assert sorted(modes) == ['cautious', 'empty']
+    _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
 def test_singular_test_named_after_a_model_without_other_tests_is_kept(tmp_path):
@@ -1341,11 +1949,10 @@ def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
     directions: under-predicting lets a collision through, so a task runs another task's resource;
     over-predicting refuses a project dbt handles. A count-based assertion sees neither.
 
-    Each task is replayed with the exact flags its own command carries — the verb's resource type and its
-    `--indirect-selection` mode — so the comparison is against what that task will really run. Bundled
-    `<resource>_test` tasks are skipped: sweeping a resource's whole test set with `cautious` is their
-    purpose rather than a defect. A per-test cautious plan is checked directly against the manifest id
-    assigned to its task because the direct-selector model does not represent cautious expansion.
+    Each task is replayed with the exact flags its commands carry, including every command and final
+    `--indirect-selection` mode in a bundle. A per-test cautious plan is checked directly against the
+    manifest id assigned to its task because the direct-selector model does not represent cautious
+    expansion.
     """
     peers = {
         **{k: v for k, v in manifest['nodes'].items() if (v.get('config') or {}).get('enabled') is not False},
@@ -1354,30 +1961,38 @@ def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
     }
     index = DbtFactory._selector_index(peers)  # pylint: disable=protected-access
     expected_by_key = _task_key_to_unique_id(manifest, bundle_tests)
+    bundled_by_key = _bundled_test_ids_by_task_key(manifest) if bundle_tests else {}
     for task in create_dbt_factory(bundle_tests=bundle_tests).create_tasks(manifest):
+        task_key = task['task_key']
+        if task_key in bundled_by_key:
+            actual = _selected_by_bundled_commands(tmp_path, task) & set(peers)
+            expected = bundled_by_key[task_key]
+            assert actual == expected, (
+                f'{task_key}: dbt runs {sorted(actual)}, expected exact bundle membership ' f'{sorted(expected)}'
+            )
+            continue
+
         command = shlex.split(task['dbt_task']['commands'][-1])
         verb = command[1]
         select = command[command.index('--select') + 1]
         if select.startswith('source:'):
             continue
         mode = command[command.index('--indirect-selection') + 1] if '--indirect-selection' in command else None
-        if mode == 'cautious' and bundle_tests:  # a bundled sweep, deliberately multi-node
-            continue
         resource_type = None if verb == 'test' else {'run': 'model', 'seed': 'seed', 'snapshot': 'snapshot'}[verb]
         # Compare on unique ids: `_selected_ids` returns the *display* names `dbt ls` prints, which do not
         # match manifest keys, so intersecting those with `peers` would silently compare against nothing.
         actual = set(_selected_unique_ids(tmp_path, select, resource_type, indirect_selection=mode)) & set(peers)
         if mode == 'cautious':
-            expected = {expected_by_key[task['task_key']]}
+            expected = {expected_by_key[task_key]}
             assert actual == expected, (
-                f'{task["task_key"]}: cautious plan runs {sorted(actual)}, expected exactly {sorted(expected)} '
+                f'{task_key}: cautious plan runs {sorted(actual)}, expected exactly {sorted(expected)} '
                 f'for {select!r}'
             )
             continue
         predicted = set(DbtFactory._matching_ids(select, index))  # pylint: disable=protected-access
         assert (
             predicted == actual
-        ), f'{task["task_key"]}: model predicts {sorted(predicted)} but dbt runs {sorted(actual)} for {select!r}'
+        ), f'{task_key}: model predicts {sorted(predicted)} but dbt runs {sorted(actual)} for {select!r}'
 
 
 @pytest.mark.parametrize('bundle_tests', [False, True], ids=['per-test', 'bundled'])

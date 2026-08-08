@@ -14,6 +14,8 @@ schema. It deliberately does not clone dbt-demo: the manifest fixture captures t
 external dependency's output, so the test stays hermetic and offline.
 """
 
+import hashlib
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -39,7 +41,7 @@ def _run_factory(target_path: Path, *extra_args: str) -> None:
             "--target-job-spec-path",
             str(target_path),
             "--target",
-            "${bundle.target}",
+            "dev",
             "--project-directory",
             "../",
             "--profiles-directory",
@@ -85,12 +87,21 @@ def test_end_to_end_generates_valid_bundle(extra_args, description, bundle_valid
     # The generated job is renamed via --new-job-name; confirm the CLI honoured it.
     assert "dbt_sql_job_explicit_tasks" in spec["resources"]["jobs"], "expected the renamed job in the generated spec"
 
-    # In notebook mode the packaged runner is copied to the computed project root
+    # In notebook mode the packaged runner is published at the computed project root
     # (`../` from the spec, i.e. tmp_path) so `databricks bundle deploy` uploads it.
     if "notebook" in extra_args:
-        runner = tmp_path / "run_dbt_command.py"
-        assert runner.exists(), "notebook mode should copy the runner notebook to the project root"
+        runners = list(tmp_path.glob("run_dbt_command_*.py"))
+        assert len(runners) == 1, "notebook mode should publish one runner at the project root"
+        runner = runners[0]
+        match = re.fullmatch(r"run_dbt_command_([0-9a-f]{64})\.py", runner.name)
+        assert match is not None, "runner should use its full lowercase SHA-256 digest"
+        assert hashlib.sha256(runner.read_bytes()).hexdigest() == match.group(1)
         assert "dbtRunner" in runner.read_text(encoding="utf-8"), "copied file should be the packaged runner"
+
+        tasks = spec["resources"]["jobs"]["dbt_sql_job_explicit_tasks"]["tasks"]
+        for task in tasks:
+            assert task["notebook_task"]["notebook_path"] == f"../{runner.name}"
+            assert task["notebook_task"]["source"] == "WORKSPACE"
 
     errors = sorted(bundle_validator.iter_errors(spec), key=lambda e: list(e.path))
     assert not errors, "generated spec ({}) is not a valid DAB:\n{}".format(

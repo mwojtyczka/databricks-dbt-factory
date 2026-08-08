@@ -1,7 +1,19 @@
-import os
-import tempfile
+import stat
+from dataclasses import dataclass
+from pathlib import Path
 
 import yaml
+
+from databricks_dbt_factory.file_io import atomic_write_bytes
+
+
+@dataclass(frozen=True)
+class JobSpecArtifact:
+    """A fully prepared job spec ready for atomic publication."""
+
+    content: bytes
+    destination: Path
+    mode: int
 
 
 def replace_tasks_in_job_spec(
@@ -19,15 +31,12 @@ def replace_tasks_in_job_spec(
         new_job_name (str, optional): The name of the job to update. Defaults to None.
 
     Raises:
-        KeyError: If no jobs are found in the provided YAML file.
-
-    The target is written atomically (serialize fully, write to a temp file in the same
-    directory, then `os.replace`), so a serialization error or interruption never leaves a
-    truncated spec — important because the CLI supports updating a file in place
-    (`input_job_spec_path == target_job_spec_path`).
+        ValueError: If the input has no job or the target is not a regular non-symlink file.
     """
     rendered = render_job_spec(input_job_spec_path, new_tasks, new_job_name)
-    write_job_spec(rendered, target_job_spec_path)
+    destination = resolve_job_spec_destination(target_job_spec_path)
+    artifact = prepare_job_spec(rendered, input_job_spec_path, destination)
+    write_job_spec(artifact)
 
 
 def render_job_spec(
@@ -37,9 +46,7 @@ def render_job_spec(
 ) -> str:
     """Renders the updated job definition as YAML, without writing anything.
 
-    Separated from `write_job_spec` so a caller with more than one artifact to produce can do all the
-    fallible work first: the CLI also copies a runner notebook, and reading or serializing an invalid
-    input spec after that copy left the notebook behind for a run that produced no spec.
+    The CLI prepares both the job spec and content-addressed runner before publishing either artifact.
 
     Args:
         input_job_spec_path (str): Path to the job definition YAML file.
@@ -86,17 +93,21 @@ def render_job_spec(
     return yaml.dump(job_definition, sort_keys=False, width=1000)
 
 
-def write_job_spec(rendered: str, target_job_spec_path: str) -> None:
-    """Writes an already-rendered job spec atomically.
+def resolve_job_spec_destination(target_job_spec_path: str | Path) -> Path:
+    """Validates a requested job spec target and returns its canonical destination."""
+    requested_destination = Path(target_job_spec_path)
+    if requested_destination.is_symlink() or (requested_destination.exists() and not requested_destination.is_file()):
+        raise ValueError(f'Job spec target {requested_destination} must be a regular non-symlink file.')
+    return requested_destination.resolve()
 
-    Writes to a temp file in the target's directory and `os.replace`s it into position, so an
-    interruption never leaves a truncated spec — important because the CLI supports updating a file in
-    place (`input_job_spec_path == target_job_spec_path`).
-    """
-    target_dir = os.path.dirname(os.path.abspath(target_job_spec_path))
-    with tempfile.NamedTemporaryFile(
-        'w', encoding="utf-8", dir=target_dir, prefix='.job_spec_', suffix='.tmp', delete=False
-    ) as tmp:
-        tmp.write(rendered)
-        tmp_path = tmp.name
-    os.replace(tmp_path, target_job_spec_path)
+
+def prepare_job_spec(rendered: str, input_job_spec_path: str, destination: Path) -> JobSpecArtifact:
+    """Encodes a rendered spec and resolves the mode its atomic replacement must use."""
+    mode_source = destination if destination.exists() else Path(input_job_spec_path)
+    mode = stat.S_IMODE(mode_source.stat().st_mode)
+    return JobSpecArtifact(rendered.encode('utf-8'), destination, mode)
+
+
+def write_job_spec(artifact: JobSpecArtifact) -> None:
+    """Publishes a prepared job spec atomically."""
+    atomic_write_bytes(artifact.destination, artifact.content, artifact.mode)

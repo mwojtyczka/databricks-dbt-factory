@@ -1,6 +1,10 @@
 import hashlib
 import json
+import re
 from collections.abc import Iterable
+
+# Databricks substitutes complete dynamic value references in task string fields before execution.
+DYNAMIC_VALUE_REFERENCE = re.compile(r'\{\{[^{}]+\}\}')
 
 # Databricks caps task keys at 100 characters (letters, numbers, underscores, hyphens).
 MAX_TASK_KEY_LENGTH = 100

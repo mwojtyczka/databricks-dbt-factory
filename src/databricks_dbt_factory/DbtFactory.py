@@ -6,7 +6,7 @@ from typing import cast
 
 from databricks_dbt_factory.DbtTask import DbtTask
 from databricks_dbt_factory.TaskFactory import TaskFactory, TestTaskFactory
-from databricks_dbt_factory.Utils import build_task_key_maps
+from databricks_dbt_factory.Utils import DYNAMIC_VALUE_REFERENCE, build_task_key_maps
 
 # The `unique_id` prefixes of resources a test can be attached to.
 _DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
@@ -103,8 +103,16 @@ class DbtFactory:
         Returns:
             list[dict]: Task dictionaries ready to be injected into the `tasks` list of a
             Databricks job spec.
+
+        Raises:
+            ValueError: If the generated job would exceed Databricks' 1,000-task limit.
         """
         tasks = self._create_tasks(dbt_manifest)
+        if len(tasks) > 1_000:
+            raise ValueError(
+                f'Databricks jobs support at most 1,000 tasks; this manifest generates {len(tasks):,}. '
+                f'Reduce the generated resources or enable test bundling.'
+            )
         return [task.to_dict() for task in tasks]
 
     _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
@@ -120,18 +128,17 @@ class DbtFactory:
     #   '*?[]' `fnmatch` pattern syntax, still honoured after the `fqn:` prefix: `fqn:probe.a*star`
     #          selects `a*star` *and* `aXstar`, so the glob is live rather than literal
     #
-    # `{}` is the one entry that is *not* about dbt at all, and so survives the move to `fqn:`:
-    # Databricks substitutes `{{...}}` dynamic references in a task's dbt commands as plain text before
-    # the task runs, so a model under `models/{{job.id}}/` emits a selector that resolves locally and
-    # matches nothing once substituted — the task then exits 0 having built nothing.
+    # Databricks substitutes complete `{{...}}` dynamic value references in task commands before the
+    # task runs. Those references are screened separately; literal single braces and incomplete pairs
+    # remain ordinary selector text under `fqn:`.
     #
     # Emitting `fqn:` rather than a bare value is what keeps this list short. dbt's
     # `SelectionCriteria.default_method` dispatches a bare value containing `/` to `MethodName.Path` and
     # one ending `.sql`/`.py`/`.csv` to `MethodName.File`, both of which then match nothing; naming the
     # method explicitly bypasses that heuristic entirely. Verified: bare `probe.orders.sql` and
     # `probe.check/slash` select nothing, while `fqn:probe.orders.sql` and `fqn:probe.check/slash` each
-    # resolve to exactly their node. `:` and `{}` are likewise literal under `fqn:`.
-    _SELECTOR_METACHARACTERS = frozenset(' ,*?[]{}')
+    # resolve to exactly their node. `:` and literal braces are likewise literal under `fqn:`.
+    _SELECTOR_METACHARACTERS = frozenset(' ,*?[]')
 
     @classmethod
     def _node_select(
@@ -166,18 +173,18 @@ class DbtFactory:
           file still need the bare **name**, which dbt matches against the fqn's leaf. The name stands
           in for the fqn when the fqn itself is unusable.
 
-        A term is omitted when dbt's own grammar cannot express it literally — see
-        `_is_usable_component` — so an awkward directory name costs one term rather than the whole
-        selector. `source_info` addresses a source's tests, which dbt selects by
+        A term is omitted when dbt cannot express it literally or when combining it with the other
+        terms would form a Databricks dynamic value reference. Exactness is rechecked against `peers`
+        after any omission. `source_info` addresses a source's tests, which dbt selects by
         `source:<package>.<source>.<table>` rather than by fqn.
 
         **The fqn or the bare name must survive, and the result must then be checked for exactness.**
 
         dbt has no `unique_id:` selector method, so a selector is always a *predicate*, and its
         exactness has to be established rather than assumed. Requiring the fqn or the bare name is
-        necessary — `package:`, `file:`, `resource_type:` and `test_name:` each address a group — but it
-        is *not* sufficient, which an earlier revision of this docstring got wrong. An fqn is a
-        positional prefix over dbt's *flattened* fqn, so it names a subtree, not a node:
+        necessary — `package:`, `file:`, `resource_type:` and `test_name:` each address a group — but
+        is not sufficient. An fqn is a positional prefix over dbt's *flattened* fqn, so it names a
+        subtree, not a node:
 
         * a test named `check.nested` flattens to `[probe, check, nested]`, so the sibling `check`'s
           selector `probe.check` matches it too — even with `package:`, `file:` and `test_name:` all
@@ -189,18 +196,15 @@ class DbtFactory:
         * two generic tests may simply *share* an fqn: dbt does not require test names to be unique and
           disambiguates in the `unique_id` hash only.
 
-        `_assert_exact` checks direct selectors against the manifest. Test tasks whose direct selector is
+        `_assert_exact` checks direct selectors against the manifest. Test selectors whose direct form is
         ambiguous may instead use `_test_selection_plan`, which scopes the selector to one exact parent.
 
-        All of this is a per-node check against the rest of the manifest, which is stricter than dbt
-        needs in one direction and unavoidable in the other: exactness genuinely is a property of the
-        node *plus* its neighbours, and an earlier attempt to make it a property of the node alone is
-        what let these collisions through.
+        Exactness is checked per node against the rest of the manifest because it is a property of the
+        node and its selectable neighbours, not of one manifest entry in isolation.
 
         Raises:
-            ValueError: when neither the fqn nor the bare name survives, or when the resulting selector
-                also matches another resource. Generation fails at build time, naming the resource and
-                the remedy, instead of emitting a task that would do the wrong thing at run time.
+            ValueError: when neither the fqn nor the bare name survives, when the final selector cannot
+                avoid a Databricks dynamic value reference, or when it also matches another resource.
         """
         if source_info is not None:
             return cls._source_select(source_info)
@@ -214,14 +218,12 @@ class DbtFactory:
         terms: list[str] = []
         fqn = node_info.get('fqn') or []
         # The `fqn:` prefix does *not* neutralise graph operators: `fqn:probe.orders+1` still selects
-        # `orders` and its children, verified with `dbt ls` on dbt 1.12.0. So the boundary check applies to
-        # the joined value exactly as before — naming the method only bypasses the *dispatch* heuristic.
+        # `orders` and its children, verified with `dbt ls` on dbt 1.12.0. The boundary check therefore
+        # applies to the joined value; naming the method only bypasses the dispatch heuristic.
         if fqn and cls._is_usable_selector('.'.join(fqn)) and all(cls._is_usable_component(part) for part in fqn):
-            # `fqn:` names the method explicitly rather than relying on `SelectionCriteria.default_method`
-            # to infer it from the value's shape. That inference is what made a `/` or a `.sql` suffix
-            # fatal: dbt read the value as a path or a file name and matched nothing while the task still
-            # exited 0. With the prefix, `fqn:probe.orders.sql` and `fqn:probe.check/slash` each resolve
-            # to exactly their node — verified with `dbt ls` on dbt 1.12.0.
+            # `fqn:` names the method explicitly so `/` and `.sql` remain literal fqn text instead of
+            # dispatching to path or file matching. `fqn:probe.orders.sql` and
+            # `fqn:probe.check/slash` each resolve to exactly their node on dbt 1.12.0.
             terms.append(f'fqn:{".".join(fqn)}')
         elif cls._is_usable_component(name := node_info.get('name') or '') and cls._is_usable_selector(name):
             # The fqn is unusable, so fall back to the bare resource name, which dbt matches against
@@ -257,10 +259,34 @@ class DbtFactory:
         if cls._is_usable_component(test_name):
             terms.append(f'test_name:{test_name}')
 
-        select = ','.join(terms)
+        select = cls._compose_selector_terms(terms, node_info)
         if peers is not None:
             cls._assert_exact(select, node_info, peers)
         return select
+
+    @classmethod
+    def _compose_selector_terms(cls, terms: list[str], node_info: dict) -> str:
+        """Joins terms while preserving the required first term and omitting unsafe optional terms."""
+        safe_terms = list(terms)
+        while match := DYNAMIC_VALUE_REFERENCE.search(select := ','.join(safe_terms)):
+            offset = 0
+            closing_term = 0
+            for index, term in enumerate(safe_terms):
+                offset += len(term)
+                if match.end() <= offset:
+                    closing_term = index
+                    break
+                offset += 1
+            if closing_term == 0:
+                raise cls._dynamic_reference(node_info, select)
+            safe_terms.pop(closing_term)
+        return select
+
+    @classmethod
+    def _assert_no_dynamic_reference(cls, select: str, node_info: dict) -> None:
+        """Rejects a complete dynamic value reference in a final Databricks task selector."""
+        if DYNAMIC_VALUE_REFERENCE.search(select):
+            raise cls._dynamic_reference(node_info, select)
 
     @classmethod
     def _test_selection_plan(cls, test_info: dict, peers: dict) -> _SelectionPlan:
@@ -296,6 +322,7 @@ class DbtFactory:
             peers=peers,
         )
         scoped_select = f'{parent_select},{select}'
+        cls._assert_no_dynamic_reference(scoped_select, test_info)
         if cls._eager_expansion_superset(scoped_select, peers) != intended:
             cls._assert_exact(select, test_info, peers)
         return _SelectionPlan(scoped_select, 'cautious')
@@ -348,8 +375,8 @@ class DbtFactory:
 
         Direct test plans pin `--indirect-selection empty`, so their exactness is a plain intersection of
         the emitted terms. Parent-scoped cautious plans apply their additional proof in
-        `_test_selection_plan`; bundled tasks deliberately sweep a resource's tests and are not checked
-        here.
+        `_test_selection_plan`. Bundled tasks reuse these per-test plans and union only plans with the
+        same indirect-selection mode.
 
         The contract is **equality**, not "no surplus". A selector that matches nothing is just as wrong as
         one that matches too much: `dbt test` and `dbt run` both exit 0 on a zero-match selector, so the
@@ -401,6 +428,10 @@ class DbtFactory:
         confirmed against dbt 1.12.0 with `dbt ls`. A node's fqn is unaffected: there the dot is the
         separator we are already building with, and a dotted segment stays addressable.
 
+        Complete Databricks dynamic value references are checked after assembly, including references
+        completed by the separator between the source and table. None of the three source parts can be
+        omitted, so such a selector is refused with the unsafe final value in the error.
+
         The finished string is checked with `_is_usable_selector` too: like a bare name, the whole
         `source:...` is one raw selector, so a trailing `+N` on the table is read as a graph operator
         and matches nothing while `dbt test` still exits 0. Only the boundary matters —
@@ -410,10 +441,11 @@ class DbtFactory:
         package = source_info.get('package_name') or ''
         source_name = source_info.get('source_name') or ''
         table = source_info.get('name') or ''
+        select = f'source:{package}.{source_name}.{table}'
+        cls._assert_no_dynamic_reference(select, source_info)
         parts = (package, source_name, table)
         if not all(cls._is_usable_component(part) and '.' not in part for part in parts):
             raise cls._unaddressable(source_info)
-        select = f'source:{package}.{source_name}.{table}'
         if not cls._is_usable_selector(select):
             raise cls._unaddressable(source_info)
         return select
@@ -421,26 +453,27 @@ class DbtFactory:
     @classmethod
     def _is_usable_component(cls, value: str) -> bool:
         """Whether `value` can appear inside a selector component and still mean itself."""
-        return bool(value) and not cls._SELECTOR_METACHARACTERS & set(value)
+        return (
+            bool(value)
+            and not cls._SELECTOR_METACHARACTERS & set(value)
+            and DYNAMIC_VALUE_REFERENCE.search(value) is None
+        )
 
     @classmethod
     def _is_usable_selector(cls, value: str) -> bool:
         """
-        Whether `value` can be used as an `fqn:` selector without a graph operator changing its meaning.
+        Whether a fully assembled selector avoids dbt graph expansion and Databricks substitution.
 
-        Only the *trailing* `+N` still matters. dbt's `RAW_SELECTOR_PATTERN` reads a trailing `+N` as child
-        depth even after an explicit method prefix, so `fqn:probe.orders+1` selects `orders` *and its
-        child* — verified with `dbt ls` on dbt 1.12.0.
+        dbt reads a trailing `+N` as child depth even after an explicit method prefix, so
+        `fqn:probe.orders+1` selects `orders` and its child. Leading `@` and `N+` forms, and `+` inside
+        a segment, remain literal under an explicit `fqn:` method; `fqn:@weird`, `fqn:2+orders`,
+        `fqn:pkg.+leading`, and `fqn:pkg.raw.2+ord` each address their exact node on dbt 1.12.0.
 
-        The leading forms do not survive the prefix and are therefore no longer rejected: `fqn:@weird` and
-        `fqn:2+orders` each resolve to exactly their node, checked in a project where both models have
-        children so an operator would have visibly expanded. Refusing them cost the user a working project
-        for nothing.
-
-        An operator inside a segment was never a problem: `pkg.+leading` and `pkg.raw.2+ord` are exact,
-        both confirmed with `dbt ls`.
+        Complete `{{...}}` references are unusable because Databricks substitutes them before dbt receives
+        the command. The check applies after selector components are joined so references spanning
+        components are also rejected.
         """
-        return not value.rstrip('0123456789').endswith('+')
+        return not value.rstrip('0123456789').endswith('+') and DYNAMIC_VALUE_REFERENCE.search(value) is None
 
     @staticmethod
     def _flat_fqn(fqn: list[str]) -> list[str]:
@@ -583,12 +616,24 @@ class DbtFactory:
         name = node_info.get('name')
         path = node_info.get('original_file_path')
         return ValueError(
-            f'Cannot generate a task for {name!r} ({path}): the only selector dbt offers for it '
+            f'Cannot generate a task for {name!r} ({path}): the generated selector for it '
             f'({select}) also runs {", ".join(sorted(also_matched))}. dbt has no unique-id selector, so '
-            f'the factory cannot prove a task addresses these separately and refuses to risk running the '
-            f'others before their own dependencies have completed. Rename {name!r} so that its dotted '
+            f'the factory cannot prove a task addresses these separately. It does not search alternate '
+            f'spellings once a usable FQN exists, and refuses to risk running the others before their own '
+            f'dependencies have completed. Rename {name!r} so that its dotted '
             f'name neither matches nor prefixes a '
             f"sibling's, or move it to a file of its own."
+        )
+
+    @staticmethod
+    def _dynamic_reference(node_info: dict, select: str) -> ValueError:
+        """Builds the error for a selector Databricks would interpret as a dynamic value reference."""
+        name = node_info.get('name')
+        path = node_info.get('original_file_path')
+        return ValueError(
+            f'Cannot generate a task for {name!r} ({path}): the final selector ({select}) contains a '
+            f'Databricks dynamic value reference. Rename the resource or file so its selector terms do '
+            f'not form a complete reference.'
         )
 
     @staticmethod
@@ -622,8 +667,9 @@ class DbtFactory:
         return ValueError(
             f'Cannot generate a task for {name!r} ({path}): dbt cannot select it uniquely. '
             f'Rename the resource or its file so that it does not end with a dbt graph operator (a '
-            f'trailing +N) and contains none of a space, comma, brace or one of *?[] — or, for a '
-            f"source, a dot. Without a usable name or path, the only terms left match a group of "
+            f'trailing +N), contains none of a space, comma or one of *?[], and contains no complete '
+            f'Databricks dynamic value reference (`{{{{...}}}}`) — or, for a source, a dot. Without a '
+            f"usable name or path, the only terms left match a group of "
             f"resources, so the task could run another task's resource."
         )
 
@@ -646,10 +692,10 @@ class DbtFactory:
         peers = _SelectorIndex({**dbt_nodes, **dbt_unit_tests, **dbt_sources})
 
         bundle = 'test' in self.task_factories and self.bundle_tests
-        single_model_tested: set[str] = set()
+        bundled_tests: dict[str, list[tuple[str, dict]]] = {}
         standalone_tests: list[tuple[str, dict]] = []
         if bundle:
-            single_model_tested, standalone_tests = self._classify_tests(dbt_nodes, dbt_sources, dbt_unit_tests)
+            bundled_tests, standalone_tests = self._classify_tests(dbt_nodes, dbt_sources, dbt_unit_tests)
         standalone_test_ids = {full_name for full_name, _ in standalone_tests}
 
         # Unit tests live under the manifest `unit_tests` key, not `nodes`. In per-test mode each
@@ -666,7 +712,7 @@ class DbtFactory:
             if self._node_gets_own_task(full_name, info, bundle, standalone_test_ids):
                 task_ids.append(full_name)
         task_ids += unit_test_ids
-        task_keys, bundled_test_keys = build_task_key_maps(task_ids, sorted(single_model_tested))
+        task_keys, bundled_test_keys = build_task_key_maps(task_ids, sorted(bundled_tests))
 
         gating = _Gating()
         if not bundle and 'test' in self.task_factories:
@@ -691,7 +737,7 @@ class DbtFactory:
                 self._build_bundled_test_tasks(
                     dbt_nodes,
                     dbt_sources,
-                    single_model_tested,
+                    bundled_tests,
                     task_keys,
                     bundled_test_keys,
                     peers,
@@ -725,7 +771,7 @@ class DbtFactory:
     def _node_gets_own_task(self, full_name: str, node_info: dict, bundle: bool, standalone_test_ids: set[str]) -> bool:
         """
         Whether a `dbt_nodes` entry becomes its own task (and so receives a task key). True for any
-        resource type with a factory, except single-model test nodes in bundle mode — those fold
+        resource type with a factory, except single-resource test nodes in bundle mode — those fold
         into their resource's bundled test task. The single authority for this decision, so the
         task-key map and the task-building loops stay in agreement.
         """
@@ -841,12 +887,9 @@ class DbtFactory:
     ) -> dict[str, list[tuple[str, frozenset[str]]]]:
         """
         Maps each testable resource's full name to a list of (test_task_key, test_refs) pairs
-        for tests whose `severity` is `error` (the default). Warn-severity tests still run but
-        are NOT indexed here, so they do not appear in any downstream model's `depends_on` —
-        their job is to surface findings, not halt the DAG. This matches `dbt build` semantics:
-        dbt itself exits 0 on warn-severity failures, so even if we did gate on them the
-        Databricks task would succeed and downstream would run; keeping warn tests out of the
-        dep graph just avoids the extra DAG clutter.
+        for every emitted data test. A test's task exit status decides whether the dependency blocks:
+        warn-severity tests normally succeed, while `--warn-error` can make the same task fail. Keeping
+        one graph rule preserves dbt's ordering without reproducing its option-dependent severity logic.
 
         Unit tests are indexed too. A unit test has no severity — it always fails the run — so it
         always gates. Only unit tests that were emitted as tasks (present in `task_keys`) are
@@ -859,8 +902,6 @@ class DbtFactory:
         index: dict[str, list[tuple[str, frozenset[str]]]] = {}
         for node_full_name, node_info in dbt_nodes.items():
             if node_info['resource_type'] != 'test':
-                continue
-            if self._test_severity(node_info) != 'error':
                 continue
             if node_full_name in task_keys:
                 self._index_test(index, task_keys[node_full_name], node_info, dbt_nodes, dbt_sources)
@@ -890,15 +931,6 @@ class DbtFactory:
             if dep.startswith(self._DBT_TEST_TARGET_PREFIXES) and (dep in dbt_nodes or dep in dbt_sources):
                 refs.add(dep)
         return frozenset(refs)
-
-    @staticmethod
-    def _test_severity(test_node_info: dict) -> str:
-        """Reads the test's severity from the manifest, defaulting to `error` when unset."""
-        config = test_node_info.get('config') or {}
-        severity = config.get('severity')
-        if isinstance(severity, str):
-            return severity.lower()
-        return 'error'
 
     @staticmethod
     def _unit_test_model(unit_test_info: dict) -> str | None:
@@ -965,45 +997,45 @@ class DbtFactory:
 
     def _classify_tests(
         self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict
-    ) -> tuple[set[str], list[tuple[str, dict]]]:
+    ) -> tuple[dict[str, list[tuple[str, dict]]], list[tuple[str, dict]]]:
         """
         Classifies test nodes for bundled mode so that no test is silently dropped.
 
-        - Tests with exactly 1 testable dep: will be covered by their resource's bundled
-          `<resource>_test` task under `--indirect-selection cautious`.
-        - Tests with >1 testable deps (cross-model, e.g. `relationships`): emitted as their own
-          tasks with multi-resource deps — `cautious` filters them out of bundles.
+        - Tests with exactly 1 testable dep: added by id to that resource's bundled
+          `<resource>_test` task. Each receives its own exact selection plan before the plans are
+          unioned by indirect-selection mode.
+        - Tests with >1 testable deps (cross-resource, e.g. `relationships`): emitted as their own
+          tasks with every available model, seed, or snapshot dependency.
         - Tests with 0 testable deps (singular/custom tests that don't `ref()` or `source()`
           any resource): also emitted as their own tasks, since no bundle would pick them up.
 
-        A model's bundled test task selects the model with `--indirect-selection cautious`, which
-        sweeps in the model's unit tests as well. Models that already have a single-model data
-        test therefore cover their unit tests for free. A model with *only* unit tests is added to
-        `single_model_tested` here so it still gets a bundled task.
+        Unit tests are assigned explicitly to their resolved model bundle. A model with only unit
+        tests therefore still gets a bundled task without relying on indirect selection to discover it.
 
         Returns:
-            (single_model_tested, standalone_tests):
-                - `single_model_tested`: full names of resources with at least one single-model
-                  test — these become bundled test tasks.
+            (bundled_tests, standalone_tests):
+                - `bundled_tests`: exact data and unit test nodes grouped by the resource whose
+                  bundled task runs them.
                 - `standalone_tests`: list of `(test_full_name, test_node_info)` for tests
                   that must run as individual tasks (cross-model or zero-dep).
         """
-        single_model_tested: set[str] = set()
+        bundled_tests: dict[str, list[tuple[str, dict]]] = {}
         standalone_tests: list[tuple[str, dict]] = []
         for node_full_name, node_info in dbt_nodes.items():
             if node_info['resource_type'] != 'test':
                 continue
             testable_deps = self._testable_refs(node_info, dbt_nodes, dbt_sources)
             if len(testable_deps) == 1:
-                single_model_tested.add(next(iter(testable_deps)))
+                resource_id = next(iter(testable_deps))
+                bundled_tests.setdefault(resource_id, []).append((node_full_name, node_info))
             else:
                 standalone_tests.append((node_full_name, node_info))
 
-        for unit_test_info in dbt_unit_tests.values():
+        for unit_test_full_name, unit_test_info in dbt_unit_tests.items():
             model_full_name = self._unit_test_model(unit_test_info)
             if model_full_name is not None and model_full_name in dbt_nodes:
-                single_model_tested.add(model_full_name)
-        return single_model_tested, standalone_tests
+                bundled_tests.setdefault(model_full_name, []).append((unit_test_full_name, unit_test_info))
+        return bundled_tests, standalone_tests
 
     def _build_resource_tasks(
         self,
@@ -1015,10 +1047,8 @@ class DbtFactory:
         peers: dict,
     ) -> list[DbtTask]:
         """Builds tasks for every non-test resource, plus per-test tasks when not bundling."""
-        # Maps a tested resource's task key (what `depends_on` holds) to its gating bundled test
-        # task key, for rewiring in bundle mode. Sources have a bundled test key but no run task,
-        # so they are absent from `task_keys` and skipped.
-        bundled_test_key_by_task_key = {task_keys[fn]: key for fn, key in bundled_test_keys.items() if fn in task_keys}
+        # A tested resource resolves to its bundle; sources gain a scheduled key only through this map.
+        dependency_task_keys = {**task_keys, **bundled_test_keys} if bundle else task_keys
         tasks: list[DbtTask] = []
         for node_full_name, node_info in dbt_nodes.items():
             if node_full_name not in task_keys:
@@ -1046,11 +1076,11 @@ class DbtFactory:
                     node_info['name'],
                     node_info,
                     task_key,
-                    task_keys,
+                    dependency_task_keys,
                 )
 
-            if resource_type in self._GATEABLE_TYPES:
-                task = self._gate_task(task, node_full_name, bundle, bundled_test_key_by_task_key, gating)
+            if resource_type in self._GATEABLE_TYPES and not bundle:
+                task = self._gate_task(task, node_full_name, gating)
             tasks.append(task)
         return tasks
 
@@ -1058,49 +1088,51 @@ class DbtFactory:
         self,
         task: DbtTask,
         node_full_name: str,
-        bundle: bool,
-        bundled_test_key_by_task_key: dict[str, str],
         gating: _Gating,
     ) -> DbtTask:
-        """Applies the gating policy to one gateable task: bundled rewiring, or upstream test edges."""
-        if bundle:
-            return replace(task, depends_on=self._rewire_deps(task.depends_on, bundled_test_key_by_task_key))
+        """Adds per-test-mode gates at the first downstream frontier."""
         if not gating.tests:
             return task
         deps = self._extend_deps_with_upstream_tests(node_full_name, task.depends_on, gating)
         return replace(task, depends_on=deps)
 
-    @staticmethod
-    def _rewire_deps(deps: list[str] | None, bundled_test_key_by_task_key: dict[str, str]) -> list[str]:
-        """Rewrites a dependency on a tested resource to that resource's gating bundled test task."""
-        return [bundled_test_key_by_task_key.get(dep_key, dep_key) for dep_key in (deps or [])]
-
     def _build_bundled_test_tasks(
         self,
         dbt_nodes: dict,
         dbt_sources: dict,
-        nodes_with_tests: set[str],
+        bundled_tests: dict[str, list[tuple[str, dict]]],
         task_keys: dict[str, str],
         bundled_test_keys: dict[str, str],
         peers: dict,
     ) -> list[DbtTask]:
-        """Emits one bundled `<resource>_test` task per tested resource via `TestTaskFactory.create_bundled_task`."""
+        """Emits one task per tested resource from unions of exact per-test selection plans."""
         test_factory = cast(TestTaskFactory, self.task_factories['test'])
         tasks: list[DbtTask] = []
-        for full_name in sorted(nodes_with_tests):
+        for full_name, tests in sorted(bundled_tests.items()):
             is_source = full_name.startswith('source.')
             info = dbt_sources[full_name] if is_source else dbt_nodes[full_name]
-            bare_name = info['name']
-            select = self._node_select(info, source_info=info if is_source else None, peers=peers)
             tasks.append(
                 test_factory.create_bundled_task(
                     task_key=bundled_test_keys[full_name],
-                    select=select,
-                    deps_command_name=bare_name,
+                    selects_by_indirect_selection=self._bundled_selects_by_mode(tests, peers),
+                    deps_command_name=info['name'],
                     depends_on=[] if is_source else [task_keys[full_name]],
                 )
             )
         return tasks
+
+    @classmethod
+    def _bundled_selects_by_mode(cls, tests: list[tuple[str, dict]], peers: dict) -> dict[str, list[str]]:
+        """Builds and validates the deterministic selector groups for one test bundle."""
+        selects_by_mode: dict[str, list[str]] = {}
+        test_info_by_mode: dict[str, dict] = {}
+        for _, test_info in sorted(tests, key=lambda item: item[0]):
+            plan = cls._test_selection_plan(test_info, peers)
+            selects_by_mode.setdefault(plan.indirect_selection, []).append(plan.select)
+            test_info_by_mode.setdefault(plan.indirect_selection, test_info)
+        for mode, selects in selects_by_mode.items():
+            cls._assert_no_dynamic_reference(' '.join(sorted(selects)), test_info_by_mode[mode])
+        return selects_by_mode
 
     def _build_standalone_test_tasks(
         self,
@@ -1109,8 +1141,9 @@ class DbtFactory:
         peers: dict,
     ) -> list[DbtTask]:
         """
-        Emits one task per standalone test — cross-model tests (e.g. `relationships`) gated on
-        every referenced resource, plus any zero-dep singular tests that bundles can't cover.
+        Emits one task per standalone test — cross-resource tests (e.g. `relationships`) gated on
+        every referenced model, seed, or snapshot task, plus zero-dep singular tests that bundles
+        cannot cover.
         """
         test_factory = cast(TestTaskFactory, self.task_factories['test'])
         tasks: list[DbtTask] = []
@@ -1140,7 +1173,7 @@ class DbtFactory:
         Only unit tests that received a task key (see `_emitted_unit_test_ids`) are emitted; unit
         tests whose target model is absent from the manifest were never keyed and are skipped, so
         their task can't gate on a model task that is never created. Used in per-test mode; in
-        bundled mode a model's bundled test task covers its unit tests via `--indirect-selection cautious`.
+        bundled mode unit tests are assigned explicitly to their model's exact-selector bundle.
 
         Versioned unit-test clones receive independent parent-scoped selection plans, so each task waits
         only for and runs only against its exact model version.

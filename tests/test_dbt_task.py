@@ -1,6 +1,27 @@
+import json
+
 import pytest
 
 from databricks_dbt_factory.DbtTask import DbtTask, DbtTaskOptions, TaskType
+
+
+def _notebook_task_with_serialized_base_parameters_size(size: int) -> DbtTask:
+    options = DbtTaskOptions(
+        task_type=TaskType.NOTEBOOK,
+        notebook_path="./runner.py",
+        project_directory="prøject",
+        profiles_directory="prøfiles",
+    )
+    empty_parameters = {
+        "dbt_commands": json.dumps([""]),
+        "project_directory": options.project_directory,
+        "profiles_directory": options.profiles_directory,
+    }
+    fixed_size = len(json.dumps(empty_parameters, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    command = "x" * (size - fixed_size)
+    expected_parameters = {**empty_parameters, "dbt_commands": json.dumps([command])}
+    assert len(json.dumps(expected_parameters, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) == size
+    return DbtTask(task_key="large_test_bundle", commands=[command], options=options)
 
 
 def test_notebook_task_with_job_cluster_key():
@@ -103,3 +124,50 @@ def test_task_type_defaults_to_notebook():
 def test_notebook_task_requires_notebook_path():
     with pytest.raises(ValueError, match="notebook_path is required"):
         DbtTaskOptions(task_type=TaskType.NOTEBOOK)
+
+
+@pytest.mark.parametrize("size", [999_999, 1_000_000])
+def test_notebook_task_accepts_base_parameters_at_or_below_one_megabyte(size):
+    task = _notebook_task_with_serialized_base_parameters_size(size)
+
+    result = task.to_dict()
+
+    base_parameters = result["notebook_task"]["base_parameters"]
+    assert len(json.dumps(base_parameters, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) == size
+
+
+def test_notebook_task_rejects_base_parameters_above_one_megabyte():
+    task = _notebook_task_with_serialized_base_parameters_size(1_000_001)
+
+    with pytest.raises(
+        ValueError,
+        match=r"large_test_bundle.*1,000,001 bytes.*1,000,000 bytes.*bundle.*--task-type dbt",
+    ):
+        task.to_dict()
+
+
+def test_native_dbt_task_is_not_subject_to_the_notebook_parameter_limit():
+    command = "x" * 1_000_001
+    task = DbtTask(
+        task_key="large_native_task",
+        commands=[command],
+        options=DbtTaskOptions(task_type=TaskType.DBT),
+    )
+
+    result = task.to_dict()
+
+    assert result["dbt_task"]["commands"] == [command]
+
+
+def test_notebook_task_rejects_a_dynamic_reference_formed_across_serialized_commands():
+    task = DbtTask(
+        task_key="split_reference_test",
+        commands=[
+            "dbt test --select 'fqn:pkg.{{job.parameters.`first'",
+            "dbt test --select 'fqn:pkg.second`}}'",
+        ],
+        options=DbtTaskOptions(task_type=TaskType.NOTEBOOK, notebook_path="./runner.py"),
+    )
+
+    with pytest.raises(ValueError, match="serialized dbt_commands.*dynamic value reference"):
+        task.to_dict()

@@ -1,3 +1,6 @@
+import os
+import stat
+
 import pytest
 import yaml
 
@@ -78,6 +81,78 @@ def test_replace_tasks_in_place_update(tmp_path):
     written = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert written["resources"]["jobs"]["my_job"]["tasks"] == [{"task_key": "new"}]
     assert written["resources"]["jobs"]["my_job"]["name"] == "keep"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX permission-bit semantics")
+def test_new_target_inherits_input_template_mode(tmp_path):
+    source = tmp_path / "in.yaml"
+    spec = _write(source, {"resources": {"jobs": {"my_job": {"tasks": []}}}})
+    source.chmod(0o640)
+    target = tmp_path / "out.yaml"
+
+    replace_tasks_in_job_spec(spec, [{"task_key": "new"}], str(target))
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX permission-bit semantics")
+def test_existing_target_preserves_its_mode(tmp_path):
+    spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {"my_job": {"tasks": []}}}})
+    target = tmp_path / "out.yaml"
+    target.write_text("old\n", encoding="utf-8")
+    target.chmod(0o604)
+
+    replace_tasks_in_job_spec(spec, [{"task_key": "new"}], str(target))
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o604
+
+
+@pytest.mark.parametrize(
+    "target_kind",
+    [
+        "directory",
+        pytest.param(
+            "symlink",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="Windows symlink creation may require elevated privileges"
+            ),
+        ),
+    ],
+)
+def test_non_regular_target_is_rejected(tmp_path, target_kind):
+    spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {"my_job": {"tasks": []}}}})
+    target = tmp_path / "out.yaml"
+    if target_kind == "directory":
+        target.mkdir()
+    else:
+        link_target = tmp_path / "linked.yaml"
+        link_target.write_text("keep\n", encoding="utf-8")
+        os.symlink(link_target, target)
+
+    with pytest.raises(ValueError, match="regular non-symlink file"):
+        replace_tasks_in_job_spec(spec, [{"task_key": "new"}], str(target))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation may require elevated privileges")
+def test_prepared_target_stays_anchored_when_a_parent_symlink_changes(tmp_path):
+    source = tmp_path / "in.yaml"
+    _write(source, {"resources": {"jobs": {"my_job": {"tasks": []}}}})
+    first_directory = tmp_path / "first"
+    second_directory = tmp_path / "second"
+    first_directory.mkdir()
+    second_directory.mkdir()
+    linked_directory = tmp_path / "current"
+    linked_directory.symlink_to(first_directory, target_is_directory=True)
+
+    destination = job_spec.resolve_job_spec_destination(linked_directory / "out.yaml")
+    artifact = job_spec.prepare_job_spec("rendered\n", str(source), destination)
+    linked_directory.unlink()
+    linked_directory.symlink_to(second_directory, target_is_directory=True)
+
+    job_spec.write_job_spec(artifact)
+
+    assert (first_directory / "out.yaml").read_text(encoding="utf-8") == "rendered\n"
+    assert not (second_directory / "out.yaml").exists()
 
 
 def test_replace_tasks_write_is_atomic_on_failure(tmp_path, monkeypatch):

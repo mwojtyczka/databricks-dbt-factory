@@ -1,4 +1,5 @@
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -1166,3 +1167,125 @@ def test_task_limit_failure_publishes_no_cli_artifacts(monkeypatch, tmp_path):
 
     assert not list(tmp_path.glob("run_dbt_command_*.py"))
     assert not target.exists()
+
+
+def _runner_helper(name: str):
+    """
+    Compiles one top-level function out of the packaged runner notebook.
+
+    The runner is published standalone under a content-addressed name, so it cannot import from this
+    package and its helpers live inline. It also cannot be imported here: importing it executes
+    `dbutils` calls that only exist on a cluster. Parsing the source and compiling the single function
+    keeps the test on the shipped code rather than on a copy of it.
+    """
+    source = (
+        Path(__file__).resolve().parent.parent / "src" / "databricks_dbt_factory" / "notebook" / "run_dbt_command.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            namespace: dict = {}
+            compiled = compile(ast.Module(body=[node], type_ignores=[]), "<runner>", "exec")
+            exec(compiled, namespace)  # pylint: disable=exec-used
+            return namespace[name]
+    raise AssertionError(f"{name} not found in the packaged runner")
+
+
+def test_runner_normalizes_windows_paths_in_an_injected_manifest():
+    # A manifest parsed on Windows holds `models\marts\orders.sql`, and `original_file_path` survives the
+    # msgpack round-trip verbatim. The task injects that manifest and skips parsing, so dbt evaluates
+    # `Path('models\\marts\\orders.sql').name` under POSIX rules and gets the *whole string* back — no
+    # `file:` term the factory can emit will match it, and a zero-match selector exits 0, so the task
+    # goes green having built nothing.
+    #
+    # dbt writes `original_file_path` with the *parsing* platform's separator; every consumer here is
+    # Linux. Generation on Windows is a supported configuration (see the OS classifiers in
+    # pyproject.toml), so the runner normalizes rather than assuming the producer was POSIX.
+    normalize = _runner_helper("_normalize_manifest_paths")
+
+    nodes = {
+        'model.pkg.orders': _PathHolder('models\\marts\\orders.sql'),
+        'model.pkg.stg': _PathHolder('models/staging/stg.sql'),
+        'model.pkg.weird': _PathHolder('models/we\\ird.sql'),
+    }
+
+    class _Manifest:
+        pass
+
+    manifest = _Manifest()
+    manifest.nodes = nodes
+
+    normalize(manifest, ("nodes",))
+
+    assert nodes['model.pkg.orders'].original_file_path == 'models/marts/orders.sql'
+    # An already-POSIX path is untouched.
+    assert nodes['model.pkg.stg'].original_file_path == 'models/staging/stg.sql'
+    # A POSIX file name that legitimately contains a backslash is rewritten too: the two cases are
+    # indistinguishable in a bare string, and dbt cannot address such a node by `file:` either way,
+    # so normalizing costs nothing that was reachable.
+    assert nodes['model.pkg.weird'].original_file_path == 'models/we/ird.sql'
+
+
+def test_runner_normalizes_every_collection_a_file_term_can_reach():
+    # dbt's `FileSelectorMethod` iterates `SelectorMethod.all_nodes`, which chains eight collections —
+    # not just `nodes` and `sources`. Unit tests are the one that matters in practice, since the factory
+    # emits a `file:` term for them, but any collection left un-normalized keeps the same silent
+    # zero-match for that kind of resource.
+    normalize = _runner_helper("_normalize_manifest_paths")
+
+    class _Manifest:
+        def __init__(self):
+            for name in _SELECTABLE_COLLECTIONS:
+                setattr(self, name, {name: _PathHolder(f"models\\{name}.sql")})
+
+    manifest = _Manifest()
+
+    normalize(manifest, _SELECTABLE_COLLECTIONS)
+
+    left = {
+        name: holder.original_file_path
+        for name in _SELECTABLE_COLLECTIONS
+        for holder in getattr(manifest, name).values()
+        if "\\" in holder.original_file_path
+    }
+    assert left == {}, f"collections left holding Windows separators: {left}"
+
+
+def test_runner_skips_collections_a_older_dbt_does_not_have():
+    # The runner executes on a cluster with whatever dbt the user installed, which may predate a
+    # collection this list names (`functions` is new in 1.12). A missing attribute must skip that
+    # collection, not abort injection: the enclosing handler would fall back to a full parse, silently
+    # losing the optimization the msgpack exists to provide.
+    normalize = _runner_helper("_normalize_manifest_paths")
+
+    class _OldManifest:
+        def __init__(self):
+            self.nodes = {"a": _PathHolder("models\\a.sql")}
+            # no `functions`, as on an older dbt
+
+    manifest = _OldManifest()
+
+    normalize(manifest, ("nodes", "functions"))
+
+    assert manifest.nodes["a"].original_file_path == "models/a.sql"
+
+
+class _PathHolder:
+    """Stands in for any manifest member carrying an `original_file_path`."""
+
+    def __init__(self, path):
+        self.original_file_path = path
+
+
+# The collections dbt 1.12.0's `SelectorMethod.all_nodes` chains, and therefore every collection a
+# `file:` term can reach.
+_SELECTABLE_COLLECTIONS = (
+    "nodes",
+    "sources",
+    "exposures",
+    "metrics",
+    "unit_tests",
+    "semantic_models",
+    "saved_queries",
+    "functions",
+)

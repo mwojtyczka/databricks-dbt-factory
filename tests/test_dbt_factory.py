@@ -1713,10 +1713,9 @@ def test_selector_index_narrowing_matches_a_full_scan(dbt_factory):
 
     for info in peers.values():
         select = DbtFactory._node_select(info)
-        for ignore_resource_type in (False, True):
-            scanned = sorted(DbtFactory._matching_ids(select, peers, ignore_resource_type=ignore_resource_type))
-            narrowed = sorted(DbtFactory._matching_ids(select, index, ignore_resource_type=ignore_resource_type))
-            assert narrowed == scanned, f'{select!r} narrowed to {narrowed}, full scan gives {scanned}'
+        scanned = sorted(DbtFactory._matching_ids(select, peers))
+        narrowed = sorted(DbtFactory._matching_ids(select, index))
+        assert narrowed == scanned, f'{select!r} narrowed to {narrowed}, full scan gives {scanned}'
 
 
 def test_source_term_matches_only_the_named_source():
@@ -1827,3 +1826,21 @@ def test_leading_graph_operators_are_literal_under_an_explicit_fqn(dbt_factory, 
     assert [t['dbt_task']['commands'][0] for t in tasks] == [
         f'dbt run --select fqn:pkg.{name},package:pkg,file:{name}.sql,resource_type:model --target dev'
     ]
+
+
+def test_bundled_test_for_a_parent_without_a_task_factory_is_refused():
+    # `_node_gets_own_task` gates on `resource_type not in task_factories`, so a library caller may
+    # legitimately register a subset. In bundled mode the tested parent's task key was then looked up
+    # unconditionally, raising `KeyError` — which escapes `main`'s `except (ValueError, FileNotFoundError)`
+    # and prints a traceback instead of naming the resource. Per-test mode handles the same manifest.
+    resolver = DbtDependencyResolver()
+    task_options = DbtTaskOptions(source="GIT", environment_key="Default", task_type="dbt")
+    factory = DbtFactory(
+        {'test': DbtTestTaskFactory(resolver, task_options, "--target dev")},
+        bundle_tests=True,
+    )
+    seed_name, seed_info = _seed('pkg', 'countries')
+    test_name, test_info = _test('pkg', 'not_null_countries_id', [seed_name], test_name='not_null')
+
+    with pytest.raises(ValueError, match=seed_name):
+        factory.create_tasks({'nodes': {seed_name: seed_info, test_name: test_info}})

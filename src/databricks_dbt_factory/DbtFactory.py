@@ -250,7 +250,9 @@ class DbtFactory:
         #
         # It does *not* undo dbt's indirect selection: `resource_type:test` still admits the attached
         # tests eagerly pulled in with a selected model, because dbt intersects sets that are already
-        # expanded. Nodes needing that are refused by `_assert_exact` instead.
+        # expanded. Suppressing that expansion is the selection plan's job, not this term's: direct test
+        # plans pin `--indirect-selection empty`, and parent-scoped cautious plans are accepted only when
+        # `_eager_expansion_superset` proves the expanded result is the intended test alone.
         resource_type = node_info.get('resource_type') or ''
         if cls._is_usable_component(resource_type):
             terms.append(f'resource_type:{resource_type}')
@@ -583,21 +585,21 @@ class DbtFactory:
         return _SelectorIndex(peers)
 
     @classmethod
-    def _matching_ids(cls, select: str, candidates: dict, ignore_resource_type: bool = False) -> list[str]:
+    def _matching_ids(cls, select: str, candidates: dict) -> list[str]:
         """
         The ids in `candidates` that `select` matches, by intersecting every term as dbt does.
 
-        `ignore_resource_type` answers a different question: which nodes the selector would reach if
-        the resource-type filter were not applied. dbt expands indirect selection *before* intersecting
-        that filter, so a test selector that also matches a model drags in that model's attached tests
-        under the default eager mode — a collision `resource_type:` cannot undo.
+        This is a *direct* match: it does not model dbt's indirect selection, so it is only exactness
+        evidence for a plan that suppresses expansion. Direct test plans pin `--indirect-selection empty`
+        and so need nothing further; parent-scoped cautious plans are proved instead by
+        `_eager_expansion_superset`, which expands each term itself.
 
         `candidates` should be a `_SelectorIndex` on any real manifest: scanning every node for every
         node is quadratic, and measurably so — 90 seconds for a 6,000-node manifest. The index narrows the
         scan to the nodes sharing this selector's `package:` and `file:`, which is a handful. A plain dict
         still works, for the unit tests and library callers that pass one.
         """
-        terms = [term for term in select.split(',') if not (ignore_resource_type and term.startswith('resource_type:'))]
+        terms = select.split(',')
         scan = candidates.narrow(terms) if isinstance(candidates, _SelectorIndex) else candidates
         matched: list[str] = []
         for full_name, info in scan.items():
@@ -1111,6 +1113,18 @@ class DbtFactory:
         for full_name, tests in sorted(bundled_tests.items()):
             is_source = full_name.startswith('source.')
             info = dbt_sources[full_name] if is_source else dbt_nodes[full_name]
+            # A source never gets a task of its own, so it has no gate. Any other parent must, or the
+            # bundle would run its tests with nothing ordering them after the resource was built. Raise
+            # rather than emit the ungated task: `resource_type` having no registered factory is a
+            # supported library configuration (see `_node_gets_own_task`), and a `KeyError` here would
+            # escape `main`'s handler as a traceback that names no resource.
+            if not is_source and full_name not in task_keys:
+                raise ValueError(
+                    f'Cannot bundle the tests of {full_name!r}: no task was generated for it, so the '
+                    f'bundled test task would run unordered against it. Register a task factory for '
+                    f'{info.get("resource_type")!r} resources, or generate one task per test instead of '
+                    f'bundling.'
+                )
             tasks.append(
                 test_factory.create_bundled_task(
                     task_key=bundled_test_keys[full_name],

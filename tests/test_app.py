@@ -1234,10 +1234,12 @@ def test_runner_normalizes_windows_paths_in_an_injected_manifest():
     assert nodes['model.pkg.orders'].original_file_path == 'models/marts/orders.sql'
     # An already-POSIX path is untouched.
     assert nodes['model.pkg.stg'].original_file_path == 'models/staging/stg.sql'
-    # A POSIX file name that legitimately contains a backslash is rewritten too: the two cases are
-    # indistinguishable in a bare string, and dbt cannot address such a node by `file:` either way,
-    # so normalizing costs nothing that was reachable.
-    assert nodes['model.pkg.weird'].original_file_path == 'models/we/ird.sql'
+    # A POSIX file name that legitimately contains a backslash must be left alone: a backslash is a
+    # separator only when the path has no `/`. The factory's `_base_file_name` uses the same guard to
+    # emit `file:we\ird.sql`, so rewriting the path to `models/we/ird.sql` here would make dbt's
+    # `Path(...).name` yield `ird.sql` and that selector match nothing — confirmed against dbt in
+    # tests/integration/test_selector_against_dbt.py::test_injected_manifest_resolves_the_factory_selector.
+    assert nodes['model.pkg.weird'].original_file_path == 'models/we\\ird.sql'
 
 
 def test_runner_normalizes_every_collection_a_file_term_can_reach():

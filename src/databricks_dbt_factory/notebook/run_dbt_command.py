@@ -71,7 +71,7 @@ _SELECTABLE_COLLECTIONS = (
 
 def _normalize_manifest_paths(manifest, collections):
     """
-    Rewrites `original_file_path` to POSIX separators throughout an injected manifest.
+    Rewrites Windows `original_file_path` separators to POSIX throughout an injected manifest.
 
     dbt assembles `original_file_path` with the *parsing* platform's separator and `FileSelectorMethod`
     splits it back with `Path(...).name`, which is also platform-dependent. A manifest parsed on Windows
@@ -79,9 +79,13 @@ def _normalize_manifest_paths(manifest, collections):
     Injecting it here — on Linux, with the parse skipped — makes `Path(...).name` return the whole string,
     so no `file:` term the factory emits can match and the task exits 0 having built nothing.
 
-    Generation on Windows is a supported configuration, so normalize rather than assume the producer was
-    POSIX. A POSIX file name that legitimately contains a backslash is rewritten too: the two cases are
-    indistinguishable in a bare string, and dbt cannot address such a node by `file:` either way.
+    A backslash is treated as a separator only when the path contains no `/`. A manifest generated on
+    Windows uses `\\` throughout, while a POSIX path whose file name legitimately contains a backslash
+    (`models/we\\ird.sql`) still has `/` separators — rewriting its backslash would make `Path(...).name`
+    yield `ird.sql` and the factory's `file:we\\ird.sql` match nothing, the same silent no-op inflicted on
+    a valid project. This mirrors the `/`-guard the factory's `_base_file_name` uses to emit the term, and
+    decides by the path's own separators rather than the running platform because the spec is generated on
+    one machine and consumed by a Linux job. Confirmed with `dbt ls` on dbt 1.11.6.
 
     A collection the installed dbt does not have is skipped: aborting would fall back to a full parse and
     silently lose the optimization the msgpack exists to provide.
@@ -89,7 +93,7 @@ def _normalize_manifest_paths(manifest, collections):
     for name in collections:
         for member in getattr(manifest, name, {}).values():
             path = getattr(member, "original_file_path", None)
-            if isinstance(path, str) and "\\" in path:
+            if isinstance(path, str) and "\\" in path and "/" not in path:
                 member.original_file_path = path.replace("\\", "/")
 
 

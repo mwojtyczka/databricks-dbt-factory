@@ -1,3 +1,5 @@
+# pylint: disable=too-many-lines
+
 import os
 import random
 import shlex
@@ -1679,17 +1681,54 @@ def test_versioned_models_sharing_a_bare_name_still_generate(dbt_factory):
     }
 
 
-def test_windows_manifest_path_yields_the_bare_file_name(dbt_factory):
-    # dbt builds `original_file_path` with os.path.join, so a manifest parsed on Windows carries
-    # backslashes while dbt's own FileSelectorMethod compares `Path(original_file_path).name`. Emitting
-    # the whole backslash path would match nothing, so the task would build nothing and still exit 0.
+def test_path_with_platform_dependent_basename_omits_the_file_term(dbt_factory):
+    # The same bare string can be a Windows hierarchy or a literal POSIX file name, and manifest JSON
+    # records no producer platform. `file:` is safe only when both interpretations yield the same base
+    # name; the remaining terms are still exact for this node.
     nodes = dict([_model('pkg', 'orders', fqn=['pkg', 'marts', 'orders'], path='models\\marts\\orders.sql')])
 
     tasks = dbt_factory.create_tasks({'nodes': nodes})
 
     assert [t['dbt_task']['commands'][0] for t in tasks] == [
-        'dbt run --select fqn:pkg.marts.orders,package:pkg,file:orders.sql,resource_type:model --target dev'
+        'dbt run --select fqn:pkg.marts.orders,package:pkg,resource_type:model --target dev'
     ]
+
+
+def test_ambiguous_path_refuses_an_fqn_prefix_collision_after_dropping_file(dbt_factory):
+    """A non-portable `file:` term cannot be used to hide an FQN-prefix collision."""
+    nodes = dict(
+        [
+            _model('pkg', 'a', fqn=['pkg', 'a'], path='models\\a.sql'),
+            _model('pkg', 'b', fqn=['pkg', 'a', 'b'], path='models\\a\\b.sql'),
+        ]
+    )
+
+    with pytest.raises(ValueError, match=r'also runs model\.pkg\.b'):
+        dbt_factory.create_tasks({'nodes': nodes})
+
+
+def test_file_exactness_considers_every_basename_of_an_ambiguous_peer():
+    """A safe `file:` term must account for either interpretation of another node's path."""
+    _, safe = _test(
+        'pkg',
+        'check',
+        ['model.pkg.a', 'model.pkg.b'],
+        path='models/right.yml',
+        test_name='relationships',
+    )
+    _, ambiguous = _test(
+        'pkg',
+        'check',
+        ['model.pkg.c', 'model.pkg.d'],
+        path='models\\other\\right.yml',
+        test_name='relationships',
+    )
+    peers = DbtFactory._selector_index(  # pylint: disable=protected-access
+        {'test.pkg.check.safe': safe, 'test.pkg.check.ambiguous': ambiguous}
+    )
+
+    with pytest.raises(ValueError, match='also runs test.pkg.check.ambiguous'):
+        DbtFactory._node_select(safe, peers=peers)  # pylint: disable=protected-access
 
 
 def test_unit_test_clone_is_emitted_when_its_model_version_is_present(dbt_factory):
@@ -1761,12 +1800,31 @@ def test_selector_index_narrowing_matches_a_full_scan(dbt_factory):
         assert narrowed == scanned, f'{select!r} narrowed to {narrowed}, full scan gives {scanned}'
 
 
+def test_fqn_index_narrows_a_large_manifest_when_file_terms_are_ambiguous():
+    """An exact FQN remains an efficient index key when platform-dependent paths omit `file:`."""
+    peers = dict(
+        _model(
+            'pkg',
+            f'model_{index:04d}',
+            fqn=['pkg', 'marts', f'model_{index:04d}'],
+            path=f'models\\marts\\model_{index:04d}.sql',
+        )
+        for index in range(1_000)
+    )
+    index = DbtFactory._selector_index(peers)
+    target_id = 'model.pkg.model_0500'
+    select = DbtFactory._node_select(peers[target_id])
+
+    assert 'file:' not in select
+    assert set(index.narrow(select.split(','))) == {target_id}
+
+
 def _random_model_layout(seed: int, size: int) -> dict:
     """
     A randomised set of model peers built to collide on fqn tokens.
 
     dbt's fqn semantics live in three places that must agree — the truth (`_fqn_term_matches`), the
-    keys a node is filed under (`_SelectorIndex._fqn_keys`), and the keys a term is looked up under
+    terms a node is filed under (`_SelectorIndex._fqn_terms`), and the keys a term is looked up under
     (`_fqn_candidates`). Small pools of packages and segment words force shared prefixes, shared
     leaves, package-stripping overlaps, dotted names, and versioned models — the shapes on which a
     divergence between the three would surface.
@@ -1814,7 +1872,7 @@ def test_fqn_index_bucket_is_a_superset_of_the_truth_over_random_layouts(seed):
     # The soundness invariant behind the whole exactness check: whenever the truth predicate says an
     # fqn term matches a node, the index must file that node in the term's candidate bucket — otherwise
     # `narrow` hands `_matching_ids` a bucket missing a real collision and a non-exact selector passes
-    # `_assert_exact`. This couples `_fqn_term_matches` (truth), `_fqn_keys` (fills buckets) and
+    # `_assert_exact`. This couples `_fqn_term_matches` (truth), `_fqn_terms` (fills buckets) and
     # `_fqn_candidates` (reads them) directly, so a future edit to any one that diverges fails here
     # rather than surfacing as a task that runs another resource. The bucket may be a *superset* (that
     # only costs a wasted predicate eval), so only the subset direction is asserted.

@@ -419,6 +419,12 @@ dbt run  --select fqn:my_project.sql_model1.zzz_game_details,package:my_project,
 dbt test --select fqn:my_project.models.sql_model1.unique_zzz_game_details_game_id,package:my_project,file:schemas.yml,resource_type:test,test_name:unique
 ```
 
+The `file:` term is included only when the manifest path has the same base name under POSIX and
+Windows semantics. Manifest JSON does not record which platform produced paths containing a
+backslash, so the factory omits that ambiguous discriminator and proves the remaining selector exact
+instead. The notebook runner injects the pre-built manifest unchanged; generation fails if the other
+terms cannot isolate the resource.
+
 Each selector is then checked against the manifest, because an FQN is a *prefix* over dbt's flattened
 FQN rather than an identifier: a test named `check.nested` is also matched by its sibling `check`'s
 selector. A directly exact test selector runs with indirect selection disabled. For an ambiguous test

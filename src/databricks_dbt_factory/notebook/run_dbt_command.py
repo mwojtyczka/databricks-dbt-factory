@@ -55,48 +55,6 @@ os.environ["DBT_TARGET_PATH"] = local_dir
 os.environ["DBT_LOG_PATH"] = local_dir
 
 
-# Every collection dbt's `SelectorMethod.all_nodes` chains, and therefore every collection a `file:`
-# term can reach. A dbt that predates one of these simply lacks the attribute and is skipped.
-_SELECTABLE_COLLECTIONS = (
-    "nodes",
-    "sources",
-    "exposures",
-    "metrics",
-    "unit_tests",
-    "semantic_models",
-    "saved_queries",
-    "functions",
-)
-
-
-def _normalize_manifest_paths(manifest, collections):
-    """
-    Rewrites Windows `original_file_path` separators to POSIX throughout an injected manifest.
-
-    dbt assembles `original_file_path` with the *parsing* platform's separator and `FileSelectorMethod`
-    splits it back with `Path(...).name`, which is also platform-dependent. A manifest parsed on Windows
-    therefore holds `models\\marts\\orders.sql`, and the value survives the msgpack round-trip verbatim.
-    Injecting it here — on Linux, with the parse skipped — makes `Path(...).name` return the whole string,
-    so no `file:` term the factory emits can match and the task exits 0 having built nothing.
-
-    A backslash is treated as a separator only when the path contains no `/`. A manifest generated on
-    Windows uses `\\` throughout, while a POSIX path whose file name legitimately contains a backslash
-    (`models/we\\ird.sql`) still has `/` separators — rewriting its backslash would make `Path(...).name`
-    yield `ird.sql` and the factory's `file:we\\ird.sql` match nothing, the same silent no-op inflicted on
-    a valid project. This mirrors the `/`-guard the factory's `_base_file_name` uses to emit the term, and
-    decides by the path's own separators rather than the running platform because the spec is generated on
-    one machine and consumed by a Linux job. Confirmed with `dbt ls` on dbt 1.11.6.
-
-    A collection the installed dbt does not have is skipped: aborting would fall back to a full parse and
-    silently lose the optimization the msgpack exists to provide.
-    """
-    for name in collections:
-        for member in getattr(manifest, name, {}).values():
-            path = getattr(member, "original_file_path", None)
-            if isinstance(path, str) and "\\" in path and "/" not in path:
-                member.original_file_path = path.replace("\\", "/")
-
-
 # If a pre-built msgpack sits next to the project, deserialize it into a manifest and inject it into
 # dbtRunner to skip dbt's parse phase (re-reading/hashing every file + DAG rebuild) on each task.
 # Falls back to a normal parse if the msgpack is absent or unusable.
@@ -108,8 +66,6 @@ if os.path.exists(prebuilt_manifest_path):
 
         with open(prebuilt_manifest_path, "rb") as f:
             manifest = Manifest.from_msgpack(f.read())
-        # Before `build_flat_graph`, so the flat graph carries the normalized paths too.
-        _normalize_manifest_paths(manifest, _SELECTABLE_COLLECTIONS)
         manifest.build_flat_graph()
         print(f"[dbt-factory] injecting pre-built manifest from {prebuilt_manifest_path} (skipping dbt parse)")
     except Exception as e:

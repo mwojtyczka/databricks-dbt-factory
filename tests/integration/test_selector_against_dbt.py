@@ -20,15 +20,16 @@ machine where dbt happened to be missing.
 
 # pylint: disable=too-many-lines
 
-import ast
 import functools
 import json
 import os
 import random
 import re
+import runpy
 import shlex
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from dbt.cli.main import dbtRunner, dbtRunnerResult
@@ -58,15 +59,20 @@ def _write_project(
     model_paths: dict[str, str],
     schema_yml: str | None = None,
     package_model_paths: dict[str, str] | None = None,
+    model_search_path: str = 'models',
 ) -> None:
     """
     Writes a minimal dbt project.
 
-    `model_paths` maps a path under `models/` to its SQL. `package_model_paths` does the same for an
-    installed local package named `other`, whose nodes carry package-relative `original_file_path`s
-    and are matched by dbt on their package-stripped fqn — behaviour no root-only layout can exercise.
+    `model_paths` maps a path under `model_search_path` to its SQL; the search path may be empty for
+    root models. `package_model_paths` does the same under `models/` for an installed local package
+    named `other`, whose nodes carry package-relative `original_file_path`s and are matched by dbt on
+    their package-stripped fqn — behaviour no root-only layout can exercise.
     """
-    project = 'name: probe\nprofile: probe\nversion: "1.0"\nconfig-version: 2\nmodel-paths: ["models"]\n'
+    project = (
+        'name: probe\nprofile: probe\nversion: "1.0"\nconfig-version: 2\n'
+        f'model-paths: [{json.dumps(model_search_path)}]\n'
+    )
     if package_model_paths:
         # A distinct schema keeps the two packages' relations from colliding, which dbt rejects.
         project += 'models:\n  other:\n    +schema: otherschema\n'
@@ -83,11 +89,11 @@ def _write_project(
     (root / 'dbt_project.yml').write_text(project, encoding='utf-8')
     (root / 'profiles.yml').write_text(PROFILES, encoding='utf-8')
     for relative_path, sql in model_paths.items():
-        target = root / 'models' / relative_path
+        target = root / model_search_path / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(sql, encoding='utf-8')
     if schema_yml is not None:
-        (root / 'models' / 'schema.yml').write_text(schema_yml, encoding='utf-8')
+        (root / model_search_path / 'schema.yml').write_text(schema_yml, encoding='utf-8')
     if package_model_paths:
         result = _dbt(root, 'deps', '--quiet')
         assert result.success, f'dbt deps failed for the generated project: {result.exception}'
@@ -1952,16 +1958,21 @@ def test_a_downstream_model_is_gated_on_the_exact_versioned_unit_test(tmp_path):
     assert v2_test not in by_key['consumer_model']
 
 
-def test_backslash_in_a_posix_file_name_keeps_its_file_term(tmp_path):
+def test_backslash_in_a_posix_file_name_remains_exact_without_a_file_term(tmp_path):
     """
-    dbt splits `original_file_path` with `Path`, which is platform-dependent, so on POSIX a backslash is
-    an ordinary character in a file name. Treating it as a separator turned `models/we\\ird.sql` into
-    `file:ird.sql`, which `dbt ls` resolves to nothing while the task exits 0 — the same silent no-op the
-    Windows handling was added to prevent.
+    POSIX treats the backslash as a literal file-name character while Windows treats it as a separator.
+    The invariant selector omits `file:` and the remaining terms still resolve exactly.
     """
     _write_project(tmp_path, {'we\\ird.sql': MODEL_SQL, 'plain.sql': MODEL_SQL})
     manifest = _parse(tmp_path)
+    task_to_id = _task_key_to_unique_id(manifest, bundle_tests=False)
+    selectors = next(
+        selectors
+        for task_key, selectors, verb in _resource_selectors(manifest, bundle_tests=False)
+        if verb == 'run' and task_to_id[task_key] == 'model.probe.we\\ird'
+    )
 
+    assert all(not term.startswith('file:') for term in selectors[0].split(','))
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
@@ -2507,74 +2518,117 @@ def _random_gating_project(rng: random.Random) -> tuple[dict[str, str], str]:
     return files, schema
 
 
-@functools.lru_cache(maxsize=None)
-def _shipped_runner_function(name: str):
-    """
-    Compiles one self-contained top-level function out of the packaged runner notebook.
+class _NotebookValue:
+    """A Databricks context value exposing the notebook API's `.get()` contract."""
 
-    The runner cannot be imported (it runs `dbutils` at module scope on a cluster), so the test drives
-    the *shipped* `_normalize_manifest_paths` by parsing the source and compiling that one function —
-    testing a copy would let the runtime path drift from what the unit tests assert about the source.
-    Cached: the source is read and parsed once rather than on every replay.
-    """
-    source = (
-        Path(__file__).resolve().parents[2] / 'src' / 'databricks_dbt_factory' / 'notebook' / 'run_dbt_command.py'
-    ).read_text(encoding='utf-8')
-    for node in ast.parse(source).body:
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            namespace: dict = {}
-            compiled = compile(ast.Module(body=[node], type_ignores=[]), '<runner>', 'exec')
-            exec(compiled, namespace)  # pylint: disable=exec-used
-            return namespace[name]
-    raise AssertionError(f'{name} not found in the packaged runner')
+    def __init__(self, value: str):
+        self._value = value
+
+    def get(self) -> str:
+        return self._value
 
 
-def _inject_and_list(msgpack: bytes, root: Path, select: str, mangle=None) -> tuple[str, ...]:
-    """
-    Replays a task's runtime path: deserialize the msgpack, run the shipped `_normalize_manifest_paths`,
-    inject the manifest into a `dbtRunner`, and resolve `select` through `dbt ls` — returning the unique
-    ids, exactly as a notebook task would reach them. `mangle`, if given, edits the deserialized manifest
-    before normalization (used to stand in for a producer that parsed on Windows).
-    """
-    manifest = Manifest.from_msgpack(msgpack)
-    if mangle is not None:
-        mangle(manifest)
-    _shipped_runner_function('_normalize_manifest_paths')(manifest, ('nodes',))
-    manifest.build_flat_graph()
-    result = dbtRunner(manifest=manifest).invoke(
-        [
-            'ls',
-            '--quiet',
-            '--select',
-            select,
-            '--output',
-            'json',
-            '--output-keys',
-            'unique_id',
-            '--project-dir',
-            str(root),
-            '--profiles-dir',
-            str(root),
-        ]
+class _NotebookWidgets:
+    """The widget surface used by the packaged runner."""
+
+    def __init__(self, values: dict[str, str]):
+        self._values = values
+
+    @staticmethod
+    def text(_name: str, _default: str) -> None:
+        return None
+
+    def get(self, name: str) -> str:
+        return self._values[name]
+
+
+def _notebook_dbutils(values: dict[str, str]):
+    """Builds the minimal `dbutils` object needed to execute the packaged notebook locally."""
+    context = SimpleNamespace(
+        apiToken=lambda: _NotebookValue('token'),
+        apiUrl=lambda: _NotebookValue('https://example.databricks.com/'),
+        notebookPath=lambda: _NotebookValue('/Workspace/project/run_dbt_command.py'),
     )
-    assert result.success, f'dbt ls failed for {select!r}: {result.exception}'
-    assert isinstance(result.result, list), f'expected dbt ls to return a list, got {type(result.result)}'
+    notebook = SimpleNamespace(getContext=lambda: context)
+    backend = SimpleNamespace(notebook=lambda: notebook)
+    entry_point = SimpleNamespace(getDbutils=lambda: backend)
+    return SimpleNamespace(widgets=_NotebookWidgets(values), notebook=SimpleNamespace(entry_point=entry_point))
+
+
+def _run_shipped_notebook(monkeypatch, root: Path, selectors: tuple[str, ...]) -> dict:
+    """Executes the complete packaged notebook and returns its module globals."""
+    select_args = ' '.join(f'--select {shlex.quote(selector)}' for selector in selectors)
+    command = (
+        f'dbt ls --quiet {select_args} --output json --output-keys unique_id ' f'--project-dir {shlex.quote(str(root))}'
+    )
+    values = {
+        'dbt_commands': json.dumps([command]),
+        'project_directory': '',
+        'profiles_directory': str(root),
+    }
+    runner_path = (
+        Path(__file__).resolve().parents[2] / 'src' / 'databricks_dbt_factory' / 'notebook' / 'run_dbt_command.py'
+    )
+    with monkeypatch.context() as execution:
+        execution.chdir(root)
+        for name in ('DBT_ACCESS_TOKEN', 'DBT_HOST', 'DBT_TARGET_PATH', 'DBT_LOG_PATH'):
+            execution.setenv(name, os.environ.get(name, ''))
+        return runpy.run_path(str(runner_path), init_globals={'dbutils': _notebook_dbutils(values)})
+
+
+def _runner_result_ids(namespace: dict) -> tuple[str, ...]:
+    """Returns the exact unique ids from the packaged notebook's final dbt invocation."""
+    result = namespace['result']
+    assert result.success, result.exception
+    assert isinstance(result.result, list)
     return tuple(sorted(json.loads(entry)['unique_id'] for entry in result.result))
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='a backslash is a path separator on Windows')
+def test_separator_free_posix_backslash_path_omits_the_ambiguous_file_term(tmp_path, monkeypatch):
+    """
+    A backslash-only path does not prove whether the manifest was parsed on Windows or whether the
+    backslash is a literal POSIX file-name character. Omitting `file:` lets the remaining terms address
+    the node consistently in native and injected execution; if they were not exact, generation would
+    refuse the task rather than guess the producer's path style.
+    """
+    schema_yml = """\
+version: 2
+models:
+  - name: orders
+    versions:
+      - v: 1
+        defined_in: 'we\\ird'
+"""
+    _write_project(tmp_path, {'we\\ird.sql': MODEL_SQL}, schema_yml=schema_yml, model_search_path='')
+    manifest = _parse(tmp_path)
+    unique_id = 'model.probe.orders.v1'
+    resources = _resource_selectors(manifest, bundle_tests=False)
+
+    assert len(resources) == 1
+    _task_key, selectors, verb = resources[0]
+    assert verb == 'run'
+    assert len(selectors) == 1
+    assert all(not term.startswith('file:') for term in selectors[0].split(','))
+    assert _selected_unique_ids(tmp_path, selectors, 'model') == (unique_id,)
+
+    namespace = _run_shipped_notebook(monkeypatch, tmp_path, selectors)
+    runner = namespace['runner']
+    assert runner.manifest is not None
+    assert runner.manifest.nodes[unique_id].original_file_path == 'we\\ird.sql'
+    assert runner.manifest.flat_graph['nodes'][unique_id]['original_file_path'] == 'we\\ird.sql'
+    assert _runner_result_ids(namespace) == (unique_id,)
 
 
 @pytest.mark.parametrize(
     ('unique_id', 'simulate_windows'),
     [
-        # A model parsed on Windows: its `original_file_path` uses `\` throughout. Normalization must
-        # rewrite it so dbt's `Path(...).name` (POSIX, on the cluster) recovers `orders.sql` and the
-        # factory's `file:orders.sql` matches — otherwise the task exits 0 having built nothing.
+        # A model parsed on Windows: its `original_file_path` uses `\` throughout. The manifest does not
+        # record that producer platform, so the factory omits `file:` and the Linux runner injects the
+        # path unchanged rather than guessing how to reinterpret it.
         pytest.param('model.probe.orders', True, id='windows-separators'),
-        # A POSIX file whose name legitimately contains a backslash: the path already uses `/`
-        # separators, so normalization must leave the backslash alone. Rewriting it to `models/we/ird.sql`
-        # makes `Path(...).name` yield `ird.sql`, and the factory's `file:we\ird.sql` matches nothing —
-        # the same silent green no-op, now inflicted on a valid POSIX project. Skipped on Windows, where a
-        # backslash is a path separator: `_write_project` cannot create a file with that name (it becomes a
-        # subdirectory), so this POSIX-only branch is unreachable there.
+        # A POSIX file whose name legitimately contains a backslash is the other interpretation the same
+        # bare string can carry. The selector and injected manifest follow the same invariant rule.
         pytest.param(
             'model.probe.we\\ird',
             False,
@@ -2583,23 +2637,78 @@ def _inject_and_list(msgpack: bytes, root: Path, select: str, mangle=None) -> tu
         ),
     ],
 )
-def test_injected_manifest_resolves_the_factory_selector(tmp_path, unique_id, simulate_windows):
+def test_shipped_runner_injects_manifest_and_resolves_factory_selector(
+    tmp_path, monkeypatch, unique_id, simulate_windows
+):
     _write_project(
         tmp_path,
         {'marts/orders.sql': MODEL_SQL, 'we\\ird.sql': MODEL_SQL},
     )
     manifest = _parse(tmp_path)
-    select = DbtFactory._node_select(manifest['nodes'][unique_id])  # pylint: disable=protected-access
-    msgpack = (tmp_path / 'target' / 'partial_parse.msgpack').read_bytes()
+    injected = Manifest.from_msgpack((tmp_path / 'target' / 'partial_parse.msgpack').read_bytes())
+    if simulate_windows:
+        windows_path = manifest['nodes'][unique_id]['original_file_path'].replace('/', '\\')
+        manifest['nodes'][unique_id]['original_file_path'] = windows_path
+        injected.nodes[unique_id].original_file_path = windows_path
 
-    # dbt on Windows writes `\` separators; the msgpack round-trips them verbatim. The local parse
-    # produced POSIX paths, so mangle this node's path to backslashes to stand in for that producer.
-    def _to_windows(injected: Manifest) -> None:
-        node = injected.nodes[unique_id]
-        node.original_file_path = node.original_file_path.replace('/', '\\')
+    expected_path = manifest['nodes'][unique_id]['original_file_path']
+    task_to_id = _task_key_to_unique_id(manifest, bundle_tests=False)
+    selectors = next(
+        selectors
+        for task_key, selectors, verb in _resource_selectors(manifest, bundle_tests=False)
+        if verb == 'run' and task_to_id[task_key] == unique_id
+    )
+    assert all(not term.startswith('file:') for term in selectors[0].split(','))
+    assert _selected_unique_ids(tmp_path, selectors, 'model') == (unique_id,)
 
-    mangle = _to_windows if simulate_windows else None
-    assert _inject_and_list(msgpack, tmp_path, select, mangle=mangle) == (unique_id,)
+    if simulate_windows:
+        # Keep the native assertion above independent of the simulated-Windows artifact. dbt can reuse
+        # `partial_parse.msgpack`, so writing the mangled copy earlier would let that check confirm the
+        # same injected path the notebook is meant to validate.
+        (tmp_path / 'target' / 'partial_parse.msgpack').write_bytes(injected.to_msgpack())
+
+    namespace = _run_shipped_notebook(monkeypatch, tmp_path, selectors)
+    runner = namespace['runner']
+    assert runner.manifest is not None
+    assert runner.manifest.nodes[unique_id].original_file_path == expected_path
+    assert runner.manifest.flat_graph['nodes'][unique_id]['original_file_path'] == expected_path
+    assert _runner_result_ids(namespace) == (unique_id,)
+
+
+@pytest.mark.parametrize(
+    ('artifact_contents', 'expects_fallback_message'),
+    [
+        pytest.param(None, False, id='missing'),
+        pytest.param(b'not a dbt msgpack artifact', True, id='corrupt'),
+    ],
+)
+def test_shipped_runner_falls_back_to_live_parse_when_manifest_is_unavailable(
+    tmp_path, monkeypatch, capsys, artifact_contents, expects_fallback_message
+):
+    """Missing or unreadable pre-built manifests must still execute the exact factory selector."""
+    _write_project(tmp_path, {'orders.sql': MODEL_SQL})
+    manifest = _parse(tmp_path)
+    unique_id = 'model.probe.orders'
+    resources = _resource_selectors(manifest, bundle_tests=False)
+
+    assert len(resources) == 1
+    _task_key, selectors, verb = resources[0]
+    assert verb == 'run'
+    assert _selected_unique_ids(tmp_path, selectors, 'model') == (unique_id,)
+
+    artifact = tmp_path / 'target' / 'partial_parse.msgpack'
+    if artifact_contents is None:
+        artifact.unlink()
+    else:
+        artifact.write_bytes(artifact_contents)
+
+    namespace = _run_shipped_notebook(monkeypatch, tmp_path, selectors)
+    output = capsys.readouterr().out
+    fallback_message = '[dbt-factory] manifest injection unavailable, falling back to dbt parse:'
+
+    assert namespace['runner'].manifest is None
+    assert _runner_result_ids(namespace) == (unique_id,)
+    assert (fallback_message in output) is expects_fallback_message
 
 
 @pytest.mark.parametrize('seed', range(12))

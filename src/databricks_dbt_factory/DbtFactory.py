@@ -47,27 +47,28 @@ class _Gating:
     eligible_test_keys: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
+def _candidate_file_names(original_file_path: str) -> frozenset[str]:
+    """Returns every base name implied by POSIX and Windows path semantics."""
+    return frozenset(
+        {
+            PurePosixPath(original_file_path).name,
+            PureWindowsPath(original_file_path).name,
+        }
+    )
+
+
 def _base_file_name(original_file_path: str) -> str:
     """
-    Returns the base name dbt's `file:` selector matches.
+    Returns the path-flavour-invariant base name dbt's `file:` selector matches.
 
     dbt assembles `original_file_path` with `os.path.join`/`os.path.relpath` and `FileSelectorMethod`
-    splits it back with `Path(...).name` — both *platform-dependent*. So a manifest parsed on Windows
-    holds `models\\marts\\orders.sql`, and there `\\` is the separator; on POSIX the same string is a
-    single file whose name legitimately contains a backslash.
-
-    Splitting on both separators unconditionally gets the POSIX case wrong: for `models/we\\ird.sql` it
-    yields `ird.sql`, and the emitted `file:ird.sql` matches nothing while the task exits 0 — the same
-    silent no-op it was meant to prevent, confirmed with `dbt ls` on dbt 1.12.0.
-
-    So treat `\\` as a separator only when the path contains no `/`. A manifest generated on Windows uses
-    `\\` throughout, while a POSIX path with a backslash in a file name still has `/` separators, which
-    distinguishes the two without guessing at the *running* platform — the spec is generated on one
-    machine and consumed by a Linux job, so `os.sep` here would be the wrong question.
+    splits it with `Path(...).name`, so a path containing a backslash can mean either a Windows hierarchy
+    or a literal POSIX file name. Manifest JSON carries no producer-platform metadata. A `file:` term
+    is therefore emitted only when both path flavours yield the same base name; otherwise the remaining
+    selector terms must prove exactness or generation refuses the resource.
     """
-    if '/' in original_file_path:
-        return PurePosixPath(original_file_path).name
-    return PureWindowsPath(original_file_path).name
+    candidates = _candidate_file_names(original_file_path)
+    return next(iter(candidates)) if len(candidates) == 1 else ''
 
 
 class DbtFactory:
@@ -571,8 +572,10 @@ class DbtFactory:
             # matches a node declared in `a.yml.yml`. Mirroring only the name would let that collision
             # past `_assert_exact` — confirmed with `dbt ls` on dbt 1.12.0, where the `a.yml` task's
             # selector resolves to the `a.yml.yml` test as well.
-            base = cls._base_file_name(node_info.get('original_file_path') or '')
-            return value in (base, base.rsplit('.', 1)[0] if '.' in base else base)
+            for base in _candidate_file_names(node_info.get('original_file_path') or ''):
+                if value in (base, base.rsplit('.', 1)[0] if '.' in base else base):
+                    return True
+            return False
         if method == 'resource_type':
             return (node_info.get('resource_type') or '') == value
         if method == 'test_name':
@@ -1234,7 +1237,8 @@ class _SelectorIndex(dict):
         self._by_package: dict[str, dict] = {}
         self._by_file: dict[str, dict] = {}
         self._by_test_name: dict[str, dict] = {}
-        self._by_fqn_key: dict[str, dict] = {}
+        self._by_fqn_term: dict[str, dict] = {}
+        self._by_version_suffix: dict[str, dict] = {}
         self._tests_by_parent: dict[str, set[str]] = {}
         for full_name, info in peers.items():
             self._add(full_name, info)
@@ -1251,15 +1255,18 @@ class _SelectorIndex(dict):
     def _add(self, full_name: str, info: dict) -> None:
         """Files one node under every key a selector term could reach it by."""
         self._by_package.setdefault(info.get('package_name') or '', {})[full_name] = info
-        # `file:` matches the base name *or* its stem, so a node is reachable under both keys.
-        base = _base_file_name(info.get('original_file_path') or '')
-        for key in dict.fromkeys((base, base.rsplit('.', 1)[0] if '.' in base else base)):
-            self._by_file.setdefault(key, {})[full_name] = info
+        # A path containing a backslash has both POSIX and Windows interpretations. Index every possible
+        # base name and stem so narrowing cannot hide a collision under either runtime path flavour.
+        for base in _candidate_file_names(info.get('original_file_path') or ''):
+            for key in dict.fromkeys((base, base.rsplit('.', 1)[0] if '.' in base else base)):
+                self._by_file.setdefault(key, {})[full_name] = info
         test_name = (info.get('test_metadata') or {}).get('name') or ''
         if test_name:
             self._by_test_name.setdefault(test_name, {})[full_name] = info
-        for key in self._fqn_keys(info):
-            self._by_fqn_key.setdefault(key, {})[full_name] = info
+        for term in self._fqn_terms(info):
+            self._by_fqn_term.setdefault(term, {})[full_name] = info
+        if suffix := self._version_suffix(info):
+            self._by_version_suffix.setdefault(suffix, {})[full_name] = info
 
     def tests_attached_to_any(self, parent_ids: set[str]) -> set[str]:
         """Returns indexed tests having at least one parent in `parent_ids`."""
@@ -1269,32 +1276,37 @@ class _SelectorIndex(dict):
         return tests
 
     @staticmethod
-    def _fqn_keys(info: dict) -> set[str]:
+    def _fqn_terms(info: dict) -> set[str]:
         """
-        Every key under which an fqn term could match this node, mirroring `_is_selected_node`.
+        Every finite fqn term that directly identifies this node under dbt's matching rules.
 
-        dbt can match a term four ways, and each pins one part of the node to one part of the term:
-
-        * the positional walk needs `flat_fqn[0] == term.split('.')[0]`;
-        * the same walk after the node's package is stripped needs the *second* segment's first part;
-        * the leaf shortcut needs `fqn[-1] == term` — the whole dotted term, so it is a key in itself;
-        * a versioned model additionally matches `fqn[-2] == term` and `'_'.join(fqn[-2:])`.
+        The positional matcher accepts every prefix of the flattened fqn, both with and without the
+        package. The leaf shortcut additionally accepts the raw leaf (or the model name for a versioned
+        model), which can differ from a flattened prefix when it contains a dot. Version suffix matching
+        is indexed separately because dbt ignores any earlier selector components in that shortcut.
         """
         fqn = info.get('fqn') or []
         if not fqn:
-            # No fqn: the selector falls back to the bare name, which is the only key that can reach this
-            # node. Returning nothing here would drop it from every candidate set, so the exactness check
-            # would report a selector that reaches nothing.
+            # A truncated hand-written manifest can omit fqn; the matcher then falls back to the name.
             name = info.get('name') or ''
             return {name} if name else set()
-        keys = {_flatten_fqn(fqn)[0], fqn[-1]}
-        stripped = _flatten_fqn(fqn[1:])
-        if stripped:
-            keys.add(stripped[0])
+        terms: set[str] = set()
+        for candidate in (fqn, fqn[1:]):
+            flat = _flatten_fqn(candidate)
+            terms.update('.'.join(flat[:length]) for length in range(1, len(flat) + 1))
         if info.get('resource_type') == 'model' and info.get('version') is not None and len(fqn) >= 2:
-            keys.add(fqn[-2])
-            keys.add('_'.join(fqn[-2:]))
-        return keys
+            terms.add(fqn[-2])
+        else:
+            terms.add(fqn[-1])
+        return terms
+
+    @staticmethod
+    def _version_suffix(info: dict) -> str:
+        """The suffix used by dbt's versioned-model leaf shortcut, if this node has one."""
+        fqn = info.get('fqn') or []
+        if info.get('resource_type') == 'model' and info.get('version') is not None and len(fqn) >= 2:
+            return '_'.join(fqn[-2:])
+        return ''
 
     def narrow(self, terms: list[str]) -> dict:
         """
@@ -1323,21 +1335,13 @@ class _SelectorIndex(dict):
 
     def _fqn_candidates(self, term: str) -> dict:
         """
-        The nodes an fqn `term` could match: the union over every key it can be looked up under.
+        The nodes an fqn `term` could match through a positional, leaf, or version-suffix rule.
 
-        A union is required for soundness — dbt matches on any one of those keys, so dropping a lookup
-        could hide a real collision. That makes this bucket only as narrow as its widest lookup, and
-        `parts[0]` is a package name, i.e. most of the manifest. So this is usually the *worst* index and
-        `narrow` picks whichever is smallest; it earns its keep for a bare-name selector, where the term
-        is a single segment and every lookup is precise.
+        Prefixes are indexed as complete terms rather than by their first segment, keeping selectors
+        efficient when an ambiguous path makes `file:` unavailable. The version shortcut compares only
+        the selector's last two components, so its separate bucket is unioned here.
         """
-        parts = term.split('.')
-        lookups = {parts[0], term}
-        if len(parts) >= 2:
-            lookups.add('_'.join(parts[-2:]))
-        if len(lookups) == 1:
-            return self._by_fqn_key.get(term, {})
-        candidates: dict = {}
-        for key in lookups:
-            candidates.update(self._by_fqn_key.get(key, {}))
+        candidates = dict(self._by_fqn_term.get(term, {}))
+        suffix = '_'.join(term.split('.')[-2:])
+        candidates.update(self._by_version_suffix.get(suffix, {}))
         return candidates

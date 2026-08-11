@@ -12,13 +12,13 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 import pytest
 import yaml
+from dbt.graph.selector_methods import SelectorMethod
 
 import databricks_dbt_factory.main as main_module
 from databricks_dbt_factory import file_io
 from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.main import main, parse_args
 from databricks_dbt_factory.TaskFactory import validate_extra_dbt_options
-from dbt.graph.selector_methods import SelectorMethod
 
 BASE_PATH = str(Path(__file__).resolve().parent)
 

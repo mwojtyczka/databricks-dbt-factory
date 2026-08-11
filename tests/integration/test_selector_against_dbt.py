@@ -490,7 +490,7 @@ def test_singular_test_sharing_a_models_fqn_is_addressable_under_empty(tmp_path)
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
-def test_bundled_selector_runs_only_tests_attached_to_its_resource(tmp_path):
+def test_bundled_selector_runs_only_tests_attached_to_its_resource(tmp_path: Path) -> None:
     _write_project(
         tmp_path,
         {'beta.sql': MODEL_SQL, 'gamma.sql': MODEL_SQL},
@@ -541,7 +541,7 @@ def test_bundled_selector_runs_only_tests_attached_to_its_resource(tmp_path):
         assert selected == expected_by_parent[f'model.probe.{model_name}']
 
 
-def test_bundled_selector_unions_are_exact_in_empty_and_cautious_modes(tmp_path):
+def test_bundled_selector_unions_are_exact_in_empty_and_cautious_modes(tmp_path: Path) -> None:
     _write_project(
         tmp_path,
         {'alpha.sql': MODEL_SQL, 'beta.sql': MODEL_SQL},

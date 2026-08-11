@@ -1289,3 +1289,36 @@ _SELECTABLE_COLLECTIONS = (
     "saved_queries",
     "functions",
 )
+
+
+@pytest.mark.parametrize(
+    "argv_form",
+    ["--extra-dbt-command-options=--", "--extra-dbt-command-options=-- "],
+    ids=["bare", "trailing-space"],
+)
+def test_parse_args_normalizes_a_bare_double_dash_value(monkeypatch, tmp_path, argv_form):
+    # On Python 3.10 (in the supported range and in CI's matrix) argparse yields `[]` for
+    # `--extra-dbt-command-options=--`, not the string `'--'`; on 3.12 it yields `'--'`. Either way the
+    # value must reach `_reserved_selection_option`, whose `token == '--'` check refuses it — a `[]`
+    # slipping through would be treated as "no options" and silently drop a refusal the factory owes.
+    #
+    # Note the trigger is the `=--` form: a bare `--extra-dbt-command-options --` exits 2 on both
+    # versions, because argparse reads `--` as the end-of-options marker rather than as the value.
+    target = tmp_path / "out.yaml"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target),
+            argv_form,
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.extra_dbt_command_options == argv_form.split("=", 1)[1]

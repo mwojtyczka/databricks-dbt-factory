@@ -387,7 +387,11 @@ def parse_args():
     )
     args = parser.parse_args()
 
-    # Python 3.10 argparse represents an option value exactly equal to `--` as an empty list.
+    # `--extra-dbt-command-options=--` parses to `[]` on Python 3.10 and to `'--'` on 3.12; both are in
+    # the supported range and CI's matrix. Normalize so the value always reaches
+    # `_reserved_selection_option`, whose `token == '--'` check refuses it — a `[]` reaching the factory
+    # would read as "no options" and drop that refusal. Only the `=--` form gets here: a bare
+    # `--extra-dbt-command-options --` exits 2, since argparse takes `--` as the end-of-options marker.
     if args.extra_dbt_command_options == []:
         args.extra_dbt_command_options = "--"
 

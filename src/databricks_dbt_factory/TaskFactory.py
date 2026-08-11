@@ -1,5 +1,6 @@
 import shlex
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 from databricks_dbt_factory.DbtTask import DbtTask, DbtTaskOptions
 from databricks_dbt_factory.Utils import DYNAMIC_VALUE_REFERENCE
@@ -242,13 +243,21 @@ class TaskFactory(ABC):
         self,
         subcommand: str,
         *,
-        select: str | None = None,
+        select: str | Sequence[str] | None = None,
         indirect_selection: str | None = None,
     ) -> str:
-        """Builds and validates one complete dbt command."""
+        """
+        Builds and validates one complete dbt command.
+
+        Several selectors are passed as repeated `--select` arguments rather than joined into one, so
+        the union does not depend on the consumer preserving shell quoting. dbt unions repeated
+        occurrences; confirmed on dbt 1.12.0 under both `empty` and `cautious` indirect selection.
+        """
         parts = ["dbt", subcommand]
         if select is not None:
-            parts.extend(("--select", shlex.quote(select)))
+            selectors = [select] if isinstance(select, str) else list(select)
+            for selector in selectors:
+                parts.extend(("--select", shlex.quote(selector)))
         if self.dbt_options:
             parts.append(self.dbt_options)
         if indirect_selection is not None:
@@ -415,7 +424,7 @@ class TestTaskFactory(TaskFactory):
         for indirect_selection in ('empty', 'cautious'):
             if indirect_selection not in selects_by_indirect_selection:
                 continue
-            select = ' '.join(sorted(selects_by_indirect_selection[indirect_selection]))
-            commands.append(self._build_dbt_command("test", select=select, indirect_selection=indirect_selection))
+            selects = sorted(selects_by_indirect_selection[indirect_selection])
+            commands.append(self._build_dbt_command("test", select=selects, indirect_selection=indirect_selection))
 
         return DbtTask(task_key, commands, self.task_options, depends_on)

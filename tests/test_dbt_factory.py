@@ -216,7 +216,7 @@ def test_bundled_test_groups_exact_selectors_by_mode_after_user_dbt_options():
     )
 
     assert task.commands == [
-        "dbt test --select 'fqn:pkg.not_null_orders_id fqn:pkg.unique_orders_id' "
+        'dbt test --select fqn:pkg.not_null_orders_id --select fqn:pkg.unique_orders_id '
         '--target dev --indirect-selection eager --indirect-selection empty',
         'dbt test --select fqn:pkg.orders,resource_type:model,fqn:pkg.check_orders '
         '--target dev --indirect-selection eager --indirect-selection cautious',
@@ -611,7 +611,7 @@ def test_bundled_task_factory_assembles_commands(dbt_factory_bundled):
     )
     assert task.task_key == 'customers_test'
     assert task.commands == [
-        "dbt test --select 'fqn:pkg.not_null_customers_id fqn:pkg.unique_customers_id' "
+        'dbt test --select fqn:pkg.not_null_customers_id --select fqn:pkg.unique_customers_id '
         '--target dev --indirect-selection empty'
     ]
     assert task.depends_on == ['customers_model']

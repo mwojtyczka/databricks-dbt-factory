@@ -212,3 +212,31 @@ def test_bundled_test_factory_rejects_a_dynamic_reference_formed_by_final_comman
             "orders",
             ["orders_model"],
         )
+
+
+def test_bundled_task_passes_each_selector_as_its_own_select_argument():
+    # A bundle is a union of exact per-test selectors. Joining them with spaces inside one `--select`
+    # makes correctness depend on the consumer preserving shell quoting: the notebook runner does
+    # (`shlex.split`), but for `--task-type dbt` the command is parsed by Databricks. If the token were
+    # split on whitespace there, the selector would match nothing — and a zero-match selector exits 0,
+    # so the task would go green having asserted nothing.
+    #
+    # Repeated `--select` removes that dependence. dbt unions repeated occurrences: verified on dbt
+    # 1.12.0 that `--select a --select b` and `--select 'a b'` resolve to the same nodes, under both
+    # `empty` and `cautious` indirect selection.
+    factory = DbtTestTaskFactory(DbtDependencyResolver(), DbtTaskOptions(task_type="dbt"), "--target dev")
+
+    task = factory.create_bundled_task(
+        "orders_test",
+        {"cautious": ["fqn:pkg.b,package:pkg", "fqn:pkg.a,package:pkg"]},
+        "orders",
+        ["orders_model"],
+    )
+
+    command = task.commands[0]
+    assert command == (
+        "dbt test --select fqn:pkg.a,package:pkg --select fqn:pkg.b,package:pkg "
+        "--target dev --indirect-selection cautious"
+    )
+    # No selector may be joined into a single argument with another.
+    assert " ".join(sorted(["fqn:pkg.a,package:pkg", "fqn:pkg.b,package:pkg"])) not in command

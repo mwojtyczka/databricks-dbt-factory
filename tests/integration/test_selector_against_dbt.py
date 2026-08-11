@@ -25,6 +25,7 @@ import json
 import random
 import re
 import shlex
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import pytest
@@ -107,9 +108,24 @@ def _parse(root: Path) -> dict:
     return json.loads((root / 'target' / 'manifest.json').read_text(encoding='utf-8'))
 
 
+def _select_args(select: str | tuple[str, ...]) -> list[str]:
+    """
+    Expands one or more selectors into the repeated `--select` arguments the factory emits.
+
+    A bundled task passes each selector as its own `--select`, and dbt unions them, so replaying only
+    the first one silently checks a fraction of what the task runs.
+    """
+    selectors = (select,) if isinstance(select, str) else select
+    return [argument for selector in selectors for argument in ('--select', selector)]
+
+
 @functools.lru_cache(maxsize=None)
 def _selected_ids(
-    root: Path, select: str, resource_type: str | None, indirect: bool = False, indirect_selection: str | None = None
+    root: Path,
+    select: str | tuple[str, ...],
+    resource_type: str | None,
+    indirect: bool = False,
+    indirect_selection: str | None = None,
 ) -> tuple[str, ...]:
     """
     Returns the unique IDs dbt resolves `select` to, as `dbt ls` reports them.
@@ -117,7 +133,7 @@ def _selected_ids(
     Memoised: a `dbt ls` invocation costs a few hundred milliseconds, and the same selector recurs
     across per-test and bundled mode, so caching keeps the suite inside the project's test timeout.
     """
-    args = ['ls', '--quiet', '--select', select]
+    args = ['ls', '--quiet', *_select_args(select)]
     if resource_type:
         args += ['--resource-type', resource_type]
     if indirect:
@@ -134,7 +150,7 @@ def _selected_ids(
 
 @functools.lru_cache(maxsize=None)
 def _selected_unique_ids(
-    root: Path, select: str, resource_type: str | None, indirect_selection: str | None = None
+    root: Path, select: str | tuple[str, ...], resource_type: str | None, indirect_selection: str | None = None
 ) -> tuple[str, ...]:
     """
     The *unique ids* dbt resolves `select` to, rather than the display names `_selected_ids` returns.
@@ -142,7 +158,7 @@ def _selected_unique_ids(
     `dbt ls` prints selector names by default (`probe.orders`), which do not match manifest keys — so a
     comparison against manifest ids has to ask for `--output json --output-keys unique_id` instead.
     """
-    args = ['ls', '--quiet', '--select', select, '--output', 'json', '--output-keys', 'unique_id']
+    args = ['ls', '--quiet', *_select_args(select), '--output', 'json', '--output-keys', 'unique_id']
     if resource_type:
         args += ['--resource-type', resource_type]
     if indirect_selection:
@@ -153,9 +169,29 @@ def _selected_unique_ids(
     return tuple(sorted(json.loads(entry)['unique_id'] for entry in result.result))
 
 
-def _resource_selectors(manifest: dict, bundle_tests: bool) -> list[tuple[str, str, str]]:
+def _command_selectors(command: Sequence[str]) -> tuple[str, ...]:
     """
-    Runs the factory over `manifest` and returns `(task_key, select, verb)` for every task that
+    Every selector in a tokenised dbt command, in the order it was emitted.
+
+    A bundled task emits one `--select` per member, so reading only the first would replay a fraction
+    of what the task runs and let a missing member pass unnoticed.
+    """
+    return tuple(command[index + 1] for index, value in enumerate(command[:-1]) if value == '--select')
+
+
+def _has_source_selector(selector_groups: Iterable[tuple[str, ...]]) -> bool:
+    """
+    Whether any emitted selector is a `source:` selector.
+
+    Checks every term of every bundled union, not just the first: a `source:` term reached only in the
+    middle of a bundle is exactly the case these tests exist to catch.
+    """
+    return any(selector.startswith('source:') for selectors in selector_groups for selector in selectors)
+
+
+def _resource_selectors(manifest: dict, bundle_tests: bool) -> list[tuple[str, tuple[str, ...], str]]:
+    """
+    Runs the factory over `manifest` and returns `(task_key, selectors, verb)` for every task that
     builds a resource — the tasks that must each touch exactly one node.
     """
     selectors = []
@@ -164,8 +200,7 @@ def _resource_selectors(manifest: dict, bundle_tests: bool) -> list[tuple[str, s
         # quoted, and this is exactly how the notebook runner recovers the original argv value — so
         # tokenising the same way also proves that round-trip.
         command = shlex.split(task['dbt_task']['commands'][-1])
-        select = command[command.index('--select') + 1]
-        selectors.append((task['task_key'], select, command[1]))
+        selectors.append((task['task_key'], _command_selectors(command), command[1]))
     return selectors
 
 
@@ -265,10 +300,10 @@ def _selected_by_bundled_commands(tmp_path: Path, task: dict) -> set[str]:
     assert test_commands, f'{task["task_key"]} has no dbt test command'
     for raw_command in test_commands:
         command = shlex.split(raw_command)
-        select = command[command.index('--select') + 1]
+        selectors = _command_selectors(command)
         modes = [command[index + 1] for index, value in enumerate(command[:-1]) if value == '--indirect-selection']
         assert modes, f'{task["task_key"]} does not pin indirect selection: {raw_command}'
-        selected.update(_selected_unique_ids(tmp_path, select, None, indirect_selection=modes[-1]))
+        selected.update(_selected_unique_ids(tmp_path, selectors, None, indirect_selection=modes[-1]))
     return selected
 
 
@@ -298,7 +333,7 @@ def _assert_each_task_selects_its_own_node(tmp_path: Path, manifest: dict, bundl
             unmapped.append(task_key)
             continue
         command = shlex.split(task['dbt_task']['commands'][-1])
-        select = command[command.index('--select') + 1]
+        select = _command_selectors(command)
         # Compare against the *manifest unique id*, not the name `dbt ls` displays. Two generic tests can
         # share a display name while separate files keep each selector individually addressable, so a
         # name-based assertion would be satisfied by pointing task A at task B's node.
@@ -375,7 +410,7 @@ def test_bundled_test_task_unions_only_its_own_resources_tests(tmp_path):
     selectors = {
         key: select for key, select, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test'
     }
-    orders_select = next(select for key, select in selectors.items() if key == 'orders_test')
+    orders_select = selectors['orders_test']
     selected = _selected_ids(tmp_path, orders_select, resource_type=None, indirect_selection='empty')
 
     # A schema test's fqn is [package, <test name>] — the models/ subdirectory is not part of it.
@@ -521,8 +556,8 @@ def test_bundled_selector_runs_only_tests_attached_to_its_resource(tmp_path: Pat
                 commands.append(shlex.split(raw_command))
         selected: set[str] = set()
         for command in commands:
-            select = command[command.index('--select') + 1]
-            assert select.split() == sorted(select.split()), f'non-deterministic bundled union: {select}'
+            select = _command_selectors(command)
+            assert list(select) == sorted(select), f'non-deterministic bundled union: {select}'
             result = _dbt(
                 tmp_path,
                 'ls',
@@ -575,8 +610,8 @@ def test_bundled_selector_unions_are_exact_in_empty_and_cautious_modes(tmp_path:
 
     selected: set[str] = set()
     for command in commands:
-        select = command[command.index('--select') + 1]
-        assert select.split() == sorted(select.split())
+        select = _command_selectors(command)
+        assert list(select) == sorted(select)
         result = _dbt(
             tmp_path,
             'ls',
@@ -625,6 +660,53 @@ def test_bundled_data_and_unit_tests_match_their_exact_manifest_membership(tmp_p
     )
     assert _selected_by_bundled_commands(tmp_path, task) == data_test_ids | unit_test_ids
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=True)
+
+
+def test_every_bundled_selector_is_replayed_against_dbt(tmp_path):
+    """
+    The helpers must read *every* `--select` a bundled task emits, not just the first.
+
+    A harness that reads one selector per command still passes on a single-member bundle, so it can
+    look correct while silently checking a fraction of a real union — and a dropped member is exactly
+    the duplicate-build class of bug these tests exist to catch. Pinned here on a two-member bundle
+    (one data test, one unit test) whose members dbt resolves to different ids.
+    """
+    _write_project(
+        tmp_path,
+        {'orders.sql': MODEL_SQL},
+        schema_yml=(
+            'models:\n'
+            '  - name: orders\n'
+            '    columns:\n'
+            '      - name: id\n'
+            '        data_tests: [not_null]\n'
+            'unit_tests:\n'
+            '  - name: totals\n'
+            '    model: orders\n'
+            '    given: []\n'
+            '    expect: {rows: [{id: 1}]}\n'
+        ),
+    )
+    manifest = _parse(tmp_path)
+
+    task = next(
+        task
+        for task in create_dbt_factory(bundle_tests=True).create_tasks(manifest)
+        if task['task_key'] == 'orders_test'
+    )
+    command = shlex.split(next(c for c in task['dbt_task']['commands'] if c.startswith('dbt test ')))
+    selectors = _command_selectors(command)
+    assert len(selectors) > 1, 'the fixture no longer produces a multi-member bundle; this test proves nothing'
+
+    # Each member must resolve to something on its own, and the union must exceed any single member —
+    # which is false the moment the harness drops a selector.
+    per_selector = {selector: set(_selected_unique_ids(tmp_path, selector, None, 'empty')) for selector in selectors}
+    for selector, resolved in per_selector.items():
+        assert resolved, f'{selector!r} resolves to nothing, so a dropped selector would go unnoticed'
+    union = set(_selected_unique_ids(tmp_path, selectors, None, 'empty'))
+    assert union == set().union(*per_selector.values())
+    for resolved in per_selector.values():
+        assert union > resolved, f'the union {sorted(union)} does not exceed the single member {sorted(resolved)}'
 
 
 def test_bundled_task_last_indirect_selection_option_controls_dbt(tmp_path):
@@ -917,7 +999,7 @@ def test_bundled_source_test_selector_is_exact(tmp_path):
     selectors = [s for _, s, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
     assert selectors, 'expected a bundled source test task'
     assert by_key['downstream_model']['depends_on'] == [{'task_key': 'raw_orders_test'}]
-    assert not any(select.startswith('source:') for select in selectors)
+    assert not _has_source_selector(selectors)
     for select in selectors:
         selected = _selected_ids(tmp_path, select, 'test', indirect_selection='empty')
         assert len(selected) == 1, f'{select!r} selects {selected}, expected exactly one test'
@@ -1082,7 +1164,7 @@ def test_source_with_a_trailing_graph_operator_uses_an_exact_test_selector(tmp_p
     assert not _selected_ids(tmp_path, 'source:probe.raw.orders+1', None, indirect=True)
 
     selectors = [select for _, select, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
-    assert selectors and not any(select.startswith('source:') for select in selectors)
+    assert selectors and not _has_source_selector(selectors)
     assert _selected_unique_ids(tmp_path, selectors[0], 'test', indirect_selection='empty')
 
 
@@ -1107,7 +1189,7 @@ def test_source_keeps_an_operator_away_from_the_boundary(tmp_path):
     manifest = _parse(tmp_path)
 
     test_selectors = [s for _, s, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
-    assert test_selectors and not any(select.startswith('source:') for select in test_selectors)
+    assert test_selectors and not _has_source_selector(test_selectors)
     for select in test_selectors:
         assert _selected_ids(tmp_path, select, 'test', indirect_selection='empty'), f'{select!r} matched nothing'
 
@@ -1145,7 +1227,7 @@ def test_literal_and_incomplete_braces_in_a_source_still_allow_an_exact_test_bun
     )
     assert expected_tests
     test_selectors = [select for _, select, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
-    assert test_selectors and not any(select.startswith('source:') for select in test_selectors)
+    assert test_selectors and not _has_source_selector(test_selectors)
     assert _selected_unique_ids(tmp_path, test_selectors[0], 'test', indirect_selection='empty') == expected_tests
 
 
@@ -1282,7 +1364,7 @@ def test_dotted_source_part_uses_an_exact_test_selector(tmp_path, source_name, t
     assert not rejected.success, 'dbt accepted a four-part source selector; this test is no longer meaningful'
 
     selectors = [select for _, select, verb in _resource_selectors(manifest, bundle_tests=True) if verb == 'test']
-    assert selectors and not any(select.startswith('source:') for select in selectors)
+    assert selectors and not _has_source_selector(selectors)
     assert _selected_unique_ids(tmp_path, selectors[0], 'test', indirect_selection='empty')
 
 
@@ -1758,8 +1840,10 @@ def test_literal_braces_are_preserved_and_select_the_real_dbt_node(tmp_path):
     assert brace_node['fqn'][-1] == 'orders{draft}'
 
     selectors = _resource_selectors(manifest, bundle_tests=False)
-    brace_select = next(select for _task_key, select, _verb in selectors if '{draft}' in select)
-    assert '{draft}' in brace_select
+    brace_select = next(
+        select for _task_key, select, _verb in selectors if any('{draft}' in selector for selector in select)
+    )
+    assert any('{draft}' in selector for selector in brace_select)
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
@@ -1774,8 +1858,9 @@ def test_selector_terms_cannot_compose_a_dynamic_reference(tmp_path):
 
     selectors = _resource_selectors(manifest, bundle_tests=False)
     test_select = next(select for _task_key, select, verb in selectors if verb == 'test')
-    assert 'file:schema}}.yml' not in test_select
-    assert re.search(r'\{\{[^{}]+\}\}', test_select) is None
+    for selector in test_select:
+        assert 'file:schema}}.yml' not in selector
+        assert re.search(r'\{\{[^{}]+\}\}', selector) is None
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
 
 
@@ -1974,8 +2059,8 @@ def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
 
         command = shlex.split(task['dbt_task']['commands'][-1])
         verb = command[1]
-        select = command[command.index('--select') + 1]
-        if select.startswith('source:'):
+        select = _command_selectors(command)
+        if any(selector.startswith('source:') for selector in select):
             continue
         mode = command[command.index('--indirect-selection') + 1] if '--indirect-selection' in command else None
         resource_type = None if verb == 'test' else {'run': 'model', 'seed': 'seed', 'snapshot': 'snapshot'}[verb]
@@ -1989,7 +2074,13 @@ def _assert_prediction_matches_dbt(tmp_path, manifest, bundle_tests):
                 f'for {select!r}'
             )
             continue
-        predicted = set(DbtFactory._matching_ids(select, index))  # pylint: disable=protected-access
+        # The model predicts one selector at a time, so a bundled union is predicted term by term and
+        # unioned here — the same way dbt unions the repeated `--select` arguments the task emits.
+        predicted = {
+            unique_id
+            for selector in select
+            for unique_id in DbtFactory._matching_ids(selector, index)  # pylint: disable=protected-access
+        }
         assert (
             predicted == actual
         ), f'{task_key}: model predicts {sorted(predicted)} but dbt runs {sorted(actual)} for {select!r}'

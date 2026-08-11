@@ -1,6 +1,7 @@
 import argparse
 import ast
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -16,6 +17,8 @@ import databricks_dbt_factory.main as main_module
 from databricks_dbt_factory import file_io
 from databricks_dbt_factory.__about__ import __version__
 from databricks_dbt_factory.main import main, parse_args
+from databricks_dbt_factory.TaskFactory import validate_extra_dbt_options
+from dbt.graph.selector_methods import SelectorMethod
 
 BASE_PATH = str(Path(__file__).resolve().parent)
 
@@ -1191,6 +1194,17 @@ def _runner_helper(name: str):
     raise AssertionError(f"{name} not found in the packaged runner")
 
 
+def _runner_constant(name: str):
+    """Evaluates one module-level constant out of the packaged runner notebook (see `_runner_helper`)."""
+    source = (
+        Path(__file__).resolve().parent.parent / "src" / "databricks_dbt_factory" / "notebook" / "run_dbt_command.py"
+    ).read_text(encoding="utf-8")
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} not found in the packaged runner")
+
+
 def test_runner_normalizes_windows_paths_in_an_injected_manifest():
     # A manifest parsed on Windows holds `models\marts\orders.sql`, and `original_file_path` survives the
     # msgpack round-trip verbatim. The task injects that manifest and skips parsing, so dbt evaluates
@@ -1231,20 +1245,44 @@ def test_runner_normalizes_every_collection_a_file_term_can_reach():
     # not just `nodes` and `sources`. Unit tests are the one that matters in practice, since the factory
     # emits a `file:` term for them, but any collection left un-normalized keeps the same silent
     # zero-match for that kind of resource.
+    #
+    # The expected set is derived from the installed dbt rather than restated here, so a dbt upgrade that
+    # adds a collection to `all_nodes` fails this test instead of silently leaving that kind addressable
+    # only by a selector that matches nothing. Compares against the *shipped* tuple, so shrinking the
+    # runner's list fails too.
+    chained = set(re.findall(r"self\.(\w+)\(included_nodes\)", inspect.getsource(SelectorMethod.all_nodes)))
+    # Map each `all_nodes` helper to the manifest attribute it iterates.
+    expected = set()
+    for helper in chained:
+        body = inspect.getsource(getattr(SelectorMethod, helper))
+        expected.update(re.findall(r"self\.manifest\.(\w+)\.items\(\)", body))
+    assert expected, "could not derive the selectable collections from the installed dbt"
+
+    shipped = _runner_constant("_SELECTABLE_COLLECTIONS")
+
+    assert (
+        set(shipped) == expected
+    ), f"runner normalizes {sorted(set(shipped))}, but dbt's all_nodes reaches {sorted(expected)}"
+
+
+def test_runner_normalization_rewrites_a_windows_path_in_every_selectable_collection():
+    # Behavioural companion to the list check above: every collection the runner names must actually be
+    # rewritten, not merely listed.
     normalize = _runner_helper("_normalize_manifest_paths")
+    shipped = _runner_constant("_SELECTABLE_COLLECTIONS")
 
     class _Manifest:
-        def __init__(self):
-            for name in _SELECTABLE_COLLECTIONS:
-                setattr(self, name, {name: _PathHolder(f"models\\{name}.sql")})
+        pass
 
     manifest = _Manifest()
+    for name in shipped:
+        setattr(manifest, name, {name: _PathHolder(f"models\\{name}.sql")})
 
-    normalize(manifest, _SELECTABLE_COLLECTIONS)
+    normalize(manifest, shipped)
 
     left = {
         name: holder.original_file_path
-        for name in _SELECTABLE_COLLECTIONS
+        for name in shipped
         for holder in getattr(manifest, name).values()
         if "\\" in holder.original_file_path
     }
@@ -1279,18 +1317,6 @@ class _PathHolder:
 
 # The collections dbt 1.12.0's `SelectorMethod.all_nodes` chains, and therefore every collection a
 # `file:` term can reach.
-_SELECTABLE_COLLECTIONS = (
-    "nodes",
-    "sources",
-    "exposures",
-    "metrics",
-    "unit_tests",
-    "semantic_models",
-    "saved_queries",
-    "functions",
-)
-
-
 @pytest.mark.parametrize(
     "argv_form",
     ["--extra-dbt-command-options=--", "--extra-dbt-command-options=-- "],
@@ -1322,3 +1348,56 @@ def test_parse_args_normalizes_a_bare_double_dash_value(monkeypatch, tmp_path, a
     args = parse_args()
 
     assert args.extra_dbt_command_options == argv_form.split("=", 1)[1]
+
+
+def test_validate_extra_dbt_options_needs_a_string_not_an_empty_list():
+    # Pins why `parse_args` normalizes `[]` to `'--'`. On Python 3.10 (supported, and in CI's matrix)
+    # `--extra-dbt-command-options=--` parses to `[]`; unnormalized that reaches the validator, whose
+    # regex raises `TypeError` on a non-string. `main` catches only `ValueError`/`FileNotFoundError`, so
+    # the CLI would abort with a traceback rather than refuse `--` with a message.
+    #
+    # Asserted on every supported version: the validator's contract is "give me a string", independent of
+    # which version produces the empty list.
+    with pytest.raises(TypeError):
+        validate_extra_dbt_options([])
+
+    # The normalized value is refused properly, with a diagnosable message.
+    with pytest.raises(ValueError, match="cannot include selection option"):
+        validate_extra_dbt_options("--")
+
+
+def test_parse_args_normalizes_an_empty_list_extra_option(monkeypatch, tmp_path):
+    # Python 3.10 (supported, and in CI's matrix) parses `--extra-dbt-command-options=--` to `[]`, while
+    # 3.12 yields `'--'`. This test forces the 3.10 shape on any interpreter by making argparse produce a
+    # list, so the normalization is covered wherever the suite runs — otherwise the guard is only
+    # exercised on 3.10 and a removal passes CI on 3.11/3.12.
+    target = tmp_path / "out.yaml"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target),
+        ],
+    )
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def parse_args_yielding_a_list(self, *args, **kwargs):
+        namespace = real_parse_args(self, *args, **kwargs)
+        # what 3.10's argparse hands back for `--extra-dbt-command-options=--`
+        namespace.extra_dbt_command_options = []
+        return namespace
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", parse_args_yielding_a_list)
+
+    args = parse_args()
+
+    # Must be the string `--`, so `_validate_dbt_options`' regex gets a string and refuses it, rather
+    # than raising an uncaught TypeError.
+    assert args.extra_dbt_command_options == "--"
+    with pytest.raises(ValueError, match="cannot include selection option"):
+        validate_extra_dbt_options(args.extra_dbt_command_options)

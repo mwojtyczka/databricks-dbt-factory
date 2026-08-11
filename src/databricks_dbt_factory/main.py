@@ -388,10 +388,11 @@ def parse_args():
     args = parser.parse_args()
 
     # `--extra-dbt-command-options=--` parses to `[]` on Python 3.10 and to `'--'` on 3.12; both are in
-    # the supported range and CI's matrix. Normalize so the value always reaches
-    # `_reserved_selection_option`, whose `token == '--'` check refuses it — a `[]` reaching the factory
-    # would read as "no options" and drop that refusal. Only the `=--` form gets here: a bare
-    # `--extra-dbt-command-options --` exits 2, since argparse takes `--` as the end-of-options marker.
+    # the supported range and CI's matrix. Unnormalized, the `[]` reaches `_validate_dbt_options`, whose
+    # regex raises `TypeError` on a non-string — which no handler in `main` catches, so the CLI aborts
+    # with a traceback instead of the refusal `_reserved_selection_option` owes for `--`. Only the `=--`
+    # form gets here: a bare `--extra-dbt-command-options --` exits 2, since argparse takes `--` as the
+    # end-of-options marker rather than as the value.
     if args.extra_dbt_command_options == []:
         args.extra_dbt_command_options = "--"
 

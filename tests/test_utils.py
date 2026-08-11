@@ -157,3 +157,15 @@ def test_read_dbt_manifest_invalid_json_raises(tmp_path):
     manifest_path.write_text('{not json', encoding='utf-8')
     with pytest.raises(ValueError):
         read_dbt_manifest(str(manifest_path))
+
+
+@pytest.mark.parametrize('payload', ['[]', '"just a string"', '7', 'null'], ids=['list', 'string', 'int', 'null'])
+def test_read_dbt_manifest_rejects_non_object_json(tmp_path, payload):
+    # Valid JSON that is not an object parses fine here, then `manifest.get('nodes', {})` in the
+    # factory raises AttributeError, which `main`'s `except (ValueError, FileNotFoundError)` does not
+    # catch — the CLI aborts with a traceback for a malformed *input file*. Reject it as a
+    # user-fixable ValueError, like a parse error.
+    manifest_path = tmp_path / 'manifest.json'
+    manifest_path.write_text(payload, encoding='utf-8')
+    with pytest.raises(ValueError):
+        read_dbt_manifest(str(manifest_path))

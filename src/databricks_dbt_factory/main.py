@@ -388,12 +388,15 @@ def parse_args():
     args = parser.parse_args()
 
     # `--extra-dbt-command-options=--` parses to `[]` on Python 3.10 and to `'--'` on 3.12; both are in
-    # the supported range and CI's matrix. Unnormalized, the `[]` reaches `_validate_dbt_options`, whose
-    # regex raises `TypeError` on a non-string — which no handler in `main` catches, so the CLI aborts
-    # with a traceback instead of the refusal `_reserved_selection_option` owes for `--`. Only the `=--`
-    # form gets here: a bare `--extra-dbt-command-options --` exits 2, since argparse takes `--` as the
-    # end-of-options marker rather than as the value.
-    if args.extra_dbt_command_options == []:
+    # the supported range and CI's matrix. Only the `=--` form gets here at all: a bare
+    # `--extra-dbt-command-options --` exits 2, since argparse takes `--` as the end-of-options marker
+    # rather than as the value. The value is `type=str`, so the *only* way a non-string reaches this
+    # namespace is argparse's `--` handling, whose intended value is the literal `--`. Normalize any
+    # non-string to that string rather than testing for the exact `[]` 3.10 happens to produce: an
+    # unnormalized non-string reaches `_validate_dbt_options`, whose regex raises `TypeError` — which no
+    # handler in `main` catches, so the CLI aborts with a traceback instead of the refusal
+    # `_reserved_selection_option` owes for `--`.
+    if not isinstance(args.extra_dbt_command_options, str):
         args.extra_dbt_command_options = "--"
 
     if args.job_cluster_key and args.environment_key is not None:

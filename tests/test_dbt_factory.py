@@ -1,4 +1,5 @@
 import os
+import random
 import shlex
 import subprocess
 import sys
@@ -1196,6 +1197,48 @@ def test_ambiguous_test_with_only_a_missing_parent_is_refused(dbt_factory):
         dbt_factory.create_tasks({'nodes': nodes})
 
 
+def test_bundled_ambiguous_test_with_a_missing_parent_is_refused_not_scoped_to_the_present_one(
+    dbt_factory_bundled,
+):
+    # `_classify_tests` files a test with one present testable parent under that parent's bundle, but
+    # `_test_selection_plan` counts *every* testable parent — including absent ones — so a two-parent
+    # test with an ambiguous direct selector is refused rather than scoped to the single present parent.
+    # That refusal is deliberate: `--indirect-selection cautious` only pulls a test in when *all* its
+    # parents are selected, confirmed with `dbt ls` on dbt 1.12.0 (selecting one of two parents resolves
+    # to no nodes). Scoping to the present parent alone would therefore emit a `cautious` selector dbt
+    # runs to nothing — a task that goes green having asserted nothing. `_test_parent_ids` counting the
+    # absent parent is what keeps this loud instead of silently wrong.
+    #
+    # Real dbt does not produce this shape: disabling a parent disables the test and drops the parent
+    # from its `depends_on`. The manifest is hand-built to pin the refusal against a hand-edited or
+    # future manifest that could.
+    nodes = dict(
+        [
+            _model('pkg', 'a'),
+            _model('pkg', 'b'),
+            _test(
+                'pkg',
+                'check',
+                ['model.pkg.a', 'model.pkg.missing'],
+                fqn=['pkg', 'check'],
+                path='models/schema.yml',
+                test_name='not_null',
+            ),
+            _test(
+                'pkg',
+                'check.nested',
+                ['model.pkg.b'],
+                fqn=['pkg', 'check', 'nested'],
+                path='models/schema.yml',
+                test_name='not_null',
+            ),
+        ]
+    )
+
+    with pytest.raises(ValueError, match='also runs'):
+        dbt_factory_bundled.create_tasks({'nodes': nodes})
+
+
 def test_a_usable_name_still_rescues_an_unusable_fqn(dbt_factory):
     # The boundary of the refusal above: only the fqn *or* the name has to survive. A space in the
     # directory kills the fqn, but `orders` is a fine selector and dbt matches a bare name against the
@@ -1709,6 +1752,89 @@ def test_selector_index_narrowing_matches_a_full_scan(dbt_factory):
             _test('pkg', 'chk.nested', ['model.pkg.orders.items'], path='models/schema.yml', test_name='not_null'),
         ]
     )
+    index = DbtFactory._selector_index(peers)
+
+    for info in peers.values():
+        select = DbtFactory._node_select(info)
+        scanned = sorted(DbtFactory._matching_ids(select, peers))
+        narrowed = sorted(DbtFactory._matching_ids(select, index))
+        assert narrowed == scanned, f'{select!r} narrowed to {narrowed}, full scan gives {scanned}'
+
+
+def _random_model_layout(seed: int, size: int) -> dict:
+    """
+    A randomised set of model peers built to collide on fqn tokens.
+
+    dbt's fqn semantics live in three places that must agree — the truth (`_fqn_term_matches`), the
+    keys a node is filed under (`_SelectorIndex._fqn_keys`), and the keys a term is looked up under
+    (`_fqn_candidates`). Small pools of packages and segment words force shared prefixes, shared
+    leaves, package-stripping overlaps, dotted names, and versioned models — the shapes on which a
+    divergence between the three would surface.
+    """
+    rnd = random.Random(seed)
+    packages = ['pkg', 'shop', 'a']
+    words = ['orders', 'items', 'raw', 'a', 'b', 'dim']
+    peers: dict = {}
+    for _ in range(size):
+        pkg = rnd.choice(packages)
+        segments = [rnd.choice(words) for _ in range(rnd.randint(1, 3))]
+        if rnd.random() < 0.25 and len(segments) >= 2:
+            # A versioned model: dbt clones the version onto the fqn leaf (`['pkg', 'orders', 'v1']`).
+            version = rnd.randint(1, 3)
+            full_name, info = _model(pkg, segments[-1], fqn=[pkg, *segments, f'v{version}'], version=version)
+        else:
+            # Sometimes a dotted name, so the flattened fqn is longer than the raw one.
+            name = '.'.join(segments) if rnd.random() < 0.3 else segments[-1]
+            full_name, info = _model(pkg, name, fqn=[pkg, *segments])
+        while full_name in peers:  # keep ids distinct without disturbing the node's fqn/name
+            full_name += '_'
+        peers[full_name] = info
+    return peers
+
+
+def _fqn_terms_from(info: dict) -> set[str]:
+    """Every fqn term dbt could plausibly address this node by — contiguous fqn slices (raw and
+    flattened), the versioned `_`-join, and the bare name — so the term pool exercises the leaf
+    shortcut, the positional walk, the package-stripped retry, and the versioned match."""
+    fqn = info.get('fqn') or []
+    terms: set[str] = set()
+    if info.get('name'):
+        terms.add(info['name'])
+    for parts in (fqn, DbtFactory._flat_fqn(fqn)):
+        for start in range(len(parts)):
+            for end in range(start + 1, len(parts) + 1):
+                terms.add('.'.join(parts[start:end]))
+        if len(parts) >= 2:
+            terms.add('_'.join(parts[-2:]))
+    return terms
+
+
+@pytest.mark.parametrize('seed', range(8))
+def test_fqn_index_bucket_is_a_superset_of_the_truth_over_random_layouts(seed):
+    # The soundness invariant behind the whole exactness check: whenever the truth predicate says an
+    # fqn term matches a node, the index must file that node in the term's candidate bucket — otherwise
+    # `narrow` hands `_matching_ids` a bucket missing a real collision and a non-exact selector passes
+    # `_assert_exact`. This couples `_fqn_term_matches` (truth), `_fqn_keys` (fills buckets) and
+    # `_fqn_candidates` (reads them) directly, so a future edit to any one that diverges fails here
+    # rather than surfacing as a task that runs another resource. The bucket may be a *superset* (that
+    # only costs a wasted predicate eval), so only the subset direction is asserted.
+    peers = _random_model_layout(seed, size=40)
+    index = DbtFactory._selector_index(peers)
+    term_pool = set().union(*(_fqn_terms_from(info) for info in peers.values()))
+
+    for term in term_pool:
+        truth = {full_name for full_name, info in peers.items() if DbtFactory._fqn_term_matches(term, info)}
+        bucket = index._fqn_candidates(term)
+        missing = truth - set(bucket)
+        assert not missing, f'term {term!r} truth-matches {sorted(missing)} but the index bucket omits them'
+
+
+@pytest.mark.parametrize('seed', range(8))
+def test_index_narrowing_matches_a_full_scan_over_random_layouts(seed):
+    # The generalisation of `test_selector_index_narrowing_matches_a_full_scan` off a single hand-built
+    # layout: for each node's emitted selector the index-narrowed match set must equal the full-scan
+    # one, over randomised layouts that stress every fqn-bucket hazard.
+    peers = _random_model_layout(seed, size=40)
     index = DbtFactory._selector_index(peers)
 
     for info in peers.values():

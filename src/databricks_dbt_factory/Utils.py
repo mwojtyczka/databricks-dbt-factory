@@ -239,12 +239,17 @@ def read_dbt_manifest(path: str) -> dict:
 
     Raises:
         FileNotFoundError: If the file does not exist.
-        ValueError: If the file is not valid JSON.
+        ValueError: If the file is not valid JSON, or is valid JSON that is not an object. A non-object
+            (list, scalar, null) would parse here and only fail later as an AttributeError on
+            `manifest.get(...)`, which `main` does not catch — a traceback instead of a clean `error:`.
     """
     try:
         with open(path, 'r', encoding='utf-8') as file:
-            return json.load(file)
+            manifest = json.load(file)
     except FileNotFoundError as e:
         raise FileNotFoundError(f'Manifest file not found: {path}. Details: {e}') from e
     except json.JSONDecodeError as e:
         raise ValueError(f'Error parsing JSON from manifest file: {path}. Details: {e}') from e
+    if not isinstance(manifest, dict):
+        raise ValueError(f'Manifest file {path} must contain a JSON object, got {type(manifest).__name__}.')
+    return manifest

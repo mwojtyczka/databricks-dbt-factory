@@ -54,11 +54,12 @@ def render_job_spec(
         new_job_name (str, optional): The name of the job to update. Defaults to None.
 
     Raises:
-        ValueError: If the file is not valid YAML, contains no jobs, or holds a non-mapping at any level
-            of `resources.jobs.<job>`. A `ValueError` rather than a `KeyError` so `main` can report it as
-            a user-fixable problem without also catching the bare `KeyError`s that an unexpected manifest
-            shape raises from the factory — those are bugs, and swallowing them turns a diagnosable
-            traceback into `error: 'resource_type'`.
+        ValueError: If the file is not valid YAML, contains no jobs, holds a non-mapping at any level
+            of `resources.jobs.<job>`, or `new_job_name` is the key of a different existing job (renaming
+            the first job onto it would silently drop that job). A `ValueError` rather than a `KeyError`
+            so `main` can report it as a user-fixable problem without also catching the bare `KeyError`s
+            that an unexpected manifest shape raises from the factory — those are bugs, and swallowing
+            them turns a diagnosable traceback into `error: 'resource_type'`.
     """
     with open(input_job_spec_path, 'r', encoding="utf-8") as file:
         try:
@@ -81,7 +82,12 @@ def render_job_spec(
     if not isinstance(jobs[first_job_key], dict):
         raise ValueError(f"Job {first_job_key!r} in {input_job_spec_path} is not a mapping, so it has no tasks.")
 
-    if new_job_name:
+    if new_job_name and new_job_name != first_job_key:
+        if new_job_name in jobs:
+            raise ValueError(
+                f"Cannot rename job {first_job_key!r} to {new_job_name!r} in {input_job_spec_path}: "
+                f"a different job already uses that key."
+            )
         jobs[new_job_name] = jobs.pop(first_job_key)
         first_job_key = new_job_name
 

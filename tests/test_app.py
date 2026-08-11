@@ -1401,3 +1401,47 @@ def test_parse_args_normalizes_an_empty_list_extra_option(monkeypatch, tmp_path)
     assert args.extra_dbt_command_options == "--"
     with pytest.raises(ValueError, match="cannot include selection option"):
         validate_extra_dbt_options(args.extra_dbt_command_options)
+
+
+@pytest.mark.parametrize(
+    "argparse_value",
+    [
+        pytest.param([], id="empty-list"),
+        pytest.param(["--"], id="single-element-list"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_parse_args_normalizes_any_non_string_extra_option(monkeypatch, tmp_path, argparse_value):
+    # The `--` end-of-options marker is the only way a non-string reaches this namespace, since the
+    # argument is `type=str`. 3.10 hands back `[]` for `--extra-dbt-command-options=--`, but the guard
+    # must not be pinned to that exact value: any non-string it fails to normalize reaches the validator's
+    # regex as a non-string and raises an uncaught `TypeError`, aborting the CLI with a traceback instead
+    # of the refusal `--` is owed. Forcing several non-string shapes pins the guard to "not a string"
+    # rather than "== []", so a future argparse that returns a different non-string stays safe.
+    target = tmp_path / "out.yaml"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target),
+        ],
+    )
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def parse_args_yielding_a_non_string(self, *args, **kwargs):
+        namespace = real_parse_args(self, *args, **kwargs)
+        namespace.extra_dbt_command_options = argparse_value
+        return namespace
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", parse_args_yielding_a_non_string)
+
+    args = parse_args()
+
+    assert args.extra_dbt_command_options == "--"
+    with pytest.raises(ValueError, match="cannot include selection option"):
+        validate_extra_dbt_options(args.extra_dbt_command_options)

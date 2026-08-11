@@ -61,6 +61,30 @@ def test_replace_tasks_raises_valueerror_when_the_job_is_not_a_mapping(tmp_path,
         replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"))
 
 
+def test_replace_tasks_refuses_to_overwrite_a_different_job_with_new_name(tmp_path):
+    # Two jobs; --new-job-name equals the *second* job's key. Renaming the first job onto that key
+    # (`jobs[new] = jobs.pop(first)`) would silently drop `beta`'s whole definition. Refuse rather
+    # than destroy an unrelated job.
+    spec = _write(
+        tmp_path / "in.yaml",
+        {"resources": {"jobs": {"alpha": {"tasks": []}, "beta": {"tasks": [{"task_key": "keep"}]}}}},
+    )
+    with pytest.raises(ValueError, match="beta"):
+        replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(tmp_path / "out.yaml"), new_job_name="beta")
+
+
+def test_replace_tasks_allows_new_name_equal_to_first_job_key(tmp_path):
+    # Renaming the first job to the key it already has is a no-op rename, not a collision.
+    spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {"alpha": {"tasks": []}}}})
+    target = tmp_path / "out.yaml"
+
+    replace_tasks_in_job_spec(spec, [{"task_key": "t"}], str(target), new_job_name="alpha")
+
+    written = yaml.safe_load(target.read_text(encoding="utf-8"))
+    assert written["resources"]["jobs"]["alpha"]["tasks"] == [{"task_key": "t"}]
+    assert written["resources"]["jobs"]["alpha"]["name"] == "alpha"
+
+
 def test_replace_tasks_writes_tasks_into_first_job(tmp_path):
     spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {"my_job": {"tasks": []}}}})
     target = tmp_path / "out.yaml"

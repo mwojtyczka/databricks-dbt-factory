@@ -23,6 +23,7 @@ machine where dbt happened to be missing.
 import ast
 import functools
 import json
+import os
 import random
 import re
 import shlex
@@ -2506,6 +2507,7 @@ def _random_gating_project(rng: random.Random) -> tuple[dict[str, str], str]:
     return files, schema
 
 
+@functools.lru_cache(maxsize=None)
 def _shipped_runner_function(name: str):
     """
     Compiles one self-contained top-level function out of the packaged runner notebook.
@@ -2513,6 +2515,7 @@ def _shipped_runner_function(name: str):
     The runner cannot be imported (it runs `dbutils` at module scope on a cluster), so the test drives
     the *shipped* `_normalize_manifest_paths` by parsing the source and compiling that one function —
     testing a copy would let the runtime path drift from what the unit tests assert about the source.
+    Cached: the source is read and parsed once rather than on every replay.
     """
     source = (
         Path(__file__).resolve().parents[2] / 'src' / 'databricks_dbt_factory' / 'notebook' / 'run_dbt_command.py'
@@ -2569,8 +2572,15 @@ def _inject_and_list(msgpack: bytes, root: Path, select: str, mangle=None) -> tu
         # A POSIX file whose name legitimately contains a backslash: the path already uses `/`
         # separators, so normalization must leave the backslash alone. Rewriting it to `models/we/ird.sql`
         # makes `Path(...).name` yield `ird.sql`, and the factory's `file:we\ird.sql` matches nothing —
-        # the same silent green no-op, now inflicted on a valid POSIX project.
-        pytest.param('model.probe.we\\ird', False, id='posix-backslash-filename'),
+        # the same silent green no-op, now inflicted on a valid POSIX project. Skipped on Windows, where a
+        # backslash is a path separator: `_write_project` cannot create a file with that name (it becomes a
+        # subdirectory), so this POSIX-only branch is unreachable there.
+        pytest.param(
+            'model.probe.we\\ird',
+            False,
+            id='posix-backslash-filename',
+            marks=pytest.mark.skipif(os.name == 'nt', reason='a backslash is a path separator on Windows'),
+        ),
     ],
 )
 def test_injected_manifest_resolves_the_factory_selector(tmp_path, unique_id, simulate_windows):

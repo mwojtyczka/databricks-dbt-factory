@@ -43,9 +43,11 @@ Source = "https://github.com/mwojtyczka/databricks-dbt-factory"
 [tool.hatch.version]
 path = "src/databricks_dbt_factory/__about__.py"
 
-[tool.hatch.build]
-sources = ["src"]
+[tool.hatch.build.targets.sdist]
 include = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/databricks_dbt_factory"]
 
 [tool.hatch.envs.default]
 dependencies = [
@@ -62,6 +64,14 @@ dependencies = [
   "pytest-timeout~=2.3.1",
   "pytest-xdist~=3.5.0",
   "ruff~=0.3.4",
+  # dbt itself, so tests/integration/test_selector_against_dbt.py can verify every generated
+  # `--select` against the real matcher instead of against our model of it. Not a runtime
+  # dependency: the factory only reads a manifest dbt has already produced.
+  # Deliberately loose: these tests assert what dbt's live matcher does, so running against whatever
+  # current 1.x resolves is the point — a selector that stops being exact in a later dbt should fail
+  # here rather than be masked by a pin. Note the dbt version you verified against in the commit.
+  "dbt-core~=1.12",
+  "dbt-databricks~=1.11",
   "types-PyYAML~=6.0.12",
   "types-requests~=2.31.0",
 ]
@@ -73,8 +83,8 @@ path = ".venv"
 
 [tool.hatch.envs.default.scripts]
 test        = "pytest -n 10 src --timeout 30 --ignore=tests/integration tests --durations 20"
-integration = "pytest -n 10 --timeout 60 tests/integration --durations 20"
-coverage    = "pytest -n 10 --cov src tests/ --timeout 30 --cov-report=html --durations 20"
+integration = "pytest -n 10 --timeout 300 tests/integration --durations 20"
+coverage    = "pytest -n 10 --cov src tests/ --timeout 300 --cov-report=html --durations 20"
 fmt         = ["black .",
                "ruff check . --fix",
                "mypy .",

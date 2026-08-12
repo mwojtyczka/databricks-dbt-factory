@@ -51,7 +51,7 @@ hatch run databricks_dbt_factory \
   --dbt-manifest-path tests/test_data/manifest.json \
   --input-job-spec-path tests/test_data/job_definition_template.yaml \
   --target-job-spec-path job_definition_new.yaml \
-  --source GIT \
+  --source WORKSPACE \
   --target dev
 
 # or install locally and run
@@ -60,7 +60,7 @@ databricks_dbt_factory  \
   --dbt-manifest-path tests/test_data/manifest.json \
   --input-job-spec-path tests/test_data/job_definition_template.yaml \
   --target-job-spec-path job_definition_new.yaml \
-  --source GIT \
+  --source WORKSPACE \
   --target dev
 ```
 
@@ -117,15 +117,15 @@ databricks_dbt_factory \
   --dbt-manifest-path tests/test_data/manifest.json \
   --input-job-spec-path tests/test_data/job_definition_template.yaml \
   --target-job-spec-path job_definition_new.yaml \
-  --source GIT \
+  --source WORKSPACE \
   --target dev
 ```
 
-For **notebook task type**, also pass `--task-type notebook`. The factory copies the packaged
-runner notebook next to the generated job spec automatically — no separate workspace upload
-needed; `databricks bundle deploy` will sync it in Step 3. (For `--source WORKSPACE`, also
-pass `--project-directory` / `--profiles-directory` pointing at the uploaded dbt project; see
-the [Task types](../README.md#task-types) section in the README for full examples.)
+For **notebook task type**, also pass `--task-type notebook`. The factory writes an immutable
+`run_dbt_command_<sha256>.py` runner next to the generated job spec automatically; `databricks
+bundle deploy` syncs that workspace-local bundle file in Step 3. Use `--source WORKSPACE` for this
+auto-copy mode. Also pass `--project-directory` / `--profiles-directory` pointing at the uploaded
+dbt project; see the [Task types](../README.md#task-types) section in the README for full examples.
 
 ### 2. Wrap the generated spec in a DAB
 
@@ -147,17 +147,16 @@ include:
 Use a **unique `bundle.name`** per test iteration — DABs are declarative, so anything previously
 deployed under the same bundle name but no longer in `include` is **deleted** on the next deploy.
 
-If the generated spec uses `--source GIT`, it already contains a `git_source` block; the
-workspace must be able to reach that repo/branch (public URL or a Git credential configured in
-the workspace). For `--source WORKSPACE`, no extra git config is needed, but the dbt project
-directory and `profiles.yml` must already exist at the paths passed to `--project-directory` /
-`--profiles-directory` (upload them with `databricks workspace import-dir` or sync from your
-repo).
+Auto-copied bundle notebooks use `--source WORKSPACE`, as recommended for workspace-local bundle
+files. No extra Git configuration is needed, but the dbt project directory and `profiles.yml` must
+exist at the paths passed to `--project-directory` / `--profiles-directory` (upload them with
+`databricks workspace import-dir` or sync from your repo). Reserve `--source GIT` for an explicit
+`--notebook-path` inside the job's configured remote Git source.
 
 ### 3. Validate, deploy, run
 
 ```shell
-databricks bundle validate                  # schema + reference check, no write
+databricks bundle validate --strict         # schema + reference check, no write; warnings fail
 databricks bundle deploy --target dev       # push resources to the workspace
 databricks bundle run <job-resource-key>    # trigger a run (e.g. dbt_sql_job)
 ```
@@ -171,10 +170,10 @@ databricks bundle run <job-resource-key>    # trigger a run (e.g. dbt_sql_job)
 
 - Task graph matches the expected topology (models, tests, snapshots, seeds in the right order).
 - Each task succeeds — or, when intentionally breaking a test:
-  - In the default per-test mode, the individual `test_<name>` task fails; downstream models
-    still run (they depend on the parent resource task, not the test).
-  - Under `--bundle-tests`, the `tests_<resource>` task fails and downstream models/seeds/snapshots
-    gated on it are skipped.
+  - In the default per-test mode, the individual `<test_name>_test` task fails; downstream models
+    gated on that test at the first safe downstream frontier are skipped.
+  - Under `--bundle-tests`, the `<resource>_test` task fails and downstream models/seeds/snapshots
+    gated on that bundle are skipped.
 - For notebook tasks, confirm `dbt_commands` / `project_directory` / `profiles_directory`
   parameters render correctly in the task run page.
 

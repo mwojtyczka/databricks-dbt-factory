@@ -11,11 +11,15 @@ job spec from ``tests/test_data`` and writes a generated spec, which we compare 
 committed golden files.
 """
 
+import hashlib
+import json
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 TEST_DATA = Path(__file__).resolve().parent.parent / "test_data"
@@ -84,7 +88,7 @@ def test_cli_dbt_task_matches_golden_spec(tmp_path):
 
 
 def test_cli_notebook_mode_packages_and_copies_runner(tmp_path):
-    """In notebook mode the CLI copies the packaged runner notebook next to the spec.
+    """In notebook mode the CLI publishes the packaged runner next to the spec.
 
     This asserts the runner notebook data file is actually shipped in the installed
     package (resolved via importlib.resources at runtime), which the in-process tests
@@ -103,13 +107,18 @@ def test_cli_notebook_mode_packages_and_copies_runner(tmp_path):
         "notebook",
     )
 
-    copied_runner = tmp_path / "run_dbt_command.py"
-    assert copied_runner.exists(), "runner notebook should be copied next to the generated spec"
+    copied_runners = list(tmp_path.glob("run_dbt_command_*.py"))
+    assert len(copied_runners) == 1, "exactly one content-addressed runner should be published"
+    copied_runner = copied_runners[0]
+    match = re.fullmatch(r"run_dbt_command_([0-9a-f]{64})\.py", copied_runner.name)
+    assert match is not None, "runner should use its full lowercase SHA-256 digest"
+    assert hashlib.sha256(copied_runner.read_bytes()).hexdigest() == match.group(1)
     assert "dbtRunner" in copied_runner.read_text(encoding="utf-8"), "copied file should be the packaged runner"
 
     tasks = _load(target)["resources"]["jobs"]["dbt_sql_job"]["tasks"]
     for task in tasks:
-        assert task["notebook_task"]["notebook_path"] == "./run_dbt_command.py"
+        assert task["notebook_task"]["notebook_path"] == f"./{copied_runner.name}"
+        assert task["notebook_task"]["source"] == "WORKSPACE"
 
 
 def test_cli_help_runs():
@@ -134,3 +143,101 @@ def test_cli_missing_required_args_fails():
     )
     assert result.returncode != 0
     assert "usage" in (result.stderr + result.stdout).lower()
+
+
+def test_cli_unaddressable_resource_reports_without_a_traceback(tmp_path):
+    """
+    A resource the factory cannot address is a user-fixable condition — the remedy is to rename a
+    file — so the CLI must report it as an error message, not as a Python traceback with the useful
+    sentence buried at the end.
+
+    `models/orders+1.sql` is legal in dbt but its name ends in something dbt reads as a graph
+    operator, so neither the FQN nor the bare name can address it. See the README's
+    "When generation fails".
+    """
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "model.pkg.orders+1": {
+                        "resource_type": "model",
+                        "name": "orders+1",
+                        "package_name": "pkg",
+                        "fqn": ["pkg", "orders+1"],
+                        "original_file_path": "models/orders+1.sql",
+                        "depends_on": {"nodes": []},
+                    }
+                },
+                "sources": {},
+                "unit_tests": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "job_definition.yaml"
+
+    result = subprocess.run(  # noqa: S603
+        [
+            CLI,
+            "--dbt-manifest-path",
+            str(manifest),
+            "--input-job-spec-path",
+            str(TEST_DATA / "job_definition_template.yaml"),
+            "--target-job-spec-path",
+            str(target),
+            "--task-type",
+            "dbt",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 1, f"expected exit 1, got {result.returncode}\n{output}"
+    assert "Traceback (most recent call last)" not in output, f"the failure is still a traceback:\n{output}"
+    # The message has to name the resource, its file and the remedy, since that is all the user gets.
+    assert "orders+1" in output
+    assert "models/orders+1.sql" in output
+    assert "Rename" in output
+    # Nothing is written on failure, so a broken spec can never be deployed.
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    ("manifest_contents", "expected"),
+    [
+        pytest.param(None, "Manifest file not found", id="missing-file"),
+        pytest.param("not json at all", "Error parsing JSON", id="unparsable"),
+    ],
+)
+def test_cli_unreadable_manifest_reports_without_a_traceback(tmp_path, manifest_contents, expected):
+    """An unreadable manifest is the user's to fix too, so it reports the same way."""
+    manifest = tmp_path / "manifest.json"
+    if manifest_contents is not None:
+        manifest.write_text(manifest_contents, encoding="utf-8")
+    target = tmp_path / "job_definition.yaml"
+
+    result = subprocess.run(  # noqa: S603
+        [
+            CLI,
+            "--dbt-manifest-path",
+            str(manifest),
+            "--input-job-spec-path",
+            str(TEST_DATA / "job_definition_template.yaml"),
+            "--target-job-spec-path",
+            str(target),
+            "--task-type",
+            "dbt",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 1, f"expected exit 1, got {result.returncode}\n{output}"
+    assert "Traceback (most recent call last)" not in output, f"the failure is still a traceback:\n{output}"
+    assert expected in output
+    assert not target.exists()

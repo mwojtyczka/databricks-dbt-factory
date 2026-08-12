@@ -423,7 +423,9 @@ The `file:` term is included only when the manifest path has the same base name 
 Windows semantics. Manifest JSON does not record which platform produced paths containing a
 backslash, so the factory omits that ambiguous discriminator and proves the remaining selector exact
 instead. The notebook runner injects the pre-built manifest unchanged; generation fails if the other
-terms cannot isolate the resource.
+terms cannot isolate the resource. This only affects manifests **generated on Windows**, whose nested paths carry backslash separators;
+generating the manifest on the same POSIX platform the Databricks job runs on keeps the `file:` term
+available.
 
 Each selector is then checked against the manifest, because an FQN is a *prefix* over dbt's flattened
 FQN rather than an identifier: a test named `check.nested` is also matched by its sibling `check`'s

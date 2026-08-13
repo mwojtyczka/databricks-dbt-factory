@@ -93,9 +93,6 @@ verify      = ["ruff format --check .",
                "mypy .",
                "pylint --output-format=colorized -j 0 src tests"]
 
-[tool.isort]
-profile = "black"
-
 [tool.mypy]
 exclude = ['venv', '.venv', 'src/databricks_dbt_factory/notebook']
 ignore_missing_imports = true
@@ -112,14 +109,14 @@ line-length = 120
 extend-exclude = ["src/databricks_dbt_factory/notebook"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["databricks.labs.dqx"]
+known-first-party = ["databricks_dbt_factory"]
 
 [tool.coverage.run]
 branch = true
 parallel = true
 
 [tool.coverage.report]
-omit = ["*/working-copy/*", 'src/databricks/labs/dqx/__main__.py']
+omit = ["*/working-copy/*"]
 exclude_lines = [
     "no cov",
     "if __name__ == .__main__.:",

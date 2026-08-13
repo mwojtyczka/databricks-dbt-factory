@@ -61,7 +61,7 @@ def render_job_spec(
             that an unexpected manifest shape raises from the factory — those are bugs, and swallowing
             them turns a diagnosable traceback into `error: 'resource_type'`.
     """
-    with open(input_job_spec_path, 'r', encoding="utf-8") as file:
+    with open(input_job_spec_path, "r", encoding="utf-8") as file:
         try:
             job_definition = yaml.safe_load(file)
         except yaml.YAMLError as error:
@@ -72,8 +72,8 @@ def render_job_spec(
     # and assigns into the job, so a non-mapping anywhere raises `AttributeError`/`TypeError`, which escapes
     # `main`'s `except (ValueError, FileNotFoundError)` and prints a traceback for a malformed *input file*
     # — the outcome this guard exists to prevent.
-    resources = job_definition.get('resources') if isinstance(job_definition, dict) else None
-    jobs = resources.get('jobs') if isinstance(resources, dict) else None
+    resources = job_definition.get("resources") if isinstance(job_definition, dict) else None
+    jobs = resources.get("jobs") if isinstance(resources, dict) else None
     if not isinstance(jobs, dict) or not jobs:
         raise ValueError(f"No jobs found in {input_job_spec_path}.")
 
@@ -93,8 +93,8 @@ def render_job_spec(
 
     first_job = jobs[first_job_key]
     if new_job_name:
-        first_job['name'] = new_job_name
-    first_job['tasks'] = new_tasks  # Replace tasks field
+        first_job["name"] = new_job_name
+    first_job["tasks"] = new_tasks  # Replace tasks field
 
     return yaml.dump(job_definition, sort_keys=False, width=1000)
 
@@ -103,7 +103,7 @@ def resolve_job_spec_destination(target_job_spec_path: str | Path) -> Path:
     """Validates a requested job spec target and returns its canonical destination."""
     requested_destination = Path(target_job_spec_path)
     if requested_destination.is_symlink() or (requested_destination.exists() and not requested_destination.is_file()):
-        raise ValueError(f'Job spec target {requested_destination} must be a regular non-symlink file.')
+        raise ValueError(f"Job spec target {requested_destination} must be a regular non-symlink file.")
     return requested_destination.resolve()
 
 
@@ -111,7 +111,7 @@ def prepare_job_spec(rendered: str, input_job_spec_path: str, destination: Path)
     """Encodes a rendered spec and resolves the mode its atomic replacement must use."""
     mode_source = destination if destination.exists() else Path(input_job_spec_path)
     mode = stat.S_IMODE(mode_source.stat().st_mode)
-    return JobSpecArtifact(rendered.encode('utf-8'), destination, mode)
+    return JobSpecArtifact(rendered.encode("utf-8"), destination, mode)
 
 
 def write_job_spec(artifact: JobSpecArtifact) -> None:

@@ -8,38 +8,38 @@ from databricks_dbt_factory.Utils import DYNAMIC_VALUE_REFERENCE
 
 _RESERVED_DBT_SELECTION_OPTIONS = frozenset(
     {
-        '--select',
-        '--models',
-        '--model',
-        '--exclude',
-        '--selector',
-        '--resource-type',
-        '--resource-types',
-        '--exclude-resource-type',
-        '--exclude-resource-types',
+        "--select",
+        "--models",
+        "--model",
+        "--exclude",
+        "--selector",
+        "--resource-type",
+        "--resource-types",
+        "--exclude-resource-type",
+        "--exclude-resource-types",
     }
 )
-_RESERVED_DBT_PARSE_CONTEXT_OPTIONS = frozenset({'--vars', '--profile', '--profiles-dir', '--project-dir'})
-_RESERVED_DBT_SHORT_SELECTION_OPTIONS = frozenset({'-s', '-m'})
-_RESERVED_DBT_SHORT_TARGET_OPTIONS = frozenset({'-t'})
-_DBT_SHORT_OPTIONS_WITH_ATTACHED_VALUES = frozenset({'-r', '-t'})
-_DBT_TARGET_OPTIONS_WITH_SEPARATE_VALUES = frozenset({'--target', '-t'})
-_DBT_TARGET_VALUE_ERROR = 'dbt target requires a nonempty value.'
+_RESERVED_DBT_PARSE_CONTEXT_OPTIONS = frozenset({"--vars", "--profile", "--profiles-dir", "--project-dir"})
+_RESERVED_DBT_SHORT_SELECTION_OPTIONS = frozenset({"-s", "-m"})
+_RESERVED_DBT_SHORT_TARGET_OPTIONS = frozenset({"-t"})
+_DBT_SHORT_OPTIONS_WITH_ATTACHED_VALUES = frozenset({"-r", "-t"})
+_DBT_TARGET_OPTIONS_WITH_SEPARATE_VALUES = frozenset({"--target", "-t"})
+_DBT_TARGET_VALUE_ERROR = "dbt target requires a nonempty value."
 _EXTRA_DBT_PARSE_CONTEXT_REMEDIES = {
-    '--target': '--target',
-    '-t': '--target',
-    '--profiles-dir': '--profiles-directory',
-    '--project-dir': '--project-directory',
+    "--target": "--target",
+    "-t": "--target",
+    "--profiles-dir": "--profiles-directory",
+    "--project-dir": "--project-directory",
 }
 
 
 def _reserved_short_option(token: str, reserved_options: frozenset[str]) -> str | None:
     """Returns a reserved option embedded in one dbt short-option token."""
-    if not token.startswith('-') or token.startswith('--'):
+    if not token.startswith("-") or token.startswith("--"):
         return None
 
     for character in token[1:]:
-        option = f'-{character}'
+        option = f"-{character}"
         if option in reserved_options:
             return option
         if option in _DBT_SHORT_OPTIONS_WITH_ATTACHED_VALUES:
@@ -49,7 +49,7 @@ def _reserved_short_option(token: str, reserved_options: frozenset[str]) -> str 
 
 def _reserved_parse_context_option(token: str) -> str | None:
     """Returns a parse-context option that is unsafe at every validation boundary."""
-    long_option = token.partition('=')[0]
+    long_option = token.partition("=")[0]
     if long_option in _RESERVED_DBT_PARSE_CONTEXT_OPTIONS:
         return long_option
     return None
@@ -57,17 +57,17 @@ def _reserved_parse_context_option(token: str) -> str | None:
 
 def _target_option(token: str) -> str | None:
     """Returns the target option represented by one token, including its short form."""
-    long_option = token.partition('=')[0]
-    if long_option == '--target':
+    long_option = token.partition("=")[0]
+    if long_option == "--target":
         return long_option
     return _reserved_short_option(token, _RESERVED_DBT_SHORT_TARGET_OPTIONS)
 
 
 def _reserved_selection_option(token: str) -> str | None:
     """Returns a selection option that conflicts with factory-owned selection."""
-    if token == '--':
+    if token == "--":
         return token
-    long_option = token.partition('=')[0]
+    long_option = token.partition("=")[0]
     if long_option in _RESERVED_DBT_SELECTION_OPTIONS:
         return long_option
     return _reserved_short_option(token, _RESERVED_DBT_SHORT_SELECTION_OPTIONS)
@@ -77,8 +77,8 @@ def _is_supported_leading_target(token: str) -> bool:
     """Returns whether a token is one of the controlled leading target forms."""
     return (
         token in _DBT_TARGET_OPTIONS_WITH_SEPARATE_VALUES
-        or token.startswith('--target=')
-        or (token.startswith('-t') and not token.startswith('--') and len(token) > 2)
+        or token.startswith("--target=")
+        or (token.startswith("-t") and not token.startswith("--") and len(token) > 2)
     )
 
 
@@ -86,14 +86,14 @@ def _raise_parse_context_error(option: str, reject_target: bool) -> None:
     """Raises the boundary-specific error for a runtime parse-context override."""
     if reject_target:
         dedicated_option = _EXTRA_DBT_PARSE_CONTEXT_REMEDIES.get(option)
-        remedy = f' Use the dedicated {dedicated_option} argument instead.' if dedicated_option else ''
+        remedy = f" Use the dedicated {dedicated_option} argument instead." if dedicated_option else ""
         raise ValueError(
-            f'--extra-dbt-command-options cannot include parse-context option {option!r}.{remedy} '
-            'The runtime parse context must match the supplied manifest.'
+            f"--extra-dbt-command-options cannot include parse-context option {option!r}.{remedy} "
+            "The runtime parse context must match the supplied manifest."
         )
     raise ValueError(
-        f'dbt command options cannot include parse-context option {option!r}; '
-        'the runtime parse context must match the supplied manifest.'
+        f"dbt command options cannot include parse-context option {option!r}; "
+        "the runtime parse context must match the supplied manifest."
     )
 
 
@@ -102,8 +102,8 @@ def _validate_dbt_option_token(token: str, token_index: int, reject_target: bool
     reserved_option = _reserved_selection_option(token)
     if reserved_option is not None:
         raise ValueError(
-            f'dbt command options cannot include selection option {reserved_option!r}; '
-            f'the factory owns selection so each task addresses only its intended resource.'
+            f"dbt command options cannot include selection option {reserved_option!r}; "
+            f"the factory owns selection so each task addresses only its intended resource."
         )
 
     target_option = _target_option(token)
@@ -112,10 +112,10 @@ def _validate_dbt_option_token(token: str, token_index: int, reject_target: bool
             _raise_parse_context_error(target_option, reject_target=True)
         if token_index != 0 or not _is_supported_leading_target(token):
             raise ValueError(
-                'dbt command options can include at most one target, only as the leading '
-                f'factory-controlled option; found {target_option!r} elsewhere.'
+                "dbt command options can include at most one target, only as the leading "
+                f"factory-controlled option; found {target_option!r} elsewhere."
             )
-        if token == '--target=':
+        if token == "--target=":
             raise ValueError(_DBT_TARGET_VALUE_ERROR)
         return token in _DBT_TARGET_OPTIONS_WITH_SEPARATE_VALUES
 
@@ -129,13 +129,13 @@ def _validate_dbt_options(dbt_options: str, reject_target: bool) -> None:
     """Rejects options that can invalidate the factory's manifest-derived task guarantees."""
     if DYNAMIC_VALUE_REFERENCE.search(dbt_options):
         raise ValueError(
-            'dbt command options cannot contain a Databricks dynamic value reference; '
-            'its runtime value could change the resource selection owned by the factory.'
+            "dbt command options cannot contain a Databricks dynamic value reference; "
+            "its runtime value could change the resource selection owned by the factory."
         )
     try:
         tokens = shlex.split(dbt_options)
     except ValueError as error:
-        raise ValueError(f'Cannot parse dbt command options: {error}.') from error
+        raise ValueError(f"Cannot parse dbt command options: {error}.") from error
 
     option_value_expected = False
     for token_index, token in enumerate(tokens):
@@ -366,7 +366,7 @@ class TestTaskFactory(TaskFactory):
         dbt_node_info: dict,
         task_key: str,
         task_keys: dict[str, str],
-        indirect_selection: str = 'empty',
+        indirect_selection: str = "empty",
     ) -> DbtTask:
         """
         Creates a test task for a single dbt test node.
@@ -418,10 +418,10 @@ class TestTaskFactory(TaskFactory):
         """
         dbt_deps = self.get_dbt_deps_command(deps_command_name)
         commands = [dbt_deps] if dbt_deps else []
-        unsupported_modes = set(selects_by_indirect_selection) - {'empty', 'cautious'}
+        unsupported_modes = set(selects_by_indirect_selection) - {"empty", "cautious"}
         if unsupported_modes:
-            raise ValueError(f'Unsupported dbt indirect-selection modes: {", ".join(sorted(unsupported_modes))}.')
-        for indirect_selection in ('empty', 'cautious'):
+            raise ValueError(f"Unsupported dbt indirect-selection modes: {', '.join(sorted(unsupported_modes))}.")
+        for indirect_selection in ("empty", "cautious"):
             if indirect_selection not in selects_by_indirect_selection:
                 continue
             selects = sorted(selects_by_indirect_selection[indirect_selection])

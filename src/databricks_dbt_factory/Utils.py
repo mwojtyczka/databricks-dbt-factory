@@ -4,13 +4,13 @@ import re
 from collections.abc import Iterable
 
 # Databricks substitutes complete dynamic value references in task string fields before execution.
-DYNAMIC_VALUE_REFERENCE = re.compile(r'\{\{[^{}]+\}\}')
+DYNAMIC_VALUE_REFERENCE = re.compile(r"\{\{[^{}]+\}\}")
 
 # Databricks caps task keys at 100 characters (letters, numbers, underscores, hyphens).
 MAX_TASK_KEY_LENGTH = 100
 
 # dbt resource types whose task key is `<resource_name>_<type>` (the type doubles as the suffix).
-_SUFFIXED_TYPES = frozenset({'model', 'seed', 'snapshot'})
+_SUFFIXED_TYPES = frozenset({"model", "seed", "snapshot"})
 
 
 def _resource_name(unique_id: str) -> str:
@@ -18,7 +18,7 @@ def _resource_name(unique_id: str) -> str:
     The dbt resource name — everything after `<type>.<package>.` — with dots turned into
     underscores. Keeps a versioned model's version, e.g. `model.shop.dim.v2` -> `dim_v2`.
     """
-    return '_'.join(unique_id.split('.')[2:])
+    return "_".join(unique_id.split(".")[2:])
 
 
 def _source_key(parts: list[str], with_package: bool) -> str:
@@ -26,18 +26,18 @@ def _source_key(parts: list[str], with_package: bool) -> str:
     Test-task key for a source (`source.<package>.<source_name>.<table>`): `<source_name>_<table>_test`,
     package-prefixed (`<package>_<source_name>_<table>_test`) when disambiguating a collision.
     """
-    prefix = f'{parts[1]}_' if with_package else ''
-    return f'{prefix}{parts[2]}_{parts[3]}_test'
+    prefix = f"{parts[1]}_" if with_package else ""
+    return f"{prefix}{parts[2]}_{parts[3]}_test"
 
 
 def _sanitized_id(unique_id: str) -> str:
     """Fallback key for an unhandled resource type: the sanitized `unique_id` (dots -> underscores)."""
-    return unique_id.replace('.', '_')
+    return unique_id.replace(".", "_")
 
 
 # Minimum dot-separated segment count required to build a key for each resource type. dbt ids are
 # `<type>.<package>.<name>[...]`; sources are `source.<package>.<source_name>.<table>`.
-_MIN_SEGMENTS = {'model': 3, 'seed': 3, 'snapshot': 3, 'test': 3, 'source': 4}
+_MIN_SEGMENTS = {"model": 3, "seed": 3, "snapshot": 3, "test": 3, "source": 4}
 
 
 def _split_unique_id(unique_id: str) -> list[str]:
@@ -46,10 +46,10 @@ def _split_unique_id(unique_id: str) -> list[str]:
     for its resource type. Raises `ValueError` with a clear message on a malformed id (e.g. a
     name-less `model.pkg`, or a source missing its table).
     """
-    parts = unique_id.split('.')
+    parts = unique_id.split(".")
     minimum = _MIN_SEGMENTS.get(parts[0])
     if minimum is not None and len(parts) < minimum:
-        raise ValueError(f'Malformed dbt node id {unique_id!r}: expected at least {minimum} dot-separated segments.')
+        raise ValueError(f"Malformed dbt node id {unique_id!r}: expected at least {minimum} dot-separated segments.")
     return parts
 
 
@@ -76,15 +76,15 @@ def generate_task_key(unique_id: str) -> str:
     resource_type = parts[0]
 
     if resource_type in _SUFFIXED_TYPES:
-        return f'{_resource_name(unique_id)}_{resource_type}'
+        return f"{_resource_name(unique_id)}_{resource_type}"
 
-    if resource_type == 'source':
+    if resource_type == "source":
         # A source only ever surfaces as a test task: source.<package>.<source_name>.<table>.
         return _source_key(parts, with_package=False)
 
-    if resource_type == 'test':
+    if resource_type == "test":
         # test.<package>.<test_name>[.<hash>] -> <test_name>_test (drop dbt's uniqueness hash).
-        test_hash = parts[3] if len(parts) > 3 else ''
+        test_hash = parts[3] if len(parts) > 3 else ""
         return _bounded_test_key(parts[2], test_hash)
 
     # Unknown type: fall back to the sanitized id (still unique).
@@ -97,9 +97,9 @@ def bundled_test_key(unique_id: str) -> str:
     `model.shop.orders` -> `orders_test`; `source.shop.raw.customers` -> `raw_customers_test`.
     """
     parts = _split_unique_id(unique_id)
-    if parts[0] == 'source':
+    if parts[0] == "source":
         return _source_key(parts, with_package=False)
-    return f'{_resource_name(unique_id)}_test'
+    return f"{_resource_name(unique_id)}_test"
 
 
 def build_task_key_maps(
@@ -165,7 +165,7 @@ def _reserve(candidate: str, taken: set[str]) -> str:
         return key
     counter = 2
     while True:
-        key = _bounded(f'{candidate}_{counter}')
+        key = _bounded(f"{candidate}_{counter}")
         if key not in taken:
             taken.add(key)
             return key
@@ -179,8 +179,8 @@ def _bounded(key: str) -> str:
     """
     if len(key) <= MAX_TASK_KEY_LENGTH:
         return key
-    digest = hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]
-    return f'{key[: MAX_TASK_KEY_LENGTH - len(digest) - 1]}_{digest}'
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    return f"{key[: MAX_TASK_KEY_LENGTH - len(digest) - 1]}_{digest}"
 
 
 def _disambiguated_task_key(unique_id: str) -> str:
@@ -190,30 +190,30 @@ def _disambiguated_task_key(unique_id: str) -> str:
     e.g. `test.shop.dup_check.9a1` -> `dup_check_9a1_test`, `model.pkg.orders` ->
     `pkg_orders_model`.
     """
-    parts = unique_id.split('.')
+    parts = unique_id.split(".")
     resource_type = parts[0]
     if resource_type in _SUFFIXED_TYPES:
-        return f'{parts[1]}_{_resource_name(unique_id)}_{resource_type}'
-    if resource_type == 'source':
+        return f"{parts[1]}_{_resource_name(unique_id)}_{resource_type}"
+    if resource_type == "source":
         return _source_key(parts, with_package=True)
-    if resource_type == 'test':
+    if resource_type == "test":
         if len(parts) > 3:
             return _hashed_test_key(parts[2], parts[3])
-        return f'{parts[1]}_{parts[2]}_test'
+        return f"{parts[1]}_{parts[2]}_test"
     return _sanitized_id(unique_id)
 
 
 def _disambiguated_bundled_test_key(unique_id: str) -> str:
     """Package-prefixed variant of `bundled_test_key`, for contested bundled test keys."""
-    parts = unique_id.split('.')
-    if parts[0] == 'source':
+    parts = unique_id.split(".")
+    if parts[0] == "source":
         return _source_key(parts, with_package=True)
-    return f'{parts[1]}_{_resource_name(unique_id)}_test'
+    return f"{parts[1]}_{_resource_name(unique_id)}_test"
 
 
 def _bounded_test_key(test_name: str, test_hash: str) -> str:
     """`<test_name>_test`, truncated and hash-disambiguated if it exceeds the key length limit."""
-    key = f'{test_name}_test'
+    key = f"{test_name}_test"
     if len(key) <= MAX_TASK_KEY_LENGTH:
         return key
     return _hashed_test_key(test_name, test_hash)
@@ -221,7 +221,7 @@ def _bounded_test_key(test_name: str, test_hash: str) -> str:
 
 def _hashed_test_key(test_name: str, test_hash: str) -> str:
     """`<test_name>_<hash>_test`, truncating the name so the hash survives the length limit."""
-    tail = (f'_{test_hash}' if test_hash else '') + '_test'
+    tail = (f"_{test_hash}" if test_hash else "") + "_test"
     if len(test_name) + len(tail) <= MAX_TASK_KEY_LENGTH:
         return test_name + tail
     return test_name[: MAX_TASK_KEY_LENGTH - len(tail)] + tail
@@ -244,12 +244,12 @@ def read_dbt_manifest(path: str) -> dict:
             `manifest.get(...)`, which `main` does not catch — a traceback instead of a clean `error:`.
     """
     try:
-        with open(path, 'r', encoding='utf-8') as file:
+        with open(path, "r", encoding="utf-8") as file:
             manifest = json.load(file)
     except FileNotFoundError as e:
-        raise FileNotFoundError(f'Manifest file not found: {path}. Details: {e}') from e
+        raise FileNotFoundError(f"Manifest file not found: {path}. Details: {e}") from e
     except json.JSONDecodeError as e:
-        raise ValueError(f'Error parsing JSON from manifest file: {path}. Details: {e}') from e
+        raise ValueError(f"Error parsing JSON from manifest file: {path}. Details: {e}") from e
     if not isinstance(manifest, dict):
-        raise ValueError(f'Manifest file {path} must contain a JSON object, got {type(manifest).__name__}.')
+        raise ValueError(f"Manifest file {path} must contain a JSON object, got {type(manifest).__name__}.")
     return manifest

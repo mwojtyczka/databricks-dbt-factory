@@ -56,10 +56,10 @@ def create_dbt_factory(
         notebook_path=notebook_path,
     )
     task_factories = {
-        'model': ModelTaskFactory(resolver, task_options, dbt_options),
-        'snapshot': SnapshotTaskFactory(resolver, task_options, dbt_options),
-        'seed': SeedTaskFactory(resolver, task_options, dbt_options),
-        'test': TestTaskFactory(resolver, task_options, dbt_options),
+        "model": ModelTaskFactory(resolver, task_options, dbt_options),
+        "snapshot": SnapshotTaskFactory(resolver, task_options, dbt_options),
+        "seed": SeedTaskFactory(resolver, task_options, dbt_options),
+        "test": TestTaskFactory(resolver, task_options, dbt_options),
     }
 
     return DbtFactory(task_factories, bundle_tests=bundle_tests)

@@ -51,7 +51,6 @@ packages = ["src/databricks_dbt_factory"]
 
 [tool.hatch.envs.default]
 dependencies = [
-  "black~=24.3.0",
   "coverage[toml]~=7.4.4",
   "databricks-labs-pylint~=0.5",
   "jsonschema~=4.21",
@@ -63,7 +62,7 @@ dependencies = [
   "pytest-mock~=3.14.0",
   "pytest-timeout~=2.3.1",
   "pytest-xdist~=3.5.0",
-  "ruff~=0.3.4",
+  "ruff~=0.12.0",
   # dbt itself, so tests/integration/test_selector_against_dbt.py can verify every generated
   # `--select` against the real matcher instead of against our model of it. Not a runtime
   # dependency: the factory only reads a manifest dbt has already produced.
@@ -85,11 +84,11 @@ path = ".venv"
 test        = "pytest -n 10 src --timeout 30 --ignore=tests/integration tests --durations 20"
 integration = "pytest -n 10 --timeout 300 tests/integration --durations 20"
 coverage    = "pytest -n 10 --cov src tests/ --timeout 300 --cov-report=html --durations 20"
-fmt         = ["black .",
+fmt         = ["ruff format .",
                "ruff check . --fix",
                "mypy .",
                "pylint --output-format=colorized -j 0 src tests"]
-verify      = ["black --check .",
+verify      = ["ruff format --check .",
                "ruff check .",
                "mypy .",
                "pylint --output-format=colorized -j 0 src tests"]
@@ -105,16 +104,6 @@ ignore_missing_imports = true
 addopts = "--no-header"
 cache_dir = ".venv/pytest-cache"
 filterwarnings = ["ignore::DeprecationWarning"]
-
-[tool.black]
-target-version = ["py310"]
-line-length = 120
-skip-string-normalization = true
-extend-exclude = '''
-/(
-  src/databricks_dbt_factory/notebook
-)/
-'''
 
 [tool.ruff]
 cache-dir = ".venv/ruff-cache"

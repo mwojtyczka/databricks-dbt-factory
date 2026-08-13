@@ -1,6 +1,6 @@
 import pytest
 
-from databricks_dbt_factory.Utils import (
+from databricks_dbt_factory.utils import (
     MAX_TASK_KEY_LENGTH,
     generate_task_key,
     bundled_test_key,

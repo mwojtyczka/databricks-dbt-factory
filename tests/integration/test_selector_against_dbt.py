@@ -35,8 +35,8 @@ import pytest
 from dbt.cli.main import dbtRunner, dbtRunnerResult
 from dbt.contracts.graph.manifest import Manifest
 
-from databricks_dbt_factory.DbtFactory import DbtFactory
-from databricks_dbt_factory.Utils import build_task_key_maps
+from databricks_dbt_factory.dbt_factory import DbtFactory
+from databricks_dbt_factory.utils import build_task_key_maps
 from tests.conftest import create_dbt_factory
 
 PROFILES = """\

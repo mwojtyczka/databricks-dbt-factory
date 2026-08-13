@@ -13,11 +13,11 @@ from tempfile import NamedTemporaryFile
 import pytest
 import yaml
 
-from databricks_dbt_factory.DbtFactory import DbtFactory
-from databricks_dbt_factory.DbtTask import DbtTaskOptions
+from databricks_dbt_factory.dbt_factory import DbtFactory
+from databricks_dbt_factory.dbt_task import DbtTaskOptions
 from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
-from databricks_dbt_factory.TaskFactory import DbtDependencyResolver, TestTaskFactory as DbtTestTaskFactory
-from databricks_dbt_factory.Utils import read_dbt_manifest
+from databricks_dbt_factory.task_factory import DbtDependencyResolver, TestTaskFactory as DbtTestTaskFactory
+from databricks_dbt_factory.utils import read_dbt_manifest
 
 BASE_PATH = str(Path(__file__).resolve().parent)
 

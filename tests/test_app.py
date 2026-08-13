@@ -13,9 +13,9 @@ import yaml
 
 import databricks_dbt_factory.main as main_module
 from databricks_dbt_factory import file_io
-from databricks_dbt_factory.__about__ import __version__
+from databricks_dbt_factory.__version__ import __version__
 from databricks_dbt_factory.main import main, parse_args
-from databricks_dbt_factory.TaskFactory import validate_extra_dbt_options
+from databricks_dbt_factory.task_factory import validate_extra_dbt_options
 
 BASE_PATH = str(Path(__file__).resolve().parent)
 

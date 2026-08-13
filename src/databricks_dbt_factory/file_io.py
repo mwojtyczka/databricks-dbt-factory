@@ -33,10 +33,10 @@ def _prepared_temporary_path(target: Path, content: bytes, mode: int) -> Iterato
     published = False
     try:
         with tempfile.NamedTemporaryFile(
-            mode='wb',
+            mode="wb",
             dir=target.parent,
-            prefix='.dbf-',
-            suffix='.tmp',
+            prefix=".dbf-",
+            suffix=".tmp",
             delete=False,
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)

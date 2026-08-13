@@ -9,7 +9,7 @@ from databricks_dbt_factory.TaskFactory import TaskFactory, TestTaskFactory
 from databricks_dbt_factory.Utils import DYNAMIC_VALUE_REFERENCE, build_task_key_maps
 
 # The `unique_id` prefixes of resources a test can be attached to.
-_DBT_TEST_TARGET_PREFIXES = ('model.', 'seed.', 'snapshot.', 'source.')
+_DBT_TEST_TARGET_PREFIXES = ("model.", "seed.", "snapshot.", "source.")
 
 
 def _flatten_fqn(fqn: list[str]) -> list[str]:
@@ -20,7 +20,7 @@ def _flatten_fqn(fqn: list[str]) -> list[str]:
     `check.nested` with fqn `['probe', 'check.nested']` compares as `['probe', 'check', 'nested']` —
     which is why the shorter `probe.check` matches it as a subtree parent.
     """
-    return [part for segment in fqn for part in segment.split('.')]
+    return [part for segment in fqn for part in segment.split(".")]
 
 
 @dataclass
@@ -68,7 +68,7 @@ def _base_file_name(original_file_path: str) -> str:
     selector terms must prove exactness or generation refuses the resource.
     """
     candidates = _candidate_file_names(original_file_path)
-    return next(iter(candidates)) if len(candidates) == 1 else ''
+    return next(iter(candidates)) if len(candidates) == 1 else ""
 
 
 class DbtFactory:
@@ -111,12 +111,12 @@ class DbtFactory:
         tasks = self._create_tasks(dbt_manifest)
         if len(tasks) > 1_000:
             raise ValueError(
-                f'Databricks jobs support at most 1,000 tasks; this manifest generates {len(tasks):,}. '
-                f'Reduce the generated resources or enable test bundling.'
+                f"Databricks jobs support at most 1,000 tasks; this manifest generates {len(tasks):,}. "
+                f"Reduce the generated resources or enable test bundling."
             )
         return [task.to_dict() for task in tasks]
 
-    _GATEABLE_TYPES = frozenset({'model', 'seed', 'snapshot'})
+    _GATEABLE_TYPES = frozenset({"model", "seed", "snapshot"})
     _DBT_TEST_TARGET_PREFIXES = _DBT_TEST_TARGET_PREFIXES
 
     # Characters that still change how an *explicit* `fqn:` selector is interpreted, so a component
@@ -139,7 +139,7 @@ class DbtFactory:
     # method explicitly bypasses that heuristic entirely. Verified: bare `probe.orders.sql` and
     # `probe.check/slash` select nothing, while `fqn:probe.orders.sql` and `fqn:probe.check/slash` each
     # resolve to exactly their node. `:` and literal braces are likewise literal under `fqn:`.
-    _SELECTOR_METACHARACTERS = frozenset(' ,*?[]')
+    _SELECTOR_METACHARACTERS = frozenset(" ,*?[]")
 
     @classmethod
     def _node_select(
@@ -217,31 +217,31 @@ class DbtFactory:
         # `test_type`, `resource_type`, `state`, `exposure`, `metric`, `result`, `source_status`,
         # `group`, `version`, `access`, `semantic_model`, `saved_query`, `unit_test`, `selector`.
         terms: list[str] = []
-        fqn = node_info.get('fqn') or []
+        fqn = node_info.get("fqn") or []
         # The `fqn:` prefix does *not* neutralise graph operators: `fqn:probe.orders+1` still selects
         # `orders` and its children, verified with `dbt ls` on dbt 1.12.0. The boundary check therefore
         # applies to the joined value; naming the method only bypasses the dispatch heuristic.
-        if fqn and cls._is_usable_selector('.'.join(fqn)) and all(cls._is_usable_component(part) for part in fqn):
+        if fqn and cls._is_usable_selector(".".join(fqn)) and all(cls._is_usable_component(part) for part in fqn):
             # `fqn:` names the method explicitly so `/` and `.sql` remain literal fqn text instead of
             # dispatching to path or file matching. `fqn:probe.orders.sql` and
             # `fqn:probe.check/slash` each resolve to exactly their node on dbt 1.12.0.
-            terms.append(f'fqn:{".".join(fqn)}')
-        elif cls._is_usable_component(name := node_info.get('name') or '') and cls._is_usable_selector(name):
+            terms.append(f"fqn:{'.'.join(fqn)}")
+        elif cls._is_usable_component(name := node_info.get("name") or "") and cls._is_usable_selector(name):
             # The fqn is unusable, so fall back to the bare resource name, which dbt matches against
             # the fqn's leaf. It is the only term that tells apart two nodes sharing a package, a
             # file and a test type — two `not_null` tests in one `schema.yml`, say. Not used *with* a
             # usable fqn, whose leaf already carries it.
-            terms.append(f'fqn:{name}')
+            terms.append(f"fqn:{name}")
         else:
             raise cls._unaddressable(node_info)
 
-        package = node_info.get('package_name') or ''
+        package = node_info.get("package_name") or ""
         if cls._is_usable_component(package):
-            terms.append(f'package:{package}')
+            terms.append(f"package:{package}")
 
-        file_name = cls._base_file_name(node_info.get('original_file_path') or '')
+        file_name = cls._base_file_name(node_info.get("original_file_path") or "")
         if cls._is_usable_component(file_name):
-            terms.append(f'file:{file_name}')
+            terms.append(f"file:{file_name}")
 
         # `resource_type:` separates nodes whose flattened fqns coincide across *types*, which the
         # other terms cannot: a unit test `unit_orders` on `orders` (fqn [probe, orders, unit_orders])
@@ -254,13 +254,13 @@ class DbtFactory:
         # expanded. Suppressing that expansion is the selection plan's job, not this term's: direct test
         # plans pin `--indirect-selection empty`, and parent-scoped cautious plans are accepted only when
         # `_eager_expansion_superset` proves the expanded result is the intended test alone.
-        resource_type = node_info.get('resource_type') or ''
+        resource_type = node_info.get("resource_type") or ""
         if cls._is_usable_component(resource_type):
-            terms.append(f'resource_type:{resource_type}')
+            terms.append(f"resource_type:{resource_type}")
 
-        test_name = (node_info.get('test_metadata') or {}).get('name') or ''
+        test_name = (node_info.get("test_metadata") or {}).get("name") or ""
         if cls._is_usable_component(test_name):
-            terms.append(f'test_name:{test_name}')
+            terms.append(f"test_name:{test_name}")
 
         select = cls._compose_selector_terms(terms, node_info)
         if peers is not None:
@@ -271,7 +271,7 @@ class DbtFactory:
     def _compose_selector_terms(cls, terms: list[str], node_info: dict) -> str:
         """Joins terms while preserving the required first term and omitting unsafe optional terms."""
         safe_terms = list(terms)
-        while match := DYNAMIC_VALUE_REFERENCE.search(select := ','.join(safe_terms)):
+        while match := DYNAMIC_VALUE_REFERENCE.search(select := ",".join(safe_terms)):
             offset = 0
             closing_term = 0
             for index, term in enumerate(safe_terms):
@@ -305,7 +305,7 @@ class DbtFactory:
         intended = cls._own_ids(test_info, peers)
         selected = set(cls._matching_ids(select, peers))
         if selected == intended:
-            return _SelectionPlan(select, 'empty')
+            return _SelectionPlan(select, "empty")
 
         surplus = selected - intended
         missing = intended - selected
@@ -321,14 +321,14 @@ class DbtFactory:
         parent_info = peers[parent_id]
         parent_select = cls._node_select(
             parent_info,
-            source_info=parent_info if parent_info.get('resource_type') == 'source' else None,
+            source_info=parent_info if parent_info.get("resource_type") == "source" else None,
             peers=peers,
         )
-        scoped_select = f'{parent_select},{select}'
+        scoped_select = f"{parent_select},{select}"
         cls._assert_no_dynamic_reference(scoped_select, test_info)
         if cls._eager_expansion_superset(scoped_select, peers) != intended:
             cls._assert_exact(select, test_info, peers)
-        return _SelectionPlan(scoped_select, 'cautious')
+        return _SelectionPlan(scoped_select, "cautious")
 
     @classmethod
     def _eager_expansion_superset(cls, select: str, peers: dict) -> set[str]:
@@ -345,7 +345,7 @@ class DbtFactory:
         and every exact-parent term matches its sole parent and therefore adds the test indirectly.
         """
         possible: set[str] | None = None
-        for term in select.split(','):
+        for term in select.split(","):
             direct = set(cls._matching_ids(term, peers))
             expanded = direct | cls._tests_attached_to_any(direct, peers)
             possible = expanded if possible is None else possible & expanded
@@ -359,7 +359,7 @@ class DbtFactory:
         return {
             full_name
             for full_name, info in peers.items()
-            if info.get('resource_type') in {'test', 'unit_test'} and cls._test_parent_ids(info) & parent_ids
+            if info.get("resource_type") in {"test", "unit_test"} and cls._test_parent_ids(info) & parent_ids
         }
 
     @classmethod
@@ -367,7 +367,7 @@ class DbtFactory:
         """Returns every model, seed, snapshot, or source dependency id, including absent resources."""
         return frozenset(
             dep
-            for dep in test_info.get('depends_on', {}).get('nodes', [])
+            for dep in test_info.get("depends_on", {}).get("nodes", [])
             if dep.startswith(cls._DBT_TEST_TARGET_PREFIXES)
         )
 
@@ -407,7 +407,7 @@ class DbtFactory:
         fallback for hand-written fixtures that omit the field — walking every peer here once per node was
         itself quadratic, and defeated the index added to avoid exactly that.
         """
-        own_id = node_info.get('unique_id')
+        own_id = node_info.get("unique_id")
         if own_id is not None and peers.get(own_id) is not None:
             return {own_id}
         return {full_name for full_name, info in peers.items() if info is node_info}
@@ -441,13 +441,13 @@ class DbtFactory:
         `source:pkg.raw.2+ord` resolves exactly — so the check goes on the assembled string rather
         than on each part.
         """
-        package = source_info.get('package_name') or ''
-        source_name = source_info.get('source_name') or ''
-        table = source_info.get('name') or ''
-        select = f'source:{package}.{source_name}.{table}'
+        package = source_info.get("package_name") or ""
+        source_name = source_info.get("source_name") or ""
+        table = source_info.get("name") or ""
+        select = f"source:{package}.{source_name}.{table}"
         cls._assert_no_dynamic_reference(select, source_info)
         parts = (package, source_name, table)
-        if not all(cls._is_usable_component(part) and '.' not in part for part in parts):
+        if not all(cls._is_usable_component(part) and "." not in part for part in parts):
             raise cls._unaddressable(source_info)
         if not cls._is_usable_selector(select):
             raise cls._unaddressable(source_info)
@@ -476,7 +476,7 @@ class DbtFactory:
         the command. The check applies after selector components are joined so references spanning
         components are also rejected.
         """
-        return not value.rstrip('0123456789').endswith('+') and DYNAMIC_VALUE_REFERENCE.search(value) is None
+        return not value.rstrip("0123456789").endswith("+") and DYNAMIC_VALUE_REFERENCE.search(value) is None
 
     @staticmethod
     def _flat_fqn(fqn: list[str]) -> list[str]:
@@ -502,19 +502,19 @@ class DbtFactory:
         would mean accepting a selector that matches two nodes, which is the whole bug class; the
         integration suite pins the mirror against `dbt ls`.
         """
-        fqn = node_info.get('fqn') or []
+        fqn = node_info.get("fqn") or []
         if not fqn:
             # A manifest missing `fqn` is not something dbt produces, but a hand-rolled or truncated one
             # can be, and the selector then falls back to the bare name. dbt would still match that name
             # against the fqn's leaf, so compare against the name rather than declining outright —
             # otherwise the exactness check reports a selector that reaches nothing.
-            return bool(node_info.get('name')) and node_info.get('name') == term
+            return bool(node_info.get("name")) and node_info.get("name") == term
         # dbt's `is_versioned` requires the resource type to be a model (`VERSIONED_NODE_TYPES`), not
         # merely that `version` is set — and a unit-test clone *does* carry `version`. Deriving it from
         # the field alone takes dbt's versioned branch for unit tests and so skips its plain
         # `fqn[-1] == term` match, making the mirror stricter than dbt and hiding a real collision on
         # such a node's bare-name selector.
-        is_versioned = node_info.get('resource_type') == 'model' and node_info.get('version') is not None
+        is_versioned = node_info.get("resource_type") == "model" and node_info.get("version") is not None
         return cls._is_selected_node(fqn, term, is_versioned) or cls._is_selected_node(fqn[1:], term, is_versioned)
 
     @classmethod
@@ -522,7 +522,7 @@ class DbtFactory:
         """Mirrors dbt's `is_selected_node` for the operator-free, wildcard-free terms we emit."""
         if not fqn:
             return False
-        selector_parts = term.split('.')
+        selector_parts = term.split(".")
         if cls._matches_fqn_leaf(fqn, term, selector_parts, is_versioned):
             return True
         flat_fqn = cls._flat_fqn(fqn)
@@ -546,40 +546,40 @@ class DbtFactory:
             return fqn[-1] == term
         if len(fqn) < 2:
             return False
-        return fqn[-2] == term or '_'.join(fqn[-2:]) == '_'.join(selector_parts[-2:])
+        return fqn[-2] == term or "_".join(fqn[-2:]) == "_".join(selector_parts[-2:])
 
     @classmethod
     def _term_matches(cls, term: str, node_info: dict) -> bool:
         """Whether one emitted selector term matches `node_info`."""
-        method, _, value = term.partition(':')
-        if not _ or method == 'fqn':
+        method, _, value = term.partition(":")
+        if not _ or method == "fqn":
             # A bare value is still accepted so a hand-written selector keeps working; everything the
             # factory emits now carries the explicit `fqn:` method.
-            return cls._fqn_term_matches(value if method == 'fqn' else term, node_info)
-        if method == 'source':
-            parts = value.split('.')
+            return cls._fqn_term_matches(value if method == "fqn" else term, node_info)
+        if method == "source":
+            parts = value.split(".")
             return (
                 len(parts) == 3
-                and node_info.get('resource_type') == 'source'
-                and (node_info.get('package_name') or '') == parts[0]
-                and (node_info.get('source_name') or '') == parts[1]
-                and (node_info.get('name') or '') == parts[2]
+                and node_info.get("resource_type") == "source"
+                and (node_info.get("package_name") or "") == parts[0]
+                and (node_info.get("source_name") or "") == parts[1]
+                and (node_info.get("name") or "") == parts[2]
             )
-        if method == 'package':
-            return (node_info.get('package_name') or '') == value
-        if method == 'file':
+        if method == "package":
+            return (node_info.get("package_name") or "") == value
+        if method == "file":
             # dbt's `FileSelectorMethod` matches the base name *or* its stem, so `file:a.yml` also
             # matches a node declared in `a.yml.yml`. Mirroring only the name would let that collision
             # past `_assert_exact` — confirmed with `dbt ls` on dbt 1.12.0, where the `a.yml` task's
             # selector resolves to the `a.yml.yml` test as well.
-            for base in _candidate_file_names(node_info.get('original_file_path') or ''):
-                if value in (base, base.rsplit('.', 1)[0] if '.' in base else base):
+            for base in _candidate_file_names(node_info.get("original_file_path") or ""):
+                if value in (base, base.rsplit(".", 1)[0] if "." in base else base):
                     return True
             return False
-        if method == 'resource_type':
-            return (node_info.get('resource_type') or '') == value
-        if method == 'test_name':
-            return ((node_info.get('test_metadata') or {}).get('name') or '') == value
+        if method == "resource_type":
+            return (node_info.get("resource_type") or "") == value
+        if method == "test_name":
+            return ((node_info.get("test_metadata") or {}).get("name") or "") == value
         return True  # pragma: no cover - no other method is emitted
 
     @staticmethod
@@ -602,7 +602,7 @@ class DbtFactory:
         scan to the nodes sharing this selector's `package:` and `file:`, which is a handful. A plain dict
         still works, for the unit tests and library callers that pass one.
         """
-        terms = select.split(',')
+        terms = select.split(",")
         scan = candidates.narrow(terms) if isinstance(candidates, _SelectorIndex) else candidates
         matched: list[str] = []
         for full_name, info in scan.items():
@@ -618,27 +618,27 @@ class DbtFactory:
         Distinct from `_unaddressable`: nothing about *this* resource's name is wrong, so the remedy is
         about the collision with its neighbours rather than about selector syntax.
         """
-        name = node_info.get('name')
-        path = node_info.get('original_file_path')
+        name = node_info.get("name")
+        path = node_info.get("original_file_path")
         return ValueError(
-            f'Cannot generate a task for {name!r} ({path}): the generated selector for it '
-            f'({select}) also runs {", ".join(sorted(also_matched))}. dbt has no unique-id selector, so '
-            f'the factory cannot prove a task addresses these separately. It does not search alternate '
-            f'spellings once a usable FQN exists, and refuses to risk running the others before their own '
-            f'dependencies have completed. Rename {name!r} so that its dotted '
-            f'name neither matches nor prefixes a '
+            f"Cannot generate a task for {name!r} ({path}): the generated selector for it "
+            f"({select}) also runs {', '.join(sorted(also_matched))}. dbt has no unique-id selector, so "
+            f"the factory cannot prove a task addresses these separately. It does not search alternate "
+            f"spellings once a usable FQN exists, and refuses to risk running the others before their own "
+            f"dependencies have completed. Rename {name!r} so that its dotted "
+            f"name neither matches nor prefixes a "
             f"sibling's, or move it to a file of its own."
         )
 
     @staticmethod
     def _dynamic_reference(node_info: dict, select: str) -> ValueError:
         """Builds the error for a selector Databricks would interpret as a dynamic value reference."""
-        name = node_info.get('name')
-        path = node_info.get('original_file_path')
+        name = node_info.get("name")
+        path = node_info.get("original_file_path")
         return ValueError(
-            f'Cannot generate a task for {name!r} ({path}): the final selector ({select}) contains a '
-            f'Databricks dynamic value reference. Rename the resource or file so its selector terms do '
-            f'not form a complete reference.'
+            f"Cannot generate a task for {name!r} ({path}): the final selector ({select}) contains a "
+            f"Databricks dynamic value reference. Rename the resource or file so its selector terms do "
+            f"not form a complete reference."
         )
 
     @staticmethod
@@ -650,13 +650,13 @@ class DbtFactory:
         is silent at run time: `dbt test` and `dbt run` exit 0 on a selector that matches nothing, so the
         task goes green having asserted or built nothing at all.
         """
-        name = node_info.get('name')
-        path = node_info.get('original_file_path')
+        name = node_info.get("name")
+        path = node_info.get("original_file_path")
         return ValueError(
-            f'Cannot generate a task for {name!r} ({path}): the selector dbt offers for it ({select}) '
-            f'does not reach {", ".join(missing)}. dbt exits 0 for a selector that matches nothing, so '
-            f'the task would report success having run nothing. This is a bug in selector construction '
-            f'rather than something to fix in the project — please report it.'
+            f"Cannot generate a task for {name!r} ({path}): the selector dbt offers for it ({select}) "
+            f"does not reach {', '.join(missing)}. dbt exits 0 for a selector that matches nothing, so "
+            f"the task would report success having run nothing. This is a bug in selector construction "
+            f"rather than something to fix in the project — please report it."
         )
 
     @staticmethod
@@ -667,13 +667,13 @@ class DbtFactory:
         This message is the whole of what a CLI user sees (`main` reports it without a traceback), so
         it leads with the resource and the remedy and keeps the reasoning to one closing line.
         """
-        name = node_info.get('name')
-        path = node_info.get('original_file_path')
+        name = node_info.get("name")
+        path = node_info.get("original_file_path")
         return ValueError(
-            f'Cannot generate a task for {name!r} ({path}): dbt cannot select it uniquely. '
-            f'Rename the resource or its file so that it does not end with a dbt graph operator (a '
-            f'trailing +N), contains none of a space, comma or one of *?[], and contains no complete '
-            f'Databricks dynamic value reference (`{{{{...}}}}`) — or, for a source, a dot. Without a '
+            f"Cannot generate a task for {name!r} ({path}): dbt cannot select it uniquely. "
+            f"Rename the resource or its file so that it does not end with a dbt graph operator (a "
+            f"trailing +N), contains none of a space, comma or one of *?[], and contains no complete "
+            f"Databricks dynamic value reference (`{{{{...}}}}`) — or, for a source, a dot. Without a "
             f"usable name or path, the only terms left match a group of "
             f"resources, so the task could run another task's resource."
         )
@@ -688,15 +688,15 @@ class DbtFactory:
         Returns:
             list[DbtTask]: `DbtTask` instances (not yet rendered to dicts).
         """
-        dbt_nodes = self._enabled_only(dbt_manifest.get('nodes', {}))
-        dbt_sources = self._enabled_only(dbt_manifest.get('sources', {}))
-        dbt_unit_tests = self._enabled_only(dbt_manifest.get('unit_tests', {}))
+        dbt_nodes = self._enabled_only(dbt_manifest.get("nodes", {}))
+        dbt_sources = self._enabled_only(dbt_manifest.get("sources", {}))
+        dbt_unit_tests = self._enabled_only(dbt_manifest.get("unit_tests", {}))
 
         # All directly selectable resources participate in selector exactness and test selection-plan
         # checks, including sources even though no emitted command builds a source directly.
         peers = _SelectorIndex({**dbt_nodes, **dbt_unit_tests, **dbt_sources})
 
-        bundle = 'test' in self.task_factories and self.bundle_tests
+        bundle = "test" in self.task_factories and self.bundle_tests
         bundled_tests: dict[str, list[tuple[str, dict]]] = {}
         standalone_tests: list[tuple[str, dict]] = []
         if bundle:
@@ -708,7 +708,7 @@ class DbtFactory:
         # here to receive a task key from `build_task_key_maps`.
         unit_test_ids = (
             self._emitted_unit_test_ids(dbt_unit_tests, dbt_nodes)
-            if not bundle and 'test' in self.task_factories
+            if not bundle and "test" in self.task_factories
             else []
         )
 
@@ -720,7 +720,7 @@ class DbtFactory:
         task_keys, bundled_test_keys = build_task_key_maps(task_ids, sorted(bundled_tests))
 
         gating = _Gating()
-        if not bundle and 'test' in self.task_factories:
+        if not bundle and "test" in self.task_factories:
             indexed_tests = self._index_tests_by_resource(dbt_nodes, dbt_sources, dbt_unit_tests, task_keys)
             gating = _Gating(
                 tests=indexed_tests,
@@ -749,7 +749,7 @@ class DbtFactory:
                 )
             )
             tasks.extend(self._build_standalone_test_tasks(standalone_tests, task_keys, peers))
-        elif 'test' in self.task_factories:
+        elif "test" in self.task_factories:
             tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys, peers))
 
         return tasks
@@ -770,7 +770,7 @@ class DbtFactory:
         return {
             full_name: info
             for full_name, info in entries.items()
-            if (info.get('config') or {}).get('enabled') is not False
+            if (info.get("config") or {}).get("enabled") is not False
         }
 
     def _node_gets_own_task(self, full_name: str, node_info: dict, bundle: bool, standalone_test_ids: set[str]) -> bool:
@@ -780,10 +780,10 @@ class DbtFactory:
         into their resource's bundled test task. The single authority for this decision, so the
         task-key map and the task-building loops stay in agreement.
         """
-        resource_type = node_info['resource_type']
+        resource_type = node_info["resource_type"]
         if resource_type not in self.task_factories:
             return False
-        if bundle and resource_type == 'test' and full_name not in standalone_test_ids:
+        if bundle and resource_type == "test" and full_name not in standalone_test_ids:
             return False
         return True
 
@@ -817,7 +817,7 @@ class DbtFactory:
         dependents: dict[str, list[str]] = {full_name: [] for full_name in resources}
         for full_name, info in resources.items():
             direct_dependencies = {
-                dependency for dependency in info.get('depends_on', {}).get('nodes', []) if dependency in resources
+                dependency for dependency in info.get("depends_on", {}).get("nodes", []) if dependency in resources
             }
             dependencies[full_name] = direct_dependencies
             for dependency in direct_dependencies:
@@ -846,8 +846,8 @@ class DbtFactory:
             unresolved = {full_name for full_name, count in unresolved_counts.items() if count > 0}
             cycle = self._dependency_cycle(dependencies, unresolved)
             raise ValueError(
-                f'Cannot compute test gates because the manifest contains the dependency cycle '
-                f'{" -> ".join(cycle)}. Regenerate the manifest after removing the cycle.'
+                f"Cannot compute test gates because the manifest contains the dependency cycle "
+                f"{' -> '.join(cycle)}. Regenerate the manifest after removing the cycle."
             )
         return ancestors
 
@@ -885,7 +885,7 @@ class DbtFactory:
                 elif dependency_state == active:
                     return path[positions[dependency] :] + [dependency]
 
-        raise RuntimeError('A non-topological dependency graph did not contain a cycle.')
+        raise RuntimeError("A non-topological dependency graph did not contain a cycle.")
 
     def _index_tests_by_resource(
         self, dbt_nodes: dict, dbt_sources: dict, dbt_unit_tests: dict, task_keys: dict[str, str]
@@ -906,7 +906,7 @@ class DbtFactory:
         """
         index: dict[str, list[tuple[str, frozenset[str]]]] = {}
         for node_full_name, node_info in dbt_nodes.items():
-            if node_info['resource_type'] != 'test':
+            if node_info["resource_type"] != "test":
                 continue
             if node_full_name in task_keys:
                 self._index_test(index, task_keys[node_full_name], node_info, dbt_nodes, dbt_sources)
@@ -932,7 +932,7 @@ class DbtFactory:
     def _testable_refs(self, test_info: dict, dbt_nodes: dict, dbt_sources: dict) -> frozenset[str]:
         """Returns the models/seeds/snapshots/sources a test references, as present in the manifest."""
         refs: set[str] = set()
-        for dep in test_info.get('depends_on', {}).get('nodes', []):
+        for dep in test_info.get("depends_on", {}).get("nodes", []):
             if dep.startswith(self._DBT_TEST_TARGET_PREFIXES) and (dep in dbt_nodes or dep in dbt_sources):
                 refs.add(dep)
         return frozenset(refs)
@@ -950,13 +950,13 @@ class DbtFactory:
         test. Falls back to that reconstruction only when `depends_on` is absent, so manifests
         that predate it keep working.
         """
-        for dep in unit_test_info.get('depends_on', {}).get('nodes', []):
-            if dep.startswith('model.'):
+        for dep in unit_test_info.get("depends_on", {}).get("nodes", []):
+            if dep.startswith("model."):
                 return dep
-        model = unit_test_info.get('model')
-        package = unit_test_info.get('package_name')
+        model = unit_test_info.get("model")
+        package = unit_test_info.get("package_name")
         if model and package:
-            return f'model.{package}.{model}'
+            return f"model.{package}.{model}"
         return None
 
     @classmethod
@@ -1027,7 +1027,7 @@ class DbtFactory:
         bundled_tests: dict[str, list[tuple[str, dict]]] = {}
         standalone_tests: list[tuple[str, dict]] = []
         for node_full_name, node_info in dbt_nodes.items():
-            if node_info['resource_type'] != 'test':
+            if node_info["resource_type"] != "test":
                 continue
             testable_deps = self._testable_refs(node_info, dbt_nodes, dbt_sources)
             if len(testable_deps) == 1:
@@ -1058,18 +1058,18 @@ class DbtFactory:
         for node_full_name, node_info in dbt_nodes.items():
             if node_full_name not in task_keys:
                 continue
-            if bundle and node_info['resource_type'] == 'test':
+            if bundle and node_info["resource_type"] == "test":
                 # Standalone tests are keyed but built by `_build_standalone_test_tasks`, not here.
                 continue
 
-            resource_type = node_info['resource_type']
+            resource_type = node_info["resource_type"]
             task_key = task_keys[node_full_name]
             factory = self.task_factories[resource_type]
-            if resource_type == 'test':
+            if resource_type == "test":
                 plan = self._test_selection_plan(node_info, peers)
                 task = cast(TestTaskFactory, factory).create_task(
                     plan.select,
-                    node_info['name'],
+                    node_info["name"],
                     node_info,
                     task_key,
                     task_keys,
@@ -1078,7 +1078,7 @@ class DbtFactory:
             else:
                 task = factory.create_task(
                     self._node_select(node_info, peers=peers),
-                    node_info['name'],
+                    node_info["name"],
                     node_info,
                     task_key,
                     dependency_task_keys,
@@ -1111,10 +1111,10 @@ class DbtFactory:
         peers: dict,
     ) -> list[DbtTask]:
         """Emits one task per tested resource from unions of exact per-test selection plans."""
-        test_factory = cast(TestTaskFactory, self.task_factories['test'])
+        test_factory = cast(TestTaskFactory, self.task_factories["test"])
         tasks: list[DbtTask] = []
         for full_name, tests in sorted(bundled_tests.items()):
-            is_source = full_name.startswith('source.')
+            is_source = full_name.startswith("source.")
             info = dbt_sources[full_name] if is_source else dbt_nodes[full_name]
             # A source never gets a task of its own, so it has no gate. Any other parent must, or the
             # bundle would run its tests with nothing ordering them after the resource was built. Raise
@@ -1123,16 +1123,16 @@ class DbtFactory:
             # escape `main`'s handler as a traceback that names no resource.
             if not is_source and full_name not in task_keys:
                 raise ValueError(
-                    f'Cannot bundle the tests of {full_name!r}: no task was generated for it, so the '
-                    f'bundled test task would run unordered against it. Register a task factory for '
-                    f'{info.get("resource_type")!r} resources, or generate one task per test instead of '
-                    f'bundling.'
+                    f"Cannot bundle the tests of {full_name!r}: no task was generated for it, so the "
+                    f"bundled test task would run unordered against it. Register a task factory for "
+                    f"{info.get('resource_type')!r} resources, or generate one task per test instead of "
+                    f"bundling."
                 )
             tasks.append(
                 test_factory.create_bundled_task(
                     task_key=bundled_test_keys[full_name],
                     selects_by_indirect_selection=self._bundled_selects_by_mode(tests, peers),
-                    deps_command_name=info['name'],
+                    deps_command_name=info["name"],
                     depends_on=[] if is_source else [task_keys[full_name]],
                 )
             )
@@ -1148,7 +1148,7 @@ class DbtFactory:
             selects_by_mode.setdefault(plan.indirect_selection, []).append(plan.select)
             test_info_by_mode.setdefault(plan.indirect_selection, test_info)
         for mode, selects in selects_by_mode.items():
-            cls._assert_no_dynamic_reference(' '.join(sorted(selects)), test_info_by_mode[mode])
+            cls._assert_no_dynamic_reference(" ".join(sorted(selects)), test_info_by_mode[mode])
         return selects_by_mode
 
     def _build_standalone_test_tasks(
@@ -1162,7 +1162,7 @@ class DbtFactory:
         every referenced model, seed, or snapshot task, plus zero-dep singular tests that bundles
         cannot cover.
         """
-        test_factory = cast(TestTaskFactory, self.task_factories['test'])
+        test_factory = cast(TestTaskFactory, self.task_factories["test"])
         tasks: list[DbtTask] = []
         for test_full_name, test_info in sorted(standalone_tests, key=lambda item: item[0]):
             test_task_key = task_keys[test_full_name]
@@ -1170,7 +1170,7 @@ class DbtFactory:
             tasks.append(
                 test_factory.create_task(
                     plan.select,
-                    test_info['name'],
+                    test_info["name"],
                     test_info,
                     test_task_key,
                     task_keys,
@@ -1195,7 +1195,7 @@ class DbtFactory:
         Versioned unit-test clones receive independent parent-scoped selection plans, so each task waits
         only for and runs only against its exact model version.
         """
-        test_factory = cast(TestTaskFactory, self.task_factories['test'])
+        test_factory = cast(TestTaskFactory, self.task_factories["test"])
 
         tasks: list[DbtTask] = []
         for unit_test_full_name, unit_test_info in sorted(dbt_unit_tests.items()):
@@ -1205,7 +1205,7 @@ class DbtFactory:
             tasks.append(
                 test_factory.create_task(
                     plan.select,
-                    unit_test_info['name'],
+                    unit_test_info["name"],
                     unit_test_info,
                     task_keys[unit_test_full_name],
                     task_keys,
@@ -1246,21 +1246,21 @@ class _SelectorIndex(dict):
 
     def _index_test_parents(self, full_name: str, info: dict, peers: dict) -> None:
         """Indexes a test under each enabled testable parent."""
-        if info.get('resource_type') not in {'test', 'unit_test'}:
+        if info.get("resource_type") not in {"test", "unit_test"}:
             return
-        for parent in info.get('depends_on', {}).get('nodes', []):
+        for parent in info.get("depends_on", {}).get("nodes", []):
             if parent.startswith(_DBT_TEST_TARGET_PREFIXES) and parent in peers:
                 self._tests_by_parent.setdefault(parent, set()).add(full_name)
 
     def _add(self, full_name: str, info: dict) -> None:
         """Files one node under every key a selector term could reach it by."""
-        self._by_package.setdefault(info.get('package_name') or '', {})[full_name] = info
+        self._by_package.setdefault(info.get("package_name") or "", {})[full_name] = info
         # A path containing a backslash has both POSIX and Windows interpretations. Index every possible
         # base name and stem so narrowing cannot hide a collision under either runtime path flavour.
-        for base in _candidate_file_names(info.get('original_file_path') or ''):
-            for key in dict.fromkeys((base, base.rsplit('.', 1)[0] if '.' in base else base)):
+        for base in _candidate_file_names(info.get("original_file_path") or ""):
+            for key in dict.fromkeys((base, base.rsplit(".", 1)[0] if "." in base else base)):
                 self._by_file.setdefault(key, {})[full_name] = info
-        test_name = (info.get('test_metadata') or {}).get('name') or ''
+        test_name = (info.get("test_metadata") or {}).get("name") or ""
         if test_name:
             self._by_test_name.setdefault(test_name, {})[full_name] = info
         for term in self._fqn_terms(info):
@@ -1285,16 +1285,16 @@ class _SelectorIndex(dict):
         model), which can differ from a flattened prefix when it contains a dot. Version suffix matching
         is indexed separately because dbt ignores any earlier selector components in that shortcut.
         """
-        fqn = info.get('fqn') or []
+        fqn = info.get("fqn") or []
         if not fqn:
             # A truncated hand-written manifest can omit fqn; the matcher then falls back to the name.
-            name = info.get('name') or ''
+            name = info.get("name") or ""
             return {name} if name else set()
         terms: set[str] = set()
         for candidate in (fqn, fqn[1:]):
             flat = _flatten_fqn(candidate)
-            terms.update('.'.join(flat[:length]) for length in range(1, len(flat) + 1))
-        if info.get('resource_type') == 'model' and info.get('version') is not None and len(fqn) >= 2:
+            terms.update(".".join(flat[:length]) for length in range(1, len(flat) + 1))
+        if info.get("resource_type") == "model" and info.get("version") is not None and len(fqn) >= 2:
             terms.add(fqn[-2])
         else:
             terms.add(fqn[-1])
@@ -1303,10 +1303,10 @@ class _SelectorIndex(dict):
     @staticmethod
     def _version_suffix(info: dict) -> str:
         """The suffix used by dbt's versioned-model leaf shortcut, if this node has one."""
-        fqn = info.get('fqn') or []
-        if info.get('resource_type') == 'model' and info.get('version') is not None and len(fqn) >= 2:
-            return '_'.join(fqn[-2:])
-        return ''
+        fqn = info.get("fqn") or []
+        if info.get("resource_type") == "model" and info.get("version") is not None and len(fqn) >= 2:
+            return "_".join(fqn[-2:])
+        return ""
 
     def narrow(self, terms: list[str]) -> dict:
         """
@@ -1318,14 +1318,14 @@ class _SelectorIndex(dict):
         """
         smallest: dict | None = None
         for term in terms:
-            method, _, value = term.partition(':')
-            if not _ or method == 'fqn':
-                bucket = self._fqn_candidates(value if method == 'fqn' else term)
-            elif method == 'package':
+            method, _, value = term.partition(":")
+            if not _ or method == "fqn":
+                bucket = self._fqn_candidates(value if method == "fqn" else term)
+            elif method == "package":
                 bucket = self._by_package.get(value, {})
-            elif method == 'file':
+            elif method == "file":
                 bucket = self._by_file.get(value, {})
-            elif method == 'test_name':
+            elif method == "test_name":
                 bucket = self._by_test_name.get(value, {})
             else:
                 continue
@@ -1342,6 +1342,6 @@ class _SelectorIndex(dict):
         the selector's last two components, so its separate bucket is unioned here.
         """
         candidates = dict(self._by_fqn_term.get(term, {}))
-        suffix = '_'.join(term.split('.')[-2:])
+        suffix = "_".join(term.split(".")[-2:])
         candidates.update(self._by_version_suffix.get(suffix, {}))
         return candidates

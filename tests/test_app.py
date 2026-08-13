@@ -801,10 +801,10 @@ def test_failed_generation_preserves_an_existing_runner_notebook(monkeypatch, tm
 
 
 @pytest.mark.parametrize(
-    ('spec_body', 'note'),
+    ("spec_body", "note"),
     [
-        pytest.param(None, 'the input spec does not exist', id='missing-input-spec'),
-        pytest.param('not_a_job: true\n', 'the input spec holds no jobs', id='malformed-input-spec'),
+        pytest.param(None, "the input spec does not exist", id="missing-input-spec"),
+        pytest.param("not_a_job: true\n", "the input spec holds no jobs", id="malformed-input-spec"),
     ],
 )
 def test_input_spec_failure_preserves_an_existing_runner(monkeypatch, tmp_path, spec_body, note):

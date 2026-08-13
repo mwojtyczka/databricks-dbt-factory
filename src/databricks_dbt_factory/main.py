@@ -84,9 +84,9 @@ def _validate_runner_notebook(artifact: _RunnerArtifact) -> None:
     """Rejects any existing runner target that cannot be safely reused as immutable content."""
     destination = artifact.destination
     if destination.is_symlink() or (destination.exists() and not destination.is_file()):
-        raise ValueError(f'Runner target {destination} must be a regular non-symlink file.')
+        raise ValueError(f"Runner target {destination} must be a regular non-symlink file.")
     if destination.exists() and destination.read_bytes() != artifact.content:
-        raise ValueError(f'Runner target {destination} does not match its SHA-256 filename.')
+        raise ValueError(f"Runner target {destination} does not match its SHA-256 filename.")
 
 
 def _prepare_output_plan(args: argparse.Namespace) -> _OutputPlan:
@@ -149,12 +149,12 @@ def _create_dbt_factory(args: argparse.Namespace, output_plan: _OutputPlan, dbt_
         job_cluster_key=args.job_cluster_key,
     )
     task_factories = {
-        'model': ModelTaskFactory(resolver, task_options, dbt_options),
-        'snapshot': SnapshotTaskFactory(resolver, task_options, dbt_options),
-        'seed': SeedTaskFactory(resolver, task_options, dbt_options),
+        "model": ModelTaskFactory(resolver, task_options, dbt_options),
+        "snapshot": SnapshotTaskFactory(resolver, task_options, dbt_options),
+        "seed": SeedTaskFactory(resolver, task_options, dbt_options),
     }
     if args.run_tests:
-        task_factories['test'] = TestTaskFactory(resolver, task_options, dbt_options)
+        task_factories["test"] = TestTaskFactory(resolver, task_options, dbt_options)
     return DbtFactory(task_factories, bundle_tests=args.bundle_tests)
 
 
@@ -165,7 +165,7 @@ def _validate_artifact_destinations(
     if runner_artifact is None:
         return
     if runner_artifact.destination.resolve() == job_spec_artifact.destination.resolve():
-        raise ValueError(f'runner and job spec destinations must be different: {runner_artifact.destination}')
+        raise ValueError(f"runner and job spec destinations must be different: {runner_artifact.destination}")
     _validate_runner_notebook(runner_artifact)
 
 
@@ -198,7 +198,7 @@ def _publish_artifacts(runner_artifact: _RunnerArtifact | None, job_spec_artifac
         if job_spec_artifact.destination.exists() and runner_artifact.destination.samefile(
             job_spec_artifact.destination
         ):
-            raise ValueError(f'runner and job spec destinations must be different: {runner_artifact.destination}')
+            raise ValueError(f"runner and job spec destinations must be different: {runner_artifact.destination}")
     write_job_spec(job_spec_artifact)
 
 

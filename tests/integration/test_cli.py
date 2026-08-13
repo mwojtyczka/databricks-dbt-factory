@@ -58,9 +58,9 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess:
         text=True,
         check=False,
     )
-    assert (
-        result.returncode == 0
-    ), f"CLI failed (exit {result.returncode})\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 0, (
+        f"CLI failed (exit {result.returncode})\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
     return result
 
 

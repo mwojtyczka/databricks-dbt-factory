@@ -72,15 +72,15 @@ class DbtTaskOptions:
 
     def __post_init__(self):
         if not isinstance(self.task_type, TaskType):
-            object.__setattr__(self, 'task_type', TaskType(self.task_type))
+            object.__setattr__(self, "task_type", TaskType(self.task_type))
         if self.task_type is TaskType.NOTEBOOK:
             if not self.notebook_path:
                 raise ValueError("notebook_path is required when task_type=NOTEBOOK.")
             unsupported = []
             for name, value in (
-                ('warehouse_id', self.warehouse_id),
-                ('schema', self.schema),
-                ('catalog', self.catalog),
+                ("warehouse_id", self.warehouse_id),
+                ("schema", self.schema),
+                ("catalog", self.catalog),
             ):
                 if value:
                     unsupported.append(name)
@@ -108,66 +108,66 @@ class DbtTask:
 
     def _base_spec(self) -> dict[str, Any]:
         spec: dict[str, Any] = {
-            'task_key': self.task_key,
-            'depends_on': [{'task_key': dep} for dep in (self.depends_on or [])],
+            "task_key": self.task_key,
+            "depends_on": [{"task_key": dep} for dep in (self.depends_on or [])],
         }
         if self.options.job_cluster_key:
-            spec['job_cluster_key'] = self.options.job_cluster_key
+            spec["job_cluster_key"] = self.options.job_cluster_key
         else:
-            spec['environment_key'] = self.options.environment_key
+            spec["environment_key"] = self.options.environment_key
         return spec
 
     def _to_dbt_dict(self) -> dict[str, Any]:
         spec = self._base_spec()
-        dbt_task: dict[str, Any] = {'commands': self.commands}
+        dbt_task: dict[str, Any] = {"commands": self.commands}
 
         if self.options.source:
-            dbt_task['source'] = self.options.source
+            dbt_task["source"] = self.options.source
         if self.options.project_directory:
-            dbt_task['project_directory'] = self.options.project_directory
+            dbt_task["project_directory"] = self.options.project_directory
         if self.options.schema:
-            dbt_task['schema'] = self.options.schema
+            dbt_task["schema"] = self.options.schema
         if self.options.warehouse_id:
-            dbt_task['warehouse_id'] = self.options.warehouse_id
+            dbt_task["warehouse_id"] = self.options.warehouse_id
         if self.options.catalog:
-            dbt_task['catalog'] = self.options.catalog
+            dbt_task["catalog"] = self.options.catalog
         if self.options.profiles_directory:
-            dbt_task['profiles_directory'] = self.options.profiles_directory
+            dbt_task["profiles_directory"] = self.options.profiles_directory
 
-        spec['dbt_task'] = dbt_task
+        spec["dbt_task"] = dbt_task
         return spec
 
     def _to_notebook_dict(self) -> dict[str, Any]:
         serialized_commands = json.dumps(self.commands)
         if DYNAMIC_VALUE_REFERENCE.search(serialized_commands):
             raise ValueError(
-                f'Notebook task {self.task_key!r} serialized dbt_commands forms a Databricks dynamic value '
-                f'reference; rename the selected resources or change the dbt command options.'
+                f"Notebook task {self.task_key!r} serialized dbt_commands forms a Databricks dynamic value "
+                f"reference; rename the selected resources or change the dbt command options."
             )
         base_parameters: dict[str, str] = {
-            'dbt_commands': serialized_commands,
+            "dbt_commands": serialized_commands,
         }
         if self.options.project_directory:
-            base_parameters['project_directory'] = self.options.project_directory
+            base_parameters["project_directory"] = self.options.project_directory
         if self.options.profiles_directory:
-            base_parameters['profiles_directory'] = self.options.profiles_directory
+            base_parameters["profiles_directory"] = self.options.profiles_directory
 
-        serialized_size = len(json.dumps(base_parameters, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+        serialized_size = len(json.dumps(base_parameters, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         if serialized_size > _MAX_NOTEBOOK_BASE_PARAMETERS_BYTES:
             raise ValueError(
-                f'Notebook task {self.task_key!r} serializes base_parameters to {serialized_size:,} bytes; '
-                f'Databricks allows at most {_MAX_NOTEBOOK_BASE_PARAMETERS_BYTES:,} bytes. Shorten its dbt '
-                f'commands or path options, reduce the tests in this bundle, or generate native dbt tasks '
-                f'with --task-type dbt.'
+                f"Notebook task {self.task_key!r} serializes base_parameters to {serialized_size:,} bytes; "
+                f"Databricks allows at most {_MAX_NOTEBOOK_BASE_PARAMETERS_BYTES:,} bytes. Shorten its dbt "
+                f"commands or path options, reduce the tests in this bundle, or generate native dbt tasks "
+                f"with --task-type dbt."
             )
 
         notebook_task: dict[str, Any] = {
-            'notebook_path': self.options.notebook_path,
-            'base_parameters': base_parameters,
+            "notebook_path": self.options.notebook_path,
+            "base_parameters": base_parameters,
         }
         if self.options.source:
-            notebook_task['source'] = self.options.source
+            notebook_task["source"] = self.options.source
 
         spec = self._base_spec()
-        spec['notebook_task'] = notebook_task
+        spec["notebook_task"] = notebook_task
         return spec

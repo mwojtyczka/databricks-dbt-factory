@@ -95,9 +95,9 @@ def _assert_wheel_executes_in_isolation(wheel: Path, tmp_path: Path) -> None:
         text=True,
         check=False,
     )
-    assert (
-        result.returncode == 0
-    ), f"isolated wheel execution failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 0, (
+        f"isolated wheel execution failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
     assert "--dbt-manifest-path" in result.stdout
 
 

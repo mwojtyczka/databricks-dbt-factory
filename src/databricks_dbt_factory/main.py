@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from databricks_dbt_factory.__about__ import __version__
-from databricks_dbt_factory.DbtFactory import DbtFactory
+from databricks_dbt_factory.__version__ import __version__
+from databricks_dbt_factory.dbt_factory import DbtFactory
 from databricks_dbt_factory.file_io import atomic_write_bytes
 from databricks_dbt_factory.job_spec import (
     JobSpecArtifact,
@@ -16,9 +16,9 @@ from databricks_dbt_factory.job_spec import (
     resolve_job_spec_destination,
     write_job_spec,
 )
-from databricks_dbt_factory.Utils import read_dbt_manifest
-from databricks_dbt_factory.DbtTask import DbtTaskOptions
-from databricks_dbt_factory.TaskFactory import (
+from databricks_dbt_factory.utils import read_dbt_manifest
+from databricks_dbt_factory.dbt_task import DbtTaskOptions
+from databricks_dbt_factory.task_factory import (
     ModelTaskFactory,
     SnapshotTaskFactory,
     SeedTaskFactory,

@@ -41,7 +41,7 @@ Issues = "https://github.com/mwojtyczka/databricks-dbt-factory/issues"
 Source = "https://github.com/mwojtyczka/databricks-dbt-factory"
 
 [tool.hatch.version]
-path = "src/databricks_dbt_factory/__about__.py"
+path = "src/databricks_dbt_factory/__version__.py"
 
 [tool.hatch.build.targets.sdist]
 include = ["src"]

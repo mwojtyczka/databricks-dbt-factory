@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from databricks_dbt_factory.DbtTask import DbtTask, DbtTaskOptions, TaskType
+from databricks_dbt_factory.dbt_task import DbtTask, DbtTaskOptions, TaskType
 
 
 def _notebook_task_with_serialized_base_parameters_size(size: int) -> DbtTask:

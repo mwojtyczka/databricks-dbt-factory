@@ -108,9 +108,6 @@ target-version = "py310"
 line-length = 120
 extend-exclude = ["src/databricks_dbt_factory/notebook"]
 
-[tool.ruff.lint.isort]
-known-first-party = ["databricks_dbt_factory"]
-
 [tool.coverage.run]
 branch = true
 parallel = true

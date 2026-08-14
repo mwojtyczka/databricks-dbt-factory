@@ -25,11 +25,9 @@ if not dbt_commands:
 
 # COMMAND ----------
 
-# Authenticate dbt with the notebook's own credentials via the Databricks SDK. On job/notebook
-# compute `WorkspaceClient()` resolves the run's ambient credentials without any configuration, and
-# `authenticate()` returns a ready-to-use `Authorization: Bearer <token>` header. The captured token
+# Authenticate dbt with the notebook's own credentials via the Databricks SDK. The captured token
 # is short-lived (about an hour) and does not self-refresh, so a single task running longer than its
-# lifetime can fail mid-run — see the README's notebook-task limitations.
+# lifetime can fail mid-run.
 ws = WorkspaceClient()
 os.environ["DBT_ACCESS_TOKEN"] = ws.config.authenticate()["Authorization"].removeprefix("Bearer ").strip()
 

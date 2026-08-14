@@ -2745,41 +2745,25 @@ def test_shipped_runner_authenticates_dbt_from_the_workspace_client(tmp_path, mo
     """
     The runner captures the WorkspaceClient's token and host into `DBT_ACCESS_TOKEN`/`DBT_HOST`.
 
-    Those env vars are cleared in the runner's `finally`, so this asserts the behaviour rather than
-    the leftover values: the profile reads both through dbt's `env_var()`, which raises for an unset
-    variable, so a `dbt ls` that resolves the node at all proves the runner set each from the stubbed
-    client before invoking dbt.
+    The runner clears both env vars in its `finally`, so this records their values at the moment the
+    runner pops them and asserts those, rather than reading leftovers. `dbt ls` parses but never opens
+    a connection, so dbt itself cannot witness the token or an empty host; the exported values are
+    asserted directly. Running the full runner additionally proves the auth block does not raise and
+    that dbt still resolves the node end to end.
     """
-    # Parse and build the selector against the static profile, so the prep steps (which run before the
-    # runner sets any env var) do not themselves depend on `DBT_HOST`/`DBT_ACCESS_TOKEN`.
     _write_project(tmp_path, {"orders.sql": MODEL_SQL})
     manifest = _parse(tmp_path)
     unique_id = "model.probe.orders"
     _task_key, selectors, verb = _resource_selectors(manifest, bundle_tests=False)[0]
     assert verb == "run"
 
-    # Swap in a profile whose host reads through dbt's `env_var()` only for the runner run, starting
-    # from an unset `DBT_HOST` so a runner that fails to set it surfaces as dbt's `env_var()` error at
-    # parse time rather than reusing an ambient value. `dbt ls` parses but never authenticates, so the
-    # host — which parsing does resolve — is what a templated profile can prove; the token is asserted
-    # directly below from the value the runner wrote into the environment.
-    templated_profile = (
-        "probe:\n"
-        "  target: dev\n"
-        "  outputs:\n"
-        "    dev:\n"
-        "      type: databricks\n"
-        "      host: \"{{ env_var('DBT_HOST') }}\"\n"
-        "      http_path: /sql/1.0/warehouses/x\n"
-        "      token: dummy\n"
-        "      schema: default\n"
-    )
-    (tmp_path / "profiles.yml").write_text(templated_profile, encoding="utf-8")
+    # Start from an environment where neither variable carries an ambient value, so the recorded
+    # values below can only be what this runner exported.
     monkeypatch.delenv("DBT_HOST", raising=False)
     monkeypatch.delenv("DBT_ACCESS_TOKEN", raising=False)
 
-    # Capture the token the runner exports before its `finally` clears it, by recording the value at
-    # the moment the runner pops it from the environment.
+    # Capture the credentials the runner exports before its `finally` clears them, by recording each
+    # value at the moment the runner pops it from the environment.
     popped: dict[str, str] = {}
     real_pop = os.environ.pop
 
@@ -2792,12 +2776,13 @@ def test_shipped_runner_authenticates_dbt_from_the_workspace_client(tmp_path, mo
 
     namespace = _run_shipped_notebook(monkeypatch, tmp_path, selectors)
 
-    # dbt resolved the templated host, so the runner set `DBT_HOST` from the stubbed client's host,
-    # reduced to a bare netloc.
+    # The full runner executed without the auth block raising, and dbt resolved the node.
     assert _runner_result_ids(namespace) == (unique_id,)
-    assert namespace["_parsed"].netloc == "example.databricks.com"
-    # The runner authenticated through the stubbed client and exported its bearer token and host.
+    # The runner authenticated through the stubbed client and exported its bearer token and bare host.
     assert _StubWorkspaceClient.last is not None and _StubWorkspaceClient.last.config.authenticated
+    assert popped["DBT_ACCESS_TOKEN"] == _STUB_RUNNER_TOKEN
+    assert popped["DBT_HOST"] == "example.databricks.com"
+    assert namespace["_parsed"].netloc == "example.databricks.com"
     assert popped["DBT_ACCESS_TOKEN"] == _STUB_RUNNER_TOKEN
     assert popped["DBT_HOST"] == "example.databricks.com"
 

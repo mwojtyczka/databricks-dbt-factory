@@ -223,6 +223,11 @@ commands, whether it backs native dbt tasks or notebook tasks. Databricks recomm
 `dbt-databricks>=1.6.0`; matching the manifest-generation version exactly is the stronger
 compatibility requirement.
 
+The packaged notebook runner authenticates through the Databricks SDK (`databricks-sdk`), which
+`dbt-databricks` already depends on — so the `dbt-databricks` pin above covers it. A custom task
+environment that omits `dbt-databricks` must install `databricks-sdk` as well, or the runner fails
+at import.
+
 The example uses [serverless environment version 5](https://docs.databricks.com/aws/en/release-notes/serverless/environment-version/five),
 the current Databricks environment version. Use the latest version available in your workspace.
 

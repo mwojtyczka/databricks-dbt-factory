@@ -591,6 +591,13 @@ Each task calls the shared content-addressed
 - Supports running the dbt process on job compute via `--job-cluster-key` (SQL execution still uses the warehouse in `profiles.yml`)
 - More flexibility — pass `--notebook-path` to manage and extend your own runner when you need custom secrets, APIs, notifications, or run metadata.
 
+**Limitation — authentication token lifetime:** the runner authenticates dbt with the notebook's
+own credentials, captured once into `DBT_ACCESS_TOKEN` at the start of the run. That token is
+short-lived (about one hour) and does not self-refresh, so a single task that runs longer than the
+token's lifetime can fail mid-run with an authentication error. This is not a concern for typical
+runs — dbt pushes the SQL to the warehouse and mostly waits, so individual tasks rarely exceed an
+hour.
+
 #### Faster parsing on large projects (pre-built msgpack)
 
 On large projects with many parallel tasks, most of each task's time is dbt **parsing** (re-reading

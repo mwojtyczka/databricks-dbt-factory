@@ -2544,14 +2544,42 @@ class _NotebookWidgets:
 def _notebook_dbutils(values: dict[str, str]):
     """Builds the minimal `dbutils` object needed to execute the packaged notebook locally."""
     context = SimpleNamespace(
-        apiToken=lambda: _NotebookValue("token"),
-        apiUrl=lambda: _NotebookValue("https://example.databricks.com/"),
         notebookPath=lambda: _NotebookValue("/Workspace/project/run_dbt_command.py"),
     )
     notebook = SimpleNamespace(getContext=lambda: context)
     backend = SimpleNamespace(notebook=lambda: notebook)
     entry_point = SimpleNamespace(getDbutils=lambda: backend)
     return SimpleNamespace(widgets=_NotebookWidgets(values), notebook=SimpleNamespace(entry_point=entry_point))
+
+
+# The token and host a stubbed `WorkspaceClient` hands the runner, so the notebook executes offline —
+# `dbt ls`/parse needs no warehouse, and constructing a real `WorkspaceClient` would demand ambient
+# Databricks credentials CI does not have.
+_STUB_RUNNER_TOKEN = "stub-access-token"
+_STUB_RUNNER_HOST_URL = "https://example.databricks.com/"
+
+
+class _StubWorkspaceConfig:
+    """The `config` surface the runner reads: an auth header factory and the workspace host URL."""
+
+    def __init__(self):
+        self.host = _STUB_RUNNER_HOST_URL
+        self.authenticated = False
+
+    def authenticate(self) -> dict[str, str]:
+        self.authenticated = True
+        return {"Authorization": f"Bearer {_STUB_RUNNER_TOKEN}"}
+
+
+class _StubWorkspaceClient:
+    """Stands in for `databricks.sdk.WorkspaceClient` so the runner authenticates without a workspace."""
+
+    #: The most recently constructed stub, so a test can assert the runner consumed its credentials.
+    last: "_StubWorkspaceClient | None" = None
+
+    def __init__(self, *_args, **_kwargs):
+        self.config = _StubWorkspaceConfig()
+        _StubWorkspaceClient.last = self
 
 
 def _run_shipped_notebook(monkeypatch, root: Path, selectors: tuple[str, ...]) -> dict:
@@ -2570,6 +2598,9 @@ def _run_shipped_notebook(monkeypatch, root: Path, selectors: tuple[str, ...]) -
     )
     with monkeypatch.context() as execution:
         execution.chdir(root)
+        # The runner imports `WorkspaceClient` at module top and constructs it at run time; patch the
+        # source module so the fresh `runpy` import binds the stub instead of the real SDK client.
+        execution.setattr("databricks.sdk.WorkspaceClient", _StubWorkspaceClient)
         for name in ("DBT_ACCESS_TOKEN", "DBT_HOST", "DBT_TARGET_PATH", "DBT_LOG_PATH"):
             execution.setenv(name, os.environ.get(name, ""))
         return runpy.run_path(str(runner_path), init_globals={"dbutils": _notebook_dbutils(values)})
@@ -2708,6 +2739,67 @@ def test_shipped_runner_falls_back_to_live_parse_when_manifest_is_unavailable(
     assert namespace["runner"].manifest is None
     assert _runner_result_ids(namespace) == (unique_id,)
     assert (fallback_message in output) is expects_fallback_message
+
+
+def test_shipped_runner_authenticates_dbt_from_the_workspace_client(tmp_path, monkeypatch):
+    """
+    The runner captures the WorkspaceClient's token and host into `DBT_ACCESS_TOKEN`/`DBT_HOST`.
+
+    Those env vars are cleared in the runner's `finally`, so this asserts the behaviour rather than
+    the leftover values: the profile reads both through dbt's `env_var()`, which raises for an unset
+    variable, so a `dbt ls` that resolves the node at all proves the runner set each from the stubbed
+    client before invoking dbt.
+    """
+    # Parse and build the selector against the static profile, so the prep steps (which run before the
+    # runner sets any env var) do not themselves depend on `DBT_HOST`/`DBT_ACCESS_TOKEN`.
+    _write_project(tmp_path, {"orders.sql": MODEL_SQL})
+    manifest = _parse(tmp_path)
+    unique_id = "model.probe.orders"
+    _task_key, selectors, verb = _resource_selectors(manifest, bundle_tests=False)[0]
+    assert verb == "run"
+
+    # Swap in a profile whose host reads through dbt's `env_var()` only for the runner run, starting
+    # from an unset `DBT_HOST` so a runner that fails to set it surfaces as dbt's `env_var()` error at
+    # parse time rather than reusing an ambient value. `dbt ls` parses but never authenticates, so the
+    # host — which parsing does resolve — is what a templated profile can prove; the token is asserted
+    # directly below from the value the runner wrote into the environment.
+    templated_profile = (
+        "probe:\n"
+        "  target: dev\n"
+        "  outputs:\n"
+        "    dev:\n"
+        "      type: databricks\n"
+        "      host: \"{{ env_var('DBT_HOST') }}\"\n"
+        "      http_path: /sql/1.0/warehouses/x\n"
+        "      token: dummy\n"
+        "      schema: default\n"
+    )
+    (tmp_path / "profiles.yml").write_text(templated_profile, encoding="utf-8")
+    monkeypatch.delenv("DBT_HOST", raising=False)
+    monkeypatch.delenv("DBT_ACCESS_TOKEN", raising=False)
+
+    # Capture the token the runner exports before its `finally` clears it, by recording the value at
+    # the moment the runner pops it from the environment.
+    popped: dict[str, str] = {}
+    real_pop = os.environ.pop
+
+    def _recording_pop(key, *default):
+        if key in {"DBT_ACCESS_TOKEN", "DBT_HOST"} and key in os.environ:
+            popped[key] = os.environ[key]
+        return real_pop(key, *default)
+
+    monkeypatch.setattr(os.environ, "pop", _recording_pop)
+
+    namespace = _run_shipped_notebook(monkeypatch, tmp_path, selectors)
+
+    # dbt resolved the templated host, so the runner set `DBT_HOST` from the stubbed client's host,
+    # reduced to a bare netloc.
+    assert _runner_result_ids(namespace) == (unique_id,)
+    assert namespace["_parsed"].netloc == "example.databricks.com"
+    # The runner authenticated through the stubbed client and exported its bearer token and host.
+    assert _StubWorkspaceClient.last is not None and _StubWorkspaceClient.last.config.authenticated
+    assert popped["DBT_ACCESS_TOKEN"] == _STUB_RUNNER_TOKEN
+    assert popped["DBT_HOST"] == "example.databricks.com"
 
 
 @pytest.mark.parametrize("seed", range(12))

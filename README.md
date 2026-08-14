@@ -223,6 +223,11 @@ commands, whether it backs native dbt tasks or notebook tasks. Databricks recomm
 `dbt-databricks>=1.6.0`; matching the manifest-generation version exactly is the stronger
 compatibility requirement.
 
+The packaged notebook runner authenticates through the Databricks SDK (`databricks-sdk`), which
+`dbt-databricks` already depends on — so the `dbt-databricks` pin above covers it. A custom task
+environment that omits `dbt-databricks` must install `databricks-sdk` as well, or the runner fails
+at import.
+
 The example uses [serverless environment version 5](https://docs.databricks.com/aws/en/release-notes/serverless/environment-version/five),
 the current Databricks environment version. Use the latest version available in your workspace.
 
@@ -590,6 +595,13 @@ Each task calls the shared content-addressed
 - Faster execution by avoiding the cold-start problem — all dependencies can be pre-cached inside `base_environment`
 - Supports running the dbt process on job compute via `--job-cluster-key` (SQL execution still uses the warehouse in `profiles.yml`)
 - More flexibility — pass `--notebook-path` to manage and extend your own runner when you need custom secrets, APIs, notifications, or run metadata.
+
+**Limitation — authentication token lifetime:** the runner authenticates dbt with the notebook's
+own credentials, captured once into `DBT_ACCESS_TOKEN` at the start of the run. That token is
+short-lived (about one hour) and does not self-refresh, so a single task that runs longer than the
+token's lifetime can fail mid-run with an authentication error. This is not a concern for typical
+runs — dbt pushes the SQL to the warehouse and mostly waits, so individual tasks rarely exceed an
+hour.
 
 #### Faster parsing on large projects (pre-built msgpack)
 

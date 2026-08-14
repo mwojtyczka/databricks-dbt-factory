@@ -2544,14 +2544,42 @@ class _NotebookWidgets:
 def _notebook_dbutils(values: dict[str, str]):
     """Builds the minimal `dbutils` object needed to execute the packaged notebook locally."""
     context = SimpleNamespace(
-        apiToken=lambda: _NotebookValue("token"),
-        apiUrl=lambda: _NotebookValue("https://example.databricks.com/"),
         notebookPath=lambda: _NotebookValue("/Workspace/project/run_dbt_command.py"),
     )
     notebook = SimpleNamespace(getContext=lambda: context)
     backend = SimpleNamespace(notebook=lambda: notebook)
     entry_point = SimpleNamespace(getDbutils=lambda: backend)
     return SimpleNamespace(widgets=_NotebookWidgets(values), notebook=SimpleNamespace(entry_point=entry_point))
+
+
+# The token and host a stubbed `WorkspaceClient` hands the runner, so the notebook executes offline —
+# `dbt ls`/parse needs no warehouse, and constructing a real `WorkspaceClient` would demand ambient
+# Databricks credentials CI does not have.
+_STUB_RUNNER_TOKEN = "stub-access-token"
+_STUB_RUNNER_HOST_URL = "https://example.databricks.com/"
+
+
+class _StubWorkspaceConfig:
+    """The `config` surface the runner reads: an auth header factory and the workspace host URL."""
+
+    def __init__(self):
+        self.host = _STUB_RUNNER_HOST_URL
+        self.authenticated = False
+
+    def authenticate(self) -> dict[str, str]:
+        self.authenticated = True
+        return {"Authorization": f"Bearer {_STUB_RUNNER_TOKEN}"}
+
+
+class _StubWorkspaceClient:
+    """Stands in for `databricks.sdk.WorkspaceClient` so the runner authenticates without a workspace."""
+
+    #: The most recently constructed stub, so a test can assert the runner consumed its credentials.
+    last: "_StubWorkspaceClient | None" = None
+
+    def __init__(self, *_args, **_kwargs):
+        self.config = _StubWorkspaceConfig()
+        _StubWorkspaceClient.last = self
 
 
 def _run_shipped_notebook(monkeypatch, root: Path, selectors: tuple[str, ...]) -> dict:
@@ -2570,6 +2598,9 @@ def _run_shipped_notebook(monkeypatch, root: Path, selectors: tuple[str, ...]) -
     )
     with monkeypatch.context() as execution:
         execution.chdir(root)
+        # The runner imports `WorkspaceClient` at module top and constructs it at run time; patch the
+        # source module so the fresh `runpy` import binds the stub instead of the real SDK client.
+        execution.setattr("databricks.sdk.WorkspaceClient", _StubWorkspaceClient)
         for name in ("DBT_ACCESS_TOKEN", "DBT_HOST", "DBT_TARGET_PATH", "DBT_LOG_PATH"):
             execution.setenv(name, os.environ.get(name, ""))
         return runpy.run_path(str(runner_path), init_globals={"dbutils": _notebook_dbutils(values)})
@@ -2708,6 +2739,52 @@ def test_shipped_runner_falls_back_to_live_parse_when_manifest_is_unavailable(
     assert namespace["runner"].manifest is None
     assert _runner_result_ids(namespace) == (unique_id,)
     assert (fallback_message in output) is expects_fallback_message
+
+
+def test_shipped_runner_authenticates_dbt_from_the_workspace_client(tmp_path, monkeypatch):
+    """
+    The runner captures the WorkspaceClient's token and host into `DBT_ACCESS_TOKEN`/`DBT_HOST`.
+
+    The runner clears both env vars in its `finally`, so this records their values at the moment the
+    runner pops them and asserts those, rather than reading leftovers. `dbt ls` parses but never opens
+    a connection, so dbt itself cannot witness the token or an empty host; the exported values are
+    asserted directly. Running the full runner additionally proves the auth block does not raise and
+    that dbt still resolves the node end to end.
+    """
+    _write_project(tmp_path, {"orders.sql": MODEL_SQL})
+    manifest = _parse(tmp_path)
+    unique_id = "model.probe.orders"
+    _task_key, selectors, verb = _resource_selectors(manifest, bundle_tests=False)[0]
+    assert verb == "run"
+
+    # Start from an environment where neither variable carries an ambient value, so the recorded
+    # values below can only be what this runner exported.
+    monkeypatch.delenv("DBT_HOST", raising=False)
+    monkeypatch.delenv("DBT_ACCESS_TOKEN", raising=False)
+
+    # Capture the credentials the runner exports before its `finally` clears them, by recording each
+    # value at the moment the runner pops it from the environment.
+    popped: dict[str, str] = {}
+    real_pop = os.environ.pop
+
+    def _recording_pop(key, *default):
+        if key in {"DBT_ACCESS_TOKEN", "DBT_HOST"} and key in os.environ:
+            popped[key] = os.environ[key]
+        return real_pop(key, *default)
+
+    monkeypatch.setattr(os.environ, "pop", _recording_pop)
+
+    namespace = _run_shipped_notebook(monkeypatch, tmp_path, selectors)
+
+    # The full runner executed without the auth block raising, and dbt resolved the node.
+    assert _runner_result_ids(namespace) == (unique_id,)
+    # The runner authenticated through the stubbed client and exported its bearer token and bare host.
+    assert _StubWorkspaceClient.last is not None and _StubWorkspaceClient.last.config.authenticated
+    assert popped["DBT_ACCESS_TOKEN"] == _STUB_RUNNER_TOKEN
+    assert popped["DBT_HOST"] == "example.databricks.com"
+    assert namespace["_parsed"].netloc == "example.databricks.com"
+    assert popped["DBT_ACCESS_TOKEN"] == _STUB_RUNNER_TOKEN
+    assert popped["DBT_HOST"] == "example.databricks.com"
 
 
 @pytest.mark.parametrize("seed", range(12))

@@ -2,7 +2,7 @@
 
 The project README walks through an end-to-end flow against the companion
 `mwojtyczka/dbt-demo` project: compile the dbt project to a manifest, run the factory CLI
-to generate a Databricks Workflow spec, then deploy and run it. The only steps that need a
+to generate a Databricks Lakeflow Job spec, then deploy and run it. The only steps that need a
 live workspace are `dbt compile` (which needs a warehouse connection) and the final
 deploy/run. Everything in between is offline.
 

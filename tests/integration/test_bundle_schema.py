@@ -1,4 +1,4 @@
-"""Validate the committed ``tests/test_data`` job specs against the Databricks Asset
+"""Validate the committed ``tests/test_data`` job specs against the Declarative Automation
 Bundle (DAB) JSON schema.
 
 The unit and CLI tests prove the generator produces the output we *expect* (golden-file
@@ -44,7 +44,7 @@ def test_test_data_fixtures_exist():
 
 @pytest.mark.parametrize("fixture", _job_spec_fixtures(), ids=lambda p: p.name)
 def test_fixture_is_valid_dab(fixture, bundle_validator):
-    """Every committed job spec fixture conforms to the Databricks Asset Bundle schema."""
+    """Every committed job spec fixture conforms to the Declarative Automation Bundle schema."""
     with open(fixture, "r", encoding="utf-8") as file:
         spec = yaml.safe_load(file)
 

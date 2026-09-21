@@ -1,6 +1,6 @@
 """Shared fixtures for the integration tests.
 
-The Databricks Asset Bundle (DAB) schema validator is defined here so multiple test
+The Declarative Automation Bundle (DAB) schema validator is defined here so multiple test
 modules (fixture validation and the end-to-end example) can reuse it without duplicating
 the CLI invocation or the schema-normalisation logic.
 """

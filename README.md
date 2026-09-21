@@ -1,9 +1,9 @@
 Databricks dbt factory
 ===
 
-Databricks dbt-factory is a lightweight library and CLI that turns a dbt project into a granular Databricks Workflow — one task per dbt object (models, tests, seeds, and snapshots) instead of a single opaque dbt task.
+Databricks dbt-factory is a lightweight library and CLI that turns a dbt project into a granular Databricks Lakeflow Job — one task per dbt object (models, tests, seeds, and snapshots) instead of a single opaque dbt task.
 
-It reads your dbt manifest and generates a new job specification — a Databricks Asset Bundle (DAB) or plain job YAML — or updates an existing one in place.
+It reads your dbt manifest and generates a new job specification — a Declarative Automation Bundle (DAB) or plain job YAML — or updates an existing one in place.
 
 [![build](https://github.com/mwojtyczka/databricks-dbt-factory/actions/workflows/push.yml/badge.svg)](https://github.com/mwojtyczka/databricks-dbt-factory/actions/workflows/push.yml)
 [![PyPI - Version](https://img.shields.io/pypi/v/databricks-dbt-factory.svg)](https://pypi.org/project/databricks-dbt-factory)
@@ -26,9 +26,9 @@ It reads your dbt manifest and generates a new job specification — a Databrick
 
 # Motivation
 
-By default, running a dbt project in Databricks Workflows treats an entire dbt project as a single execution unit — a black box.
+By default, running a dbt project in Databricks Lakeflow Jobs treats an entire dbt project as a single execution unit — a black box.
 
-Databricks dbt-factory changes that by updating Databricks Workflow specs to run dbt objects (models, tests, seeds, snapshots) as individual tasks. The diagram below shows an example dbt project structure to illustrate the idea — the actual task graph is derived from your dbt manifest.
+Databricks dbt-factory changes that by updating Databricks Lakeflow Job specs to run dbt objects (models, tests, seeds, snapshots) as individual tasks. The diagram below shows an example dbt project structure to illustrate the idea — the actual task graph is derived from your dbt manifest.
 
 ```mermaid
 flowchart LR
@@ -75,7 +75,7 @@ flowchart LR
 
 # How it works
 
-The tool reads the dbt manifest file and the existing DAB workflow definition, and generates a new definition.
+The tool reads the dbt manifest file and the existing DAB job definition, and generates a new definition.
 
 ```mermaid
 flowchart LR
@@ -95,7 +95,7 @@ With `--task-type dbt`, each dbt object becomes a native Databricks `dbt_task`:
 
 ```mermaid
 flowchart LR
-    subgraph workflow["Generated Databricks Workflow — native dbt tasks"]
+    subgraph workflow["Generated Databricks Lakeflow Job — native dbt tasks"]
         direction LR
         seed1["dbt seed --select seed1"] --> model1["dbt run --select model1"]
         seed2["dbt seed --select seed2"] --> model1
@@ -121,11 +121,11 @@ flowchart LR
 
 With the default task type, each task runs the packaged runner notebook
 (`run_dbt_command_<sha256>.py`), which triggers the dbt commands programmatically using dbt core package. This gives much faster task
-start times — see [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
+start times — see [Generating notebook tasks](#generating-notebook-tasks-within-databricks-lakeflow-jobs-recommended-for-best-performance).
 
 ```mermaid
 flowchart LR
-    subgraph workflow["Generated Databricks Workflow — notebook runner tasks"]
+    subgraph workflow["Generated Databricks Lakeflow Job — notebook runner tasks"]
         direction LR
         seed1["run_dbt_command_sha256.py<br/>dbt seed --select seed1"] --> model1["run_dbt_command_sha256.py<br/>dbt run --select model1"]
         seed2["run_dbt_command_sha256.py<br/>dbt seed --select seed2"] --> model1
@@ -243,7 +243,7 @@ notebook tasks on serverless — requires Databricks CLI >= 0.292.0):
 
 Note: `environment_version` and `base_environment` are mutually exclusive — use one or the other.
 
-## Generating native dbt tasks within Databricks Workflows
+## Generating native dbt tasks within Databricks Lakeflow Jobs
 
 ```shell
 databricks_dbt_factory  \
@@ -259,7 +259,7 @@ This generates `dbt_task` entries — the native Databricks dbt task type.
 
 Note that `--input-job-spec-path` and `--target-job-spec-path` can be the same file, in which case the job spec is updated in place.
 
-## Generating notebook tasks within Databricks Workflows (recommended for best performance)
+## Generating notebook tasks within Databricks Lakeflow Jobs (recommended for best performance)
 
 This is the recommended way to run dbt on Databricks. It gives much faster start time. 
 It uses a pre-cached base environment where `dbt-databricks` is already installed and ready on each new task which saves roughly 30 seconds of pip-install time per task. Native `dbt_task` on Serverless has to install dbt fresh every time.
@@ -356,7 +356,7 @@ databricks_dbt_factory  \
 - `--target` (type: str, optional): dbt target to use. If not provided, the default target from the dbt profile will be used. The selected target must produce the same graph as the supplied manifest.
 - `--source` (type: str, optional, default: None): Project source (`GIT` or `WORKSPACE`). Auto-copied notebook runners explicitly use `WORKSPACE`. Otherwise, omission emits no task-level source, so Databricks uses `GIT` when the job defines `git_source` and `WORKSPACE` otherwise. For notebook tasks, reserve explicit `GIT` for a caller-managed notebook in the job's remote Git source.
 - `--task-type` (type: str, optional, default: "notebook"): Task type to generate — `notebook` for notebook_task wrapper, `dbt` for native dbt_task.
-- `--notebook-path` (type: str, optional): Path to the dbt runner notebook used when `--task-type notebook`. If omitted, the packaged runner is copied into the bundle under its full content-addressed SHA-256 filename and referenced relatively, so `databricks bundle deploy` uploads it automatically. **When provided, also pass `--project-directory` as an absolute workspace path** — see the note in [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance).
+- `--notebook-path` (type: str, optional): Path to the dbt runner notebook used when `--task-type notebook`. If omitted, the packaged runner is copied into the bundle under its full content-addressed SHA-256 filename and referenced relatively, so `databricks bundle deploy` uploads it automatically. **When provided, also pass `--project-directory` as an absolute workspace path** — see the note in [Generating notebook tasks](#generating-notebook-tasks-within-databricks-lakeflow-jobs-recommended-for-best-performance).
 - `--warehouse_id` (type: str, optional): SQL Warehouse ID. Only used with native dbt_task.
 - `--schema` (type: str, optional): Metastore schema. Only used with native dbt_task.
 - `--catalog` (type: str, optional): Metastore catalog. Only used with native dbt_task.
@@ -673,7 +673,7 @@ The steps below walk through running it end-to-end.
     dbt compile --target dev
     ```
 
-5. **Create Databricks Workflow.** This reads the manifest and the job template (`resources/dbt_sql_job.yml`) and writes a new, fully-expanded job spec to `resources/dbt_sql_job_explicit_tasks.yml` — one task per dbt node, wired up with the right dependencies:
+5. **Create Databricks Lakeflow Job.** This reads the manifest and the job template (`resources/dbt_sql_job.yml`) and writes a new, fully-expanded job spec to `resources/dbt_sql_job_explicit_tasks.yml` — one task per dbt node, wired up with the right dependencies:
 
     ```shell
     databricks_dbt_factory \
@@ -691,7 +691,7 @@ The steps below walk through running it end-to-end.
     This example compiles and generates with the `dev` target. Repeat both steps with the same target
     value for every target whose parse context can produce a different graph.
 
-    This uses the default `notebook` task type, which routes dbt execution through the packaged runner notebook (pre-cached base environments, faster cold starts). See [Generating notebook tasks](#generating-notebook-tasks-within-databricks-workflows-recommended-for-best-performance) for the full rationale, or pass `--task-type dbt` for native dbt tasks.
+    This uses the default `notebook` task type, which routes dbt execution through the packaged runner notebook (pre-cached base environments, faster cold starts). See [Generating notebook tasks](#generating-notebook-tasks-within-databricks-lakeflow-jobs-recommended-for-best-performance) for the full rationale, or pass `--task-type dbt` for native dbt tasks.
 
 6. **Authenticate the Databricks CLI to your workspace.** The `databricks.yml` in the demo references a specific profile (e.g. `FIELD-ENG`) under each target. Log in so that profile resolves:
 

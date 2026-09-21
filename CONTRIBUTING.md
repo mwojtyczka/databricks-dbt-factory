@@ -32,7 +32,7 @@ make integration
 
 `make integration` builds the package and drives the installed `databricks_dbt_factory` CLI as a
 real subprocess against the fixtures in `tests/test_data`, comparing the generated job spec to the
-committed golden files. It also validates every fixture against the Databricks Asset Bundle schema
+committed golden files. It also validates every fixture against the Declarative Automation Bundle schema
 (generated on the fly with `databricks bundle schema`) to ensure the generated specs are valid DABs,
 and runs the [end-to-end example](README.md#end-to-end-example) offline — invoking the CLI with the
 documented arguments against the committed manifest and validating the freshly generated spec. It
@@ -97,8 +97,8 @@ changes that affect how generated tasks actually *run* on Databricks (task type,
 config, command shape, the notebook runner, etc.), additionally verify end-to-end against a real
 workspace as described below.
 
-The flow is: **generate** a job definition from a manifest → **deploy** it as a Databricks Asset
-Bundle (DAB) → **run** it and confirm the tasks execute correctly.
+The flow is: **generate** a job definition from a manifest → **deploy** it as a Declarative
+Automation Bundle (DAB) → **run** it and confirm the tasks execute correctly.
 
 ### 0. Prerequisites
 

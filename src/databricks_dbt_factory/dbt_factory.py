@@ -112,7 +112,7 @@ class DbtFactory:
         tasks, _ = self._create_tasks(dbt_manifest)
         if len(tasks) > MAX_JOB_TASKS:
             raise ValueError(
-                f"Databricks jobs support at most 1,000 tasks; this manifest generates {len(tasks):,}. "
+                f"Databricks jobs support at most {MAX_JOB_TASKS:,} tasks; this manifest generates {len(tasks):,}. "
                 f"Reduce the generated resources, enable test bundling, or split the job by tag."
             )
         return [task.to_dict() for task in tasks]

@@ -62,11 +62,14 @@ def partition_tasks(
     for job, job_tasks in jobs.items():
         if len(job_tasks) > MAX_JOB_TASKS:
             raise ValueError(
-                f"Databricks jobs support at most 1,000 tasks; the {job!r} job generates {len(job_tasks):,}. "
-                f"Split it further by tag."
+                f"Databricks jobs support at most {MAX_JOB_TASKS:,} tasks; the {job!r} job generates "
+                f"{len(job_tasks):,}. Split it further by tag."
             )
     if len(order) > MAX_JOB_TASKS:
-        raise ValueError(f"Databricks jobs support at most 1,000 tasks; the tags split into {len(order):,} jobs.")
+        raise ValueError(
+            f"Databricks jobs support at most {MAX_JOB_TASKS:,} tasks; the tags split into {len(order):,} jobs. "
+            f"Split by fewer tags."
+        )
     return [JobPartition(job, [task.to_dict() for task in jobs[job]], sorted(upstream[job])) for job in order]
 
 

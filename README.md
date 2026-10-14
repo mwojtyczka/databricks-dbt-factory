@@ -422,12 +422,14 @@ databricks_dbt_factory ... --split-by-tag 'domain:*'
 - A model, seed or snapshot runs in the job of the one split tag it carries, or in the `default` job if it
   carries none. One that carries two is refused.
 - A test runs in the job of the resources it tests, or the last of them if they are in different jobs. A test
-  with no resource to follow, such as a source test, goes by its own tags.
+  with no resource to follow, such as a source test, goes by its own tags; with `--bundle-tests`, the tests of a
+  source go by the source's tags.
 - The template job becomes an orchestrator that runs each job with a `run_job_task` once the jobs it depends on
   have succeeded. The orchestrator keeps the template's schedule, triggers and notifications; the jobs get its
   compute. A job waits for whole upstream jobs, not just for the models it needs.
 - Jobs that would depend on each other are refused, naming the cycle. Retag the resources so dependencies between
-  jobs flow one way.
+  jobs flow one way. For example, the tests of an untagged source run in `default`, so a job that reads the source
+  cannot also feed an untagged model; give the source a split tag, such as `sources` with `--split-by-tag sources`.
 - Repairing a failed orchestrator run re-runs the failed tasks inside the failed job; Databricks does not allow
   repairing that job's own run. To rebuild its models as well, for example after fixing source data, run the
   orchestrator again, optionally only for the affected jobs (`run_now` with `only`).

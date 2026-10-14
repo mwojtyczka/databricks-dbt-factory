@@ -1794,6 +1794,13 @@ def test_a_split_job_over_the_task_limit_is_refused(dbt_factory):
         dbt_factory.create_partitions({"nodes": _tagged_models("a", 1_001)}, ["a"])
 
 
+def test_a_split_into_more_jobs_than_the_orchestrator_can_run_is_refused(dbt_factory):
+    nodes = {name: info for index in range(1_001) for name, info in _tagged_models(f"t{index}", 1).items()}
+
+    with pytest.raises(ValueError, match=r"the tags split into 1,001 jobs\. Split by fewer tags\."):
+        dbt_factory.create_partitions({"nodes": nodes}, ["*"])
+
+
 # The selector-index test reaches into internals because "scan every peer" has no public surface.
 # pylint: disable=protected-access
 def test_selector_index_narrowing_matches_a_full_scan(dbt_factory):

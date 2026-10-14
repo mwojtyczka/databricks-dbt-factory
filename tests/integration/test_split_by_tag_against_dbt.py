@@ -167,6 +167,34 @@ def test_source_tests_run_in_the_job_of_the_source_tags(tmp_path, bundle_tests):
     assert jobs["default"].depends_on == ["ingest"]
 
 
+def test_bundled_source_tests_go_by_the_source_tags(tmp_path):
+    manifest = _parse(
+        tmp_path,
+        {"stg.sql": "{{ config(tags=['qa']) }} select id from {{ source('raw', 'events') }}"},
+        "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: events\n        columns:\n          - name: id\n"
+        "            data_tests:\n              - unique:\n                  config:\n                    tags: [qa]\n",
+    )
+
+    assert _keys(_split(manifest, "qa")["qa"]) == {"stg_model", "source_unique_raw_events_id_test"}
+    assert _keys(_split(manifest, "qa", bundle_tests=True)["default"]) == {"raw_events_test"}
+
+
+@pytest.mark.parametrize("bundle_tests", [False, True])
+def test_a_job_reading_a_tested_untagged_source_cannot_feed_the_default_job(tmp_path, bundle_tests):
+    manifest = _parse(
+        tmp_path,
+        {
+            "revenue.sql": "{{ config(tags=['finance']) }} select id from {{ source('raw', 'events') }}",
+            "report.sql": "select id from {{ ref('revenue') }}",
+        },
+        "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: events\n        columns:\n          - name: id\n"
+        "            data_tests: [not_null]\n",
+    )
+
+    with pytest.raises(ValueError, match="jobs default -> finance -> default would depend on each other"):
+        _split(manifest, "finance", bundle_tests=bundle_tests)
+
+
 def test_a_pattern_makes_one_job_per_matching_tag(tmp_path):
     manifest = _parse(
         tmp_path,
@@ -204,6 +232,30 @@ def test_a_model_with_two_split_tags_is_refused(tmp_path):
         create_dbt_factory().create_partitions(manifest, ["finance", "marketing"])
 
 
+@pytest.mark.parametrize(
+    ("tags", "pattern", "message"),
+    [
+        (
+            ["domain:ops", "domain_ops"],
+            "domain*",
+            "tag 'domain:ops' and tag 'domain_ops' would both run as job 'domain_ops'",
+        ),
+        (["default", None], "default", "untagged resources and tag 'default' would both run as job 'default'"),
+    ],
+)
+def test_tags_naming_the_same_job_are_refused(tmp_path, tags, pattern, message):
+    manifest = _parse(
+        tmp_path,
+        {
+            f"m{index}.sql": (f"{{{{ config(tags=['{tag}']) }}}} " if tag else "") + "select 1 as id"
+            for index, tag in enumerate(tags)
+        },
+    )
+
+    with pytest.raises(ValueError, match=message):
+        create_dbt_factory().create_partitions(manifest, [pattern])
+
+
 def test_cli_writes_a_valid_bundle_run_by_an_orchestrator(shop, monkeypatch, bundle_validator):
     root, _ = shop
     target = root / "resources" / "job.yaml"
@@ -237,10 +289,13 @@ def test_cli_writes_a_valid_bundle_run_by_an_orchestrator(shop, monkeypatch, bun
     assert all(task["notebook_task"] for key in jobs if key != "dbt_sql_job" for task in jobs[key]["tasks"])
 
 
-def test_cli_refuses_to_split_a_job_spec_in_place(shop, monkeypatch, capsys):
+@pytest.mark.parametrize("alias", ["models/../job.yaml", "JOB.yaml"])
+def test_cli_refuses_to_split_a_job_spec_in_place(shop, monkeypatch, capsys, alias):
     root, _ = shop
     spec = root / "job.yaml"
     spec.write_bytes(TEMPLATE.read_bytes())
+    if not (root / alias).exists():
+        pytest.skip("this file system tells the two spellings apart")
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -250,7 +305,7 @@ def test_cli_refuses_to_split_a_job_spec_in_place(shop, monkeypatch, capsys):
             "--input-job-spec-path",
             str(spec),
             "--target-job-spec-path",
-            str(root / "models" / ".." / "job.yaml"),
+            str(root / alias),
             "--split-by-tag",
             "finance",
             "--split-by-tag",

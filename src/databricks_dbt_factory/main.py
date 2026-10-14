@@ -416,7 +416,8 @@ def parse_args():
     if args.job_cluster_key and args.environment_key is not None:
         parser.error("--job-cluster-key and --environment-key are mutually exclusive")
 
-    if args.split_by_tag and Path(args.input_job_spec_path).resolve() == Path(args.target_job_spec_path).resolve():
+    input_spec, target_spec = Path(args.input_job_spec_path), Path(args.target_job_spec_path)
+    if args.split_by_tag and input_spec.exists() and target_spec.exists() and input_spec.samefile(target_spec):
         parser.error(
             "--split-by-tag cannot update the job spec in place; set --target-job-spec-path to a file other than "
             "--input-job-spec-path."

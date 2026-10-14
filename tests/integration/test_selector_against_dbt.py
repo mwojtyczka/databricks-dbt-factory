@@ -20,6 +20,7 @@ machine where dbt happened to be missing.
 
 # pylint: disable=too-many-lines
 
+import datetime
 import functools
 import json
 import os
@@ -2588,6 +2589,10 @@ def _run_shipped_notebook(monkeypatch, root: Path, selectors: tuple[str, ...]) -
     command = (
         f"dbt ls --quiet {select_args} --output json --output-keys unique_id --project-dir {shlex.quote(str(root))}"
     )
+    return _execute_shipped_notebook(monkeypatch, root, command)
+
+
+def _execute_shipped_notebook(monkeypatch, root: Path, command: str) -> dict:
     values = {
         "dbt_commands": json.dumps([command]),
         "project_directory": "",
@@ -2739,6 +2744,71 @@ def test_shipped_runner_falls_back_to_live_parse_when_manifest_is_unavailable(
     assert namespace["runner"].manifest is None
     assert _runner_result_ids(namespace) == (unique_id,)
     assert (fallback_message in output) is expects_fallback_message
+
+
+MICROBATCH_SQL = """\
+{{ config(materialized='incremental', incremental_strategy='microbatch', event_time='event_ts',
+          batch_size='day', begin='2026-01-01') }}
+select current_timestamp() as event_ts
+"""
+
+
+@pytest.mark.parametrize(
+    ("model_paths", "schema_yml", "read_dated_value", "expected"),
+    [
+        pytest.param(
+            {"orders.sql": MODEL_SQL},
+            "version: 2\nmodels:\n  - name: orders\n    config:\n      meta:\n        owner_since: 2024-01-01\n",
+            lambda manifest: manifest.nodes["model.probe.orders"].unrendered_config["meta"]["owner_since"],
+            datetime.date(2024, 1, 1),
+            id="unquoted-yaml-date-in-meta",
+        ),
+        pytest.param(
+            {"orders.sql": MODEL_SQL, "events.sql": MICROBATCH_SQL},
+            None,
+            lambda manifest: manifest.nodes["model.probe.events"].config.begin,
+            datetime.datetime(2026, 1, 1),
+            id="microbatch-begin",
+        ),
+    ],
+)
+def test_shipped_runner_injects_a_manifest_holding_dates(
+    tmp_path, monkeypatch, model_paths, schema_yml, read_dated_value, expected
+):
+    _write_project(tmp_path, model_paths, schema_yml=schema_yml)
+    manifest = _parse(tmp_path)
+    unique_id = "model.probe.orders"
+    task_to_id = _task_key_to_unique_id(manifest, bundle_tests=False)
+    selectors = next(
+        selectors
+        for task_key, selectors, verb in _resource_selectors(manifest, bundle_tests=False)
+        if verb == "run" and task_to_id[task_key] == unique_id
+    )
+    select_args = " ".join(f"--select {shlex.quote(selector)}" for selector in selectors)
+    command = f"dbt compile --quiet {select_args} --no-populate-cache --project-dir {shlex.quote(str(tmp_path))}"
+
+    namespace = _execute_shipped_notebook(monkeypatch, tmp_path, command)
+
+    runner = namespace["runner"]
+    assert runner.manifest is not None, "the runner parsed the project instead of injecting its manifest"
+    assert read_dated_value(runner.manifest) == expected
+    result = namespace["result"]
+    assert result.success, result.exception
+    assert [node_result.node.unique_id for node_result in result.result.results] == [unique_id]
+
+
+def test_shipped_runner_parses_instead_of_injecting_without_dbts_msgpack_decoder(tmp_path, monkeypatch, capsys):
+    _write_project(tmp_path, {"orders.sql": MODEL_SQL})
+    manifest = _parse(tmp_path)
+    _task_key, selectors, verb = _resource_selectors(manifest, bundle_tests=False)[0]
+    assert verb == "run"
+    monkeypatch.delattr("dbt.parser.manifest.extended_mashumuro_decoder")
+
+    namespace = _run_shipped_notebook(monkeypatch, tmp_path, selectors)
+
+    assert namespace["runner"].manifest is None
+    assert _runner_result_ids(namespace) == ("model.probe.orders",)
+    assert "[dbt-factory] manifest injection unavailable, falling back to dbt parse:" in capsys.readouterr().out
 
 
 def test_shipped_runner_authenticates_dbt_from_the_workspace_client(tmp_path, monkeypatch):

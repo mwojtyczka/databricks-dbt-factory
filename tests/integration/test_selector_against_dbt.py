@@ -35,6 +35,7 @@ from types import SimpleNamespace
 import pytest
 from dbt.cli.main import dbtRunner, dbtRunnerResult
 from dbt.contracts.graph.manifest import Manifest
+from dbt.parser.manifest import extended_mashumaro_encoder, extended_mashumuro_decoder
 
 from databricks_dbt_factory.dbt_factory import DbtFactory
 from databricks_dbt_factory.utils import build_task_key_maps
@@ -245,6 +246,15 @@ def _task_key_to_unique_id(manifest: dict, bundle_tests: bool) -> dict[str, str]
     if bundle_tests:
         mapping.update({key: full_name for full_name, key in bundled_test_keys.items()})
     return mapping
+
+
+def _run_selectors_for(manifest: dict, unique_id: str) -> tuple[str, ...]:
+    task_to_id = _task_key_to_unique_id(manifest, bundle_tests=False)
+    return next(
+        selectors
+        for task_key, selectors, verb in _resource_selectors(manifest, bundle_tests=False)
+        if verb == "run" and task_to_id[task_key] == unique_id
+    )
 
 
 def _enabled_entries(entries: dict) -> dict:
@@ -1966,12 +1976,7 @@ def test_backslash_in_a_posix_file_name_remains_exact_without_a_file_term(tmp_pa
     """
     _write_project(tmp_path, {"we\\ird.sql": MODEL_SQL, "plain.sql": MODEL_SQL})
     manifest = _parse(tmp_path)
-    task_to_id = _task_key_to_unique_id(manifest, bundle_tests=False)
-    selectors = next(
-        selectors
-        for task_key, selectors, verb in _resource_selectors(manifest, bundle_tests=False)
-        if verb == "run" and task_to_id[task_key] == "model.probe.we\\ird"
-    )
+    selectors = _run_selectors_for(manifest, "model.probe.we\\ird")
 
     assert all(not term.startswith("file:") for term in selectors[0].split(","))
     _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=False)
@@ -2584,15 +2589,15 @@ class _StubWorkspaceClient:
 
 
 def _run_shipped_notebook(monkeypatch, root: Path, selectors: tuple[str, ...]) -> dict:
-    """Executes the complete packaged notebook and returns its module globals."""
-    select_args = " ".join(f"--select {shlex.quote(selector)}" for selector in selectors)
     command = (
-        f"dbt ls --quiet {select_args} --output json --output-keys unique_id --project-dir {shlex.quote(str(root))}"
+        f"dbt ls --quiet {shlex.join(_select_args(selectors))} --output json --output-keys unique_id "
+        f"--project-dir {shlex.quote(str(root))}"
     )
     return _execute_shipped_notebook(monkeypatch, root, command)
 
 
 def _execute_shipped_notebook(monkeypatch, root: Path, command: str) -> dict:
+    """Executes the complete packaged notebook and returns its module globals."""
     values = {
         "dbt_commands": json.dumps([command]),
         "project_directory": "",
@@ -2680,19 +2685,16 @@ def test_shipped_runner_injects_manifest_and_resolves_factory_selector(
         {"marts/orders.sql": MODEL_SQL, "we\\ird.sql": MODEL_SQL},
     )
     manifest = _parse(tmp_path)
-    injected = Manifest.from_msgpack((tmp_path / "target" / "partial_parse.msgpack").read_bytes())
+    injected = Manifest.from_msgpack(
+        (tmp_path / "target" / "partial_parse.msgpack").read_bytes(), decoder=extended_mashumuro_decoder
+    )
     if simulate_windows:
         windows_path = manifest["nodes"][unique_id]["original_file_path"].replace("/", "\\")
         manifest["nodes"][unique_id]["original_file_path"] = windows_path
         injected.nodes[unique_id].original_file_path = windows_path
 
     expected_path = manifest["nodes"][unique_id]["original_file_path"]
-    task_to_id = _task_key_to_unique_id(manifest, bundle_tests=False)
-    selectors = next(
-        selectors
-        for task_key, selectors, verb in _resource_selectors(manifest, bundle_tests=False)
-        if verb == "run" and task_to_id[task_key] == unique_id
-    )
+    selectors = _run_selectors_for(manifest, unique_id)
     assert all(not term.startswith("file:") for term in selectors[0].split(","))
     assert _selected_unique_ids(tmp_path, selectors, "model") == (unique_id,)
 
@@ -2700,7 +2702,7 @@ def test_shipped_runner_injects_manifest_and_resolves_factory_selector(
         # Keep the native assertion above independent of the simulated-Windows artifact. dbt can reuse
         # `partial_parse.msgpack`, so writing the mangled copy earlier would let that check confirm the
         # same injected path the notebook is meant to validate.
-        (tmp_path / "target" / "partial_parse.msgpack").write_bytes(injected.to_msgpack())
+        (tmp_path / "target" / "partial_parse.msgpack").write_bytes(injected.to_msgpack(extended_mashumaro_encoder))
 
     namespace = _run_shipped_notebook(monkeypatch, tmp_path, selectors)
     runner = namespace["runner"]
@@ -2778,14 +2780,11 @@ def test_shipped_runner_injects_a_manifest_holding_dates(
     _write_project(tmp_path, model_paths, schema_yml=schema_yml)
     manifest = _parse(tmp_path)
     unique_id = "model.probe.orders"
-    task_to_id = _task_key_to_unique_id(manifest, bundle_tests=False)
-    selectors = next(
-        selectors
-        for task_key, selectors, verb in _resource_selectors(manifest, bundle_tests=False)
-        if verb == "run" and task_to_id[task_key] == unique_id
+    selectors = _run_selectors_for(manifest, unique_id)
+    command = (
+        f"dbt compile --quiet {shlex.join(_select_args(selectors))} --no-populate-cache "
+        f"--project-dir {shlex.quote(str(tmp_path))}"
     )
-    select_args = " ".join(f"--select {shlex.quote(selector)}" for selector in selectors)
-    command = f"dbt compile --quiet {select_args} --no-populate-cache --project-dir {shlex.quote(str(tmp_path))}"
 
     namespace = _execute_shipped_notebook(monkeypatch, tmp_path, command)
 

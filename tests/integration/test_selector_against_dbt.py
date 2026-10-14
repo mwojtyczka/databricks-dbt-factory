@@ -2797,6 +2797,10 @@ def test_shipped_runner_injects_a_manifest_holding_dates(
 
 
 def test_shipped_runner_parses_instead_of_injecting_without_dbts_msgpack_decoder(tmp_path, monkeypatch, capsys):
+    """
+    Known limitation: dbt-core < 1.6 has no `extended_mashumuro_decoder`, so the runner does not inject
+    the pre-built manifest and every task falls back to a full `dbt parse`.
+    """
     _write_project(tmp_path, {"orders.sql": MODEL_SQL})
     manifest = _parse(tmp_path)
     _task_key, selectors, verb = _resource_selectors(manifest, bundle_tests=False)[0]

@@ -257,7 +257,7 @@ databricks_dbt_factory  \
 
 This generates `dbt_task` entries — the native Databricks dbt task type.
 
-Note that `--input-job-spec-path` and `--target-job-spec-path` can be the same file, in which case the job spec is updated in place.
+Note that `--input-job-spec-path` and `--target-job-spec-path` can be the same file, in which case the job spec is updated in place. `--split-by-tag` refuses this, since its output cannot serve as the template.
 
 ## Generating notebook tasks within Databricks Lakeflow Jobs (recommended for best performance)
 
@@ -367,6 +367,7 @@ databricks_dbt_factory  \
 - `--extra-dbt-command-options` (type: str, optional, default: ""): Additional static dbt command options that do not alter resource selection or parse context. The factory rejects selector filters, Databricks dynamic value references, and explicit `--vars`, `--profile`, `--profiles-dir`, `--project-dir`, or `--target`/`-t` overrides. Use the dedicated factory arguments where available; the runtime parse context must match the supplied manifest. Allowed values that begin with a reserved short-option prefix, such as `-m` or `-s`, must use the unambiguous `--option=value` form.
 - `--no-run-tests` (flag, default: tests enabled): Skip generating dbt test tasks. Tests are included by default.
 - `--bundle-tests` (flag, default: disabled): **Performance boost** — bundle exact selectors for data tests with one testable parent (model, seed, snapshot, or source) and unit tests into one Databricks task per parent, using at most one `dbt test` union per indirect-selection mode. Data tests with zero or multiple testable parents remain standalone. Fewer Databricks tasks means fewer task startups and dbt cold starts. Downstream models/seeds/snapshots gate on the upstream's `<resource>_test` task. See [Handling dbt tests](#handling-dbt-tests).
+- `--split-by-tag` (type: str, optional, repeatable): Split the job into one job per dbt tag matching the value, an exact tag or a glob pattern. See [Splitting into several jobs](#splitting-into-several-jobs).
 - `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
 - `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
@@ -400,13 +401,36 @@ history and alerts.
 ## Databricks job limits
 
 Databricks jobs support at most 1,000 tasks. The factory refuses to generate a job that exceeds that
-limit. Enable `--bundle-tests` to reduce task count; if the job is still too large, split the workload
-across jobs.
+limit. Enable `--bundle-tests` to reduce task count; if the job is still too large, split it by tag (see
+[Splitting into several jobs](#splitting-into-several-jobs)).
 
 When notebook tasks share a job cluster, each concurrently running task uses a separate execution
 context, and one cluster supports at most 150 execution contexts. Use bundled tests to reduce
 concurrency pressure, or prefer serverless notebook tasks when the generated DAG needs greater
 parallelism instead of concentrating it on one shared cluster.
+
+## Splitting into several jobs
+
+`--split-by-tag` turns the job into one job per dbt tag, which keeps large projects organised and each job
+within the task limit. Pass a tag or a glob pattern, and repeat it for more:
+
+```shell
+databricks_dbt_factory ... --split-by-tag finance --split-by-tag marketing
+databricks_dbt_factory ... --split-by-tag 'domain:*'
+```
+
+- A model, seed or snapshot runs in the job of the one split tag it carries, or in the `default` job if it
+  carries none. One that carries two is refused.
+- A test runs in the job of the resources it tests, or the last of them if they are in different jobs. A test
+  with no resource to follow, such as a source test, goes by its own tags.
+- The template job becomes an orchestrator that runs each job with a `run_job_task` once the jobs it depends on
+  have succeeded. The orchestrator keeps the template's schedule, triggers and notifications; the jobs get its
+  compute. A job waits for whole upstream jobs, not just for the models it needs.
+- Jobs that would depend on each other are refused, naming the cycle. Retag the resources so dependencies between
+  jobs flow one way.
+- Repairing a failed orchestrator run re-runs the failed tasks inside the failed job; Databricks does not allow
+  repairing that job's own run. To rebuild its models as well, for example after fixing source data, run the
+  orchestrator again, optionally only for the affected jobs (`run_now` with `only`).
 
 ## Handling dbt tests
 

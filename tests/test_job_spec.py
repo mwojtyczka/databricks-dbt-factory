@@ -5,12 +5,85 @@ import pytest
 import yaml
 
 from databricks_dbt_factory import job_spec
-from databricks_dbt_factory.job_spec import replace_tasks_in_job_spec
+from databricks_dbt_factory.job_partition import JobPartition
+from databricks_dbt_factory.job_spec import render_partitioned_job_spec, replace_tasks_in_job_spec
 
 
 def _write(path, content: dict) -> str:
     path.write_text(yaml.safe_dump(content), encoding="utf-8")
     return str(path)
+
+
+_TEMPLATE = {
+    "name": "shop",
+    "schedule": {"quartz_cron_expression": "0 0 8 * * ?", "timezone_id": "UTC"},
+    "email_notifications": {"on_failure": ["data@example.com"]},
+    "queue": {"enabled": True},
+    "environments": [{"environment_key": "Default", "spec": {"environment_version": "4"}}],
+}
+
+_PARTITIONS = [
+    JobPartition("default", [{"task_key": "stg_model", "depends_on": []}], []),
+    JobPartition("finance", [{"task_key": "revenue_model", "depends_on": []}], ["default"]),
+]
+
+
+def test_split_spec_runs_the_jobs_from_an_orchestrator_holding_the_triggers(tmp_path):
+    spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {"shop": _TEMPLATE}}})
+
+    jobs = yaml.safe_load(render_partitioned_job_spec(spec, _PARTITIONS))["resources"]["jobs"]
+
+    assert jobs == {
+        "shop": {
+            "name": "shop",
+            "schedule": _TEMPLATE["schedule"],
+            "email_notifications": _TEMPLATE["email_notifications"],
+            "queue": {"enabled": True},
+            "tasks": [
+                {
+                    "task_key": "default",
+                    "depends_on": [],
+                    "run_job_task": {"job_id": "${resources.jobs.shop_default.id}"},
+                },
+                {
+                    "task_key": "finance",
+                    "depends_on": [{"task_key": "default"}],
+                    "run_job_task": {"job_id": "${resources.jobs.shop_finance.id}"},
+                },
+            ],
+        },
+        "shop_default": {
+            "name": "shop_default",
+            "queue": {"enabled": True},
+            "environments": _TEMPLATE["environments"],
+            "tasks": _PARTITIONS[0].tasks,
+        },
+        "shop_finance": {
+            "name": "shop_finance",
+            "queue": {"enabled": True},
+            "environments": _TEMPLATE["environments"],
+            "tasks": _PARTITIONS[1].tasks,
+        },
+    }
+
+
+def test_split_spec_renames_the_orchestrator_and_its_jobs(tmp_path):
+    spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {"shop": _TEMPLATE}}})
+
+    jobs = yaml.safe_load(render_partitioned_job_spec(spec, _PARTITIONS, "nightly"))["resources"]["jobs"]
+
+    assert {key: job["name"] for key, job in jobs.items()} == {
+        "nightly": "nightly",
+        "nightly_default": "nightly_default",
+        "nightly_finance": "nightly_finance",
+    }
+
+
+def test_split_spec_refuses_to_overwrite_an_existing_job(tmp_path):
+    spec = _write(tmp_path / "in.yaml", {"resources": {"jobs": {"shop": _TEMPLATE, "shop_finance": {"name": "x"}}}})
+
+    with pytest.raises(ValueError, match="shop_finance"):
+        render_partitioned_job_spec(spec, _PARTITIONS)
 
 
 def test_replace_tasks_raises_valueerror_when_jobs_empty(tmp_path):

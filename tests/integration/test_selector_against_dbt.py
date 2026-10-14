@@ -32,24 +32,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from dbt.cli.main import dbtRunner, dbtRunnerResult
 from dbt.contracts.graph.manifest import Manifest
 
 from databricks_dbt_factory.dbt_factory import DbtFactory
 from databricks_dbt_factory.utils import build_task_key_maps
 from tests.conftest import create_dbt_factory
-
-PROFILES = """\
-probe:
-  target: dev
-  outputs:
-    dev:
-      type: databricks
-      host: example.databricks.com
-      http_path: /sql/1.0/warehouses/x
-      token: dummy
-      schema: default
-"""
+from tests.integration.conftest import PROFILES
+from tests.integration.conftest import invoke_dbt as _dbt
 
 MODEL_SQL = "select 1 as id\n"
 
@@ -97,17 +86,6 @@ def _write_project(
     if package_model_paths:
         result = _dbt(root, "deps", "--quiet")
         assert result.success, f"dbt deps failed for the generated project: {result.exception}"
-
-
-def _dbt(root: Path, *args: str) -> dbtRunnerResult:
-    """
-    Invokes dbt against the project at `root`.
-
-    Passes the project and profile directories explicitly rather than changing the working
-    directory: `os.chdir` in a test leaks into everything else in the process, and under
-    `pytest-cov` it makes coverage write its data file to the wrong place.
-    """
-    return dbtRunner().invoke([*args, "--project-dir", str(root), "--profiles-dir", str(root)])
 
 
 def _parse(root: Path) -> dict:

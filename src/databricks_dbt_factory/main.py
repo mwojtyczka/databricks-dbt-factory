@@ -13,6 +13,7 @@ from databricks_dbt_factory.job_spec import (
     JobSpecArtifact,
     prepare_job_spec,
     render_job_spec,
+    render_partitioned_job_spec,
     resolve_job_spec_destination,
     write_job_spec,
 )
@@ -173,22 +174,26 @@ def _prepare_generated_artifacts(
     args: argparse.Namespace,
     factory: DbtFactory,
     output_plan: _OutputPlan,
-) -> tuple[list[dict], JobSpecArtifact | None]:
-    """Generates tasks and prepares the job spec without publishing files."""
+) -> tuple[list, JobSpecArtifact | None]:
+    """Generates tasks, or one job of tasks per split tag, and prepares the job spec without publishing files."""
     manifest = read_dbt_manifest(args.dbt_manifest_path)
-    tasks = factory.create_tasks(manifest)
+    if args.split_by_tag:
+        generated = factory.create_partitions(manifest, args.split_by_tag)
+    else:
+        generated = factory.create_tasks(manifest)
     if args.dry_run:
-        return tasks, None
+        return generated, None
 
     assert output_plan.job_spec_destination is not None
-    rendered = render_job_spec(args.input_job_spec_path, tasks, args.new_job_name)
+    render = render_partitioned_job_spec if args.split_by_tag else render_job_spec
+    rendered = render(args.input_job_spec_path, generated, args.new_job_name)
     job_spec_artifact = prepare_job_spec(
         rendered,
         args.input_job_spec_path,
         output_plan.job_spec_destination,
     )
     _validate_artifact_destinations(output_plan.runner_artifact, job_spec_artifact)
-    return tasks, job_spec_artifact
+    return generated, job_spec_artifact
 
 
 def _publish_artifacts(runner_artifact: _RunnerArtifact | None, job_spec_artifact: JobSpecArtifact) -> None:
@@ -342,6 +347,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--split-by-tag",
+        action="append",
+        metavar="TAG",
+        help=(
+            "Split the job into one job per dbt tag matching TAG, an exact tag or a glob pattern such as "
+            "'domain:*'; repeatable. The template job becomes an orchestrator that runs them in dependency order."
+        ),
+    )
+    parser.add_argument(
         "--enable-dbt-deps",
         action="store_true",
         help="Run `dbt deps` before each task.",
@@ -401,6 +415,12 @@ def parse_args():
 
     if args.job_cluster_key and args.environment_key is not None:
         parser.error("--job-cluster-key and --environment-key are mutually exclusive")
+
+    if args.split_by_tag and Path(args.input_job_spec_path).resolve() == Path(args.target_job_spec_path).resolve():
+        parser.error(
+            "--split-by-tag cannot update the job spec in place; set --target-job-spec-path to a file other than "
+            "--input-job-spec-path."
+        )
 
     if args.task_type == "notebook":
         conflicting = []

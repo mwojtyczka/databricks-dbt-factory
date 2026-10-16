@@ -1774,6 +1774,33 @@ def test_public_factory_rejects_more_than_one_thousand_tasks(dbt_factory):
         dbt_factory.create_tasks({"nodes": nodes})
 
 
+def _tagged_models(tag: str, count: int) -> dict:
+    return {
+        full_name: {**info, "tags": [tag]}
+        for full_name, info in (_model("pkg", f"{tag}_{index:04d}") for index in range(count))
+    }
+
+
+def test_splitting_by_tag_keeps_each_job_within_the_task_limit(dbt_factory):
+    nodes = {**_tagged_models("a", 600), **_tagged_models("b", 600)}
+
+    with pytest.raises(ValueError, match="at most 1,000 tasks"):
+        dbt_factory.create_tasks({"nodes": nodes})
+    assert [len(job.tasks) for job in dbt_factory.create_partitions({"nodes": nodes}, ["a", "b"])] == [600, 600]
+
+
+def test_a_split_job_over_the_task_limit_is_refused(dbt_factory):
+    with pytest.raises(ValueError, match=r"at most 1,000 tasks; the 'a' job generates 1,001"):
+        dbt_factory.create_partitions({"nodes": _tagged_models("a", 1_001)}, ["a"])
+
+
+def test_a_split_into_more_jobs_than_the_orchestrator_can_run_is_refused(dbt_factory):
+    nodes = {name: info for index in range(1_001) for name, info in _tagged_models(f"t{index}", 1).items()}
+
+    with pytest.raises(ValueError, match=r"the tags split into 1,001 jobs\. Split by fewer tags\."):
+        dbt_factory.create_partitions({"nodes": nodes}, ["*"])
+
+
 # The selector-index test reaches into internals because "scan every peer" has no public surface.
 # pylint: disable=protected-access
 def test_selector_index_narrowing_matches_a_full_scan(dbt_factory):

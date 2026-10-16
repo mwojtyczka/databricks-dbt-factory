@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import subprocess
-import warnings
 
 import jsonschema
 import pytest
@@ -45,19 +44,16 @@ def require_databricks_cli() -> str:
 def _translate_pattern(value):
     """Translate ECMA Unicode property escapes to Python-compatible character classes.
 
-    ``\\p{L}`` -> ``[^\\W\\d_]`` (any letter) and ``\\p{N}`` -> ``\\d`` (any digit). Falls
-    back to a permissive ``.*`` only if the result still cannot compile, so a genuinely
-    exotic future pattern degrades gracefully instead of crashing the suite.
+    ``[\\p{L}\\p{N}]`` -> ``[^\\W_]`` (any letter or digit), ``\\p{L}`` -> ``[^\\W\\d_]`` (any
+    letter) and ``\\p{N}`` -> ``\\d`` (any digit); Python has no nested sets, so the union is
+    translated whole. Falls back to a permissive ``.*`` only if the result still cannot compile,
+    so a genuinely exotic future pattern degrades gracefully instead of crashing the suite.
     """
     if not isinstance(value, str):
         return value
-    translated = value.replace(r"\p{L}", r"[^\W\d_]").replace(r"\p{N}", r"\d")
+    translated = value.replace(r"[\p{L}\p{N}]", r"[^\W_]").replace(r"\p{L}", r"[^\W\d_]").replace(r"\p{N}", r"\d")
     try:
-        with warnings.catch_warnings():
-            # Translating `[\p{L}\p{N}]` yields a nested set `[[^\W\d_]\d]`, which Python
-            # accepts but warns about; the pattern still means "letters or digits".
-            warnings.simplefilter("ignore", FutureWarning)
-            re.compile(translated)
+        re.compile(translated)
     except re.error:
         return ".*"
     return translated

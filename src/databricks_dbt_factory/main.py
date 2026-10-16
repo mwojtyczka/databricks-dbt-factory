@@ -2,7 +2,7 @@ import argparse
 import hashlib
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path
 
@@ -13,6 +13,7 @@ from databricks_dbt_factory.job_spec import (
     JobSpecArtifact,
     prepare_job_spec,
     render_job_spec,
+    render_partitioned_job_spec,
     resolve_job_spec_destination,
     write_job_spec,
 )
@@ -173,22 +174,26 @@ def _prepare_generated_artifacts(
     args: argparse.Namespace,
     factory: DbtFactory,
     output_plan: _OutputPlan,
-) -> tuple[list[dict], JobSpecArtifact | None]:
-    """Generates tasks and prepares the job spec without publishing files."""
+) -> tuple[list, JobSpecArtifact | None]:
+    """Generates tasks, or one job of tasks per split tag, and prepares the job spec without publishing files."""
     manifest = read_dbt_manifest(args.dbt_manifest_path)
-    tasks = factory.create_tasks(manifest)
+    if args.split_by_tag:
+        generated = factory.create_partitions(manifest, args.split_by_tag)
+    else:
+        generated = factory.create_tasks(manifest)
     if args.dry_run:
-        return tasks, None
+        return generated, None
 
     assert output_plan.job_spec_destination is not None
-    rendered = render_job_spec(args.input_job_spec_path, tasks, args.new_job_name)
+    render = render_partitioned_job_spec if args.split_by_tag else render_job_spec
+    rendered = render(args.input_job_spec_path, generated, args.new_job_name)
     job_spec_artifact = prepare_job_spec(
         rendered,
         args.input_job_spec_path,
         output_plan.job_spec_destination,
     )
     _validate_artifact_destinations(output_plan.runner_artifact, job_spec_artifact)
-    return tasks, job_spec_artifact
+    return generated, job_spec_artifact
 
 
 def _publish_artifacts(runner_artifact: _RunnerArtifact | None, job_spec_artifact: JobSpecArtifact) -> None:
@@ -213,12 +218,12 @@ def main():
     output_plan = _prepare_output_plan(args)
     factory = _create_dbt_factory(args, output_plan, dbt_options)
     try:
-        tasks, job_spec_artifact = _prepare_generated_artifacts(args, factory, output_plan)
+        generated, job_spec_artifact = _prepare_generated_artifacts(args, factory, output_plan)
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(f"error: {error}") from error
 
     if args.dry_run:
-        print(tasks)
+        print([asdict(job) for job in generated] if args.split_by_tag else generated)
         return
 
     assert job_spec_artifact is not None
@@ -342,6 +347,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--split-by-tag",
+        action="append",
+        metavar="TAG",
+        help=(
+            "Split the job into one job per dbt tag matching TAG, an exact tag or a glob pattern such as "
+            "'domain:*'; repeatable. The template job becomes an orchestrator that runs them in dependency order."
+        ),
+    )
+    parser.add_argument(
         "--enable-dbt-deps",
         action="store_true",
         help="Run `dbt deps` before each task.",
@@ -383,7 +397,7 @@ def parse_args():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print generated tasks without updating the job spec file.",
+        help="Print the generated tasks, grouped by job with --split-by-tag, without updating the job spec file.",
     )
     args = parser.parse_args()
 
@@ -401,6 +415,14 @@ def parse_args():
 
     if args.job_cluster_key and args.environment_key is not None:
         parser.error("--job-cluster-key and --environment-key are mutually exclusive")
+
+    input_spec, target_spec = Path(args.input_job_spec_path), Path(args.target_job_spec_path)
+    in_place = input_spec.exists() and target_spec.exists() and input_spec.samefile(target_spec)
+    if args.split_by_tag and not args.dry_run and in_place:
+        parser.error(
+            "--split-by-tag cannot update the job spec in place; set --target-job-spec-path to a file other than "
+            "--input-job-spec-path."
+        )
 
     if args.task_type == "notebook":
         conflicting = []

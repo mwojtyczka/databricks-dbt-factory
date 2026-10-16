@@ -117,6 +117,30 @@ def test_main_dbt_task_type(monkeypatch):
             os.remove(target_job_spec_path)
 
 
+def test_main_split_by_an_unknown_tag_reports_and_writes_nothing(monkeypatch, tmp_path):
+    target = tmp_path / "job_definition.yaml"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target),
+            "--task-type",
+            "dbt",
+            "--split-by-tag",
+            "no_such_tag",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="error: --split-by-tag 'no_such_tag' matches no tag"):
+        main()
+    assert not target.exists()
+
+
 @pytest.mark.parametrize("task_type", ["dbt", "notebook"])
 def test_main_dry_run_prints_tasks_and_writes_nothing(monkeypatch, capsys, tmp_path, task_type):
     """--dry-run prints the generated tasks and writes nothing — not the spec, nor (in notebook

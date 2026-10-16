@@ -1,3 +1,4 @@
+import copy
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -5,6 +6,20 @@ from pathlib import Path
 import yaml
 
 from databricks_dbt_factory.file_io import atomic_write_bytes
+from databricks_dbt_factory.job_partition import JobPartition
+
+_ORCHESTRATOR_ONLY = frozenset(
+    {
+        "schedule",
+        "trigger",
+        "continuous",
+        "email_notifications",
+        "webhook_notifications",
+        "notification_settings",
+        "health",
+    }
+)
+_PARTITION_JOB_ONLY = frozenset({"environments", "job_clusters"})
 
 
 @dataclass(frozen=True)
@@ -61,6 +76,52 @@ def render_job_spec(
             that an unexpected manifest shape raises from the factory — those are bugs, and swallowing
             them turns a diagnosable traceback into `error: 'resource_type'`.
     """
+    job_definition, jobs, job_key = _load_template(input_job_spec_path, new_job_name)
+    jobs[job_key]["tasks"] = new_tasks  # Replace tasks field
+    return _dump(job_definition)
+
+
+def render_partitioned_job_spec(
+    input_job_spec_path: str,
+    partitions: list[JobPartition],
+    new_job_name: str | None = None,
+) -> str:
+    """Renders the first job as an orchestrator running one job per partition, without writing anything.
+
+    The orchestrator keeps the template's triggers and notifications, the partition jobs get its compute, and
+    both get everything else.
+
+    Raises:
+        ValueError: as `render_job_spec` does, or if a partition job's key is already taken.
+    """
+    job_definition, jobs, job_key = _load_template(input_job_spec_path, new_job_name)
+    template = jobs[job_key]
+    keys = {partition.name: f"{job_key}_{partition.name}" for partition in partitions}
+    if taken := sorted(set(keys.values()) & set(jobs)):
+        raise ValueError(
+            f"Cannot split job {job_key!r} in {input_job_spec_path}: it already defines {', '.join(taken)}."
+        )
+
+    jobs[job_key] = {key: value for key, value in template.items() if key not in _PARTITION_JOB_ONLY} | {
+        "tasks": [_run_job_task(partition, keys[partition.name]) for partition in partitions]
+    }
+    shared = {key: value for key, value in template.items() if key not in _ORCHESTRATOR_ONLY}
+    for partition in partitions:
+        name = f"{template.get('name', job_key)}_{partition.name}"
+        jobs[keys[partition.name]] = copy.deepcopy(shared) | {"name": name, "tasks": partition.tasks}
+    return _dump(job_definition)
+
+
+def _run_job_task(partition: JobPartition, job_key: str) -> dict:
+    return {
+        "task_key": partition.name,
+        "depends_on": [{"task_key": dependency} for dependency in partition.depends_on],
+        "run_job_task": {"job_id": f"${{resources.jobs.{job_key}.id}}"},
+    }
+
+
+def _load_template(input_job_spec_path: str, new_job_name: str | None) -> tuple[dict, dict, str]:
+    """Loads and validates the template, renaming its first job; returns the definition, its jobs and that key."""
     with open(input_job_spec_path, "r", encoding="utf-8") as file:
         try:
             job_definition = yaml.safe_load(file)
@@ -91,11 +152,12 @@ def render_job_spec(
         jobs[new_job_name] = jobs.pop(first_job_key)
         first_job_key = new_job_name
 
-    first_job = jobs[first_job_key]
     if new_job_name:
-        first_job["name"] = new_job_name
-    first_job["tasks"] = new_tasks  # Replace tasks field
+        jobs[first_job_key]["name"] = new_job_name
+    return job_definition, jobs, first_job_key
 
+
+def _dump(job_definition: dict) -> str:
     return yaml.dump(job_definition, sort_keys=False, width=1000)
 
 

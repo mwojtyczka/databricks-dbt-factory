@@ -18,6 +18,8 @@ _TEMPLATE = {
     "name": "shop",
     "schedule": {"quartz_cron_expression": "0 0 8 * * ?", "timezone_id": "UTC"},
     "email_notifications": {"on_failure": ["data@example.com"]},
+    "health": {"rules": [{"metric": "RUN_DURATION_SECONDS", "op": "GREATER_THAN", "value": 3600}]},
+    "max_concurrent_runs": 3,
     "queue": {"enabled": True},
     "environments": [{"environment_key": "Default", "spec": {"environment_version": "4"}}],
 }
@@ -38,6 +40,8 @@ def test_split_spec_runs_the_jobs_from_an_orchestrator_holding_the_triggers(tmp_
             "name": "shop",
             "schedule": _TEMPLATE["schedule"],
             "email_notifications": _TEMPLATE["email_notifications"],
+            "health": _TEMPLATE["health"],
+            "max_concurrent_runs": 3,
             "queue": {"enabled": True},
             "tasks": [
                 {
@@ -54,12 +58,14 @@ def test_split_spec_runs_the_jobs_from_an_orchestrator_holding_the_triggers(tmp_
         },
         "shop_default": {
             "name": "shop_default",
+            "max_concurrent_runs": 3,
             "queue": {"enabled": True},
             "environments": _TEMPLATE["environments"],
             "tasks": _PARTITIONS[0].tasks,
         },
         "shop_finance": {
             "name": "shop_finance",
+            "max_concurrent_runs": 3,
             "queue": {"enabled": True},
             "environments": _TEMPLATE["environments"],
             "tasks": _PARTITIONS[1].tasks,

@@ -2,7 +2,7 @@ import argparse
 import hashlib
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path
 
@@ -218,12 +218,12 @@ def main():
     output_plan = _prepare_output_plan(args)
     factory = _create_dbt_factory(args, output_plan, dbt_options)
     try:
-        tasks, job_spec_artifact = _prepare_generated_artifacts(args, factory, output_plan)
+        generated, job_spec_artifact = _prepare_generated_artifacts(args, factory, output_plan)
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(f"error: {error}") from error
 
     if args.dry_run:
-        print(tasks)
+        print([asdict(job) for job in generated] if args.split_by_tag else generated)
         return
 
     assert job_spec_artifact is not None
@@ -397,7 +397,7 @@ def parse_args():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print generated tasks without updating the job spec file.",
+        help="Print the generated tasks, grouped by job with --split-by-tag, without updating the job spec file.",
     )
     args = parser.parse_args()
 
@@ -417,7 +417,8 @@ def parse_args():
         parser.error("--job-cluster-key and --environment-key are mutually exclusive")
 
     input_spec, target_spec = Path(args.input_job_spec_path), Path(args.target_job_spec_path)
-    if args.split_by_tag and input_spec.exists() and target_spec.exists() and input_spec.samefile(target_spec):
+    in_place = input_spec.exists() and target_spec.exists() and input_spec.samefile(target_spec)
+    if args.split_by_tag and not args.dry_run and in_place:
         parser.error(
             "--split-by-tag cannot update the job spec in place; set --target-job-spec-path to a file other than "
             "--input-job-spec-path."

@@ -5,7 +5,7 @@ from fnmatch import fnmatchcase
 from graphlib import CycleError, TopologicalSorter
 
 from databricks_dbt_factory.dbt_task import DbtTask
-from databricks_dbt_factory.utils import MAX_JOB_TASKS
+from databricks_dbt_factory.utils import MAX_JOB_TASKS, MAX_TASK_KEY_LENGTH
 
 DEFAULT_JOB = "default"
 
@@ -48,10 +48,11 @@ def partition_tasks(
         if not (placements[task.task_key].follows_dependencies and dependencies[task.task_key])
     }
     owner = _job_names(tags, patterns)
-    order = _job_order(owner, dependencies)
+    anchors = _anchors(dependencies, owner)
+    order = _job_order(owner, dependencies, anchors)
     rank = {job: index for index, job in enumerate(order)}
     for key in dependencies.keys() - owner.keys():
-        owner[key] = max((owner[dependency] for dependency in dependencies[key]), key=rank.__getitem__)
+        owner[key] = max((owner[anchor] for anchor in anchors[key]), key=rank.__getitem__)
 
     jobs: dict[str, list[DbtTask]] = {job: [] for job in order}
     upstream: dict[str, set[str]] = {job: set() for job in order}
@@ -87,22 +88,36 @@ def _job_names(tags: dict[str, str | None], patterns: Sequence[str]) -> dict[str
     used = set(tags.values())
     for pattern in patterns:
         if not any(tag is not None and fnmatchcase(tag, pattern) for tag in used):
-            raise ValueError(f"--split-by-tag {pattern!r} matches no tag of a resource to split.")
+            raise ValueError(
+                f"--split-by-tag {pattern!r} matches no tag of a resource to split; tests run in the job of the "
+                f"resources they test, whatever their own tags."
+            )
     names = {tag: DEFAULT_JOB if tag is None else re.sub(r"[^A-Za-z0-9_]", "_", tag) for tag in used}
     owners: dict[str, str | None] = {}
     for tag in sorted(used, key=str):
+        if len(names[tag]) > MAX_TASK_KEY_LENGTH:
+            raise ValueError(
+                f"Cannot split by tag: tag {tag!r} is longer than the {MAX_TASK_KEY_LENGTH} characters Databricks "
+                f"allows in a task key. Use a shorter tag."
+            )
         if owners.setdefault(names[tag], tag) != tag:
             labels = [f"tag {t!r}" if t is not None else "untagged resources" for t in (owners[names[tag]], tag)]
             raise ValueError(f"Cannot split by tag: {' and '.join(labels)} would both run as job {names[tag]!r}.")
     return {key: names[tag] for key, tag in tags.items()}
 
 
-def _job_order(owner: dict[str, str], dependencies: dict[str, list[str]]) -> list[str]:
+def _anchors(dependencies: dict[str, list[str]], placed: dict[str, str]) -> dict[str, set[str]]:
+    anchors: dict[str, set[str]] = {}
+    for key in TopologicalSorter(dependencies).static_order():
+        anchors[key] = {key} if key in placed else set().union(*(anchors[d] for d in dependencies[key]))
+    return anchors
+
+
+def _job_order(owner: dict[str, str], dependencies: dict[str, list[str]], anchors: dict[str, set[str]]) -> list[str]:
     upstream: dict[str, set[str]] = {job: set() for job in owner.values()}
     witness: dict[tuple[str, str], tuple[str, str]] = {}
     for key, job in owner.items():
-        sources = (source for d in dependencies[key] for source in ([d] if d in owner else dependencies[d]))
-        for source in sources:
+        for source in (anchor for d in dependencies[key] for anchor in anchors[d]):
             if owner[source] != job:
                 upstream[job].add(owner[source])
                 witness.setdefault((owner[source], job), (key, source))

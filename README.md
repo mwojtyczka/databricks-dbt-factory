@@ -370,7 +370,7 @@ databricks_dbt_factory  \
 - `--split-by-tag` (type: str, optional, repeatable): Split the job into one job per dbt tag matching the value, an exact tag or a glob pattern. See [Splitting into several jobs](#splitting-into-several-jobs).
 - `--enable-dbt-deps` (flag, default: disabled): Run `dbt deps` before each task.
 - `--dbt-tasks-deps` (type: str, optional, default: None): Comma separated list of tasks for which dbt deps should be run (e.g. "diamonds_prices,second_dbt_model"). Only in effect if `--enable-dbt-deps` is set.
-- `--dry-run` (flag, default: disabled): Print generated tasks without updating the job spec file.
+- `--dry-run` (flag, default: disabled): Print the generated tasks, grouped by job with `--split-by-tag`, without updating the job spec file.
 - `--version` (flag): Print the installed `databricks-dbt-factory` version.
 
 You can also check all input arguments by running `databricks_dbt_factory --help`.
@@ -400,9 +400,9 @@ history and alerts.
 
 ## Databricks job limits
 
-Databricks jobs support at most 1,000 tasks. The factory refuses to generate a job that exceeds that
-limit. Enable `--bundle-tests` to reduce task count; if the job is still too large, split it by tag (see
-[Splitting into several jobs](#splitting-into-several-jobs)).
+Databricks jobs support at most [1,000 tasks](https://docs.databricks.com/aws/en/jobs#limitations). The factory
+refuses to generate a job that exceeds that limit. Enable `--bundle-tests` to reduce task count; if the job is still
+too large, split it by tag (see [Splitting into several jobs](#splitting-into-several-jobs)).
 
 When notebook tasks share a job cluster, each concurrently running task uses a separate execution
 context, and one cluster supports at most 150 execution contexts. Use bundled tests to reduce
@@ -421,15 +421,22 @@ databricks_dbt_factory ... --split-by-tag 'domain:*'
 
 - A model, seed or snapshot runs in the job of the one split tag it carries, or in the `default` job if it
   carries none. One that carries two is refused.
-- A test runs in the job of the resources it tests, or the last of them if they are in different jobs. A test
-  with no resource to follow, such as a source test, goes by its own tags; with `--bundle-tests`, the tests of a
-  source go by the source's tags.
+- A test runs in the job of the resources it tests, or the last of them if they are in different jobs; its own
+  tags don't move it. A test with no resource to follow, such as a source test, goes by its own tags instead; with
+  `--bundle-tests`, the tests of a source go by the source's tags, so switching the flag can move a source test to
+  another job or turn a working split into a cycle.
 - The template job becomes an orchestrator that runs each job with a `run_job_task` once the jobs it depends on
-  have succeeded. The orchestrator keeps the template's schedule, triggers and notifications; the jobs get its
-  compute. A job waits for whole upstream jobs, not just for the models it needs.
+  have succeeded. A job waits for whole upstream jobs, not just for the models it needs.
+- The orchestrator keeps the template's schedule, triggers, notifications and health rules, and the jobs get its
+  compute. Both keep the rest, such as parameters, timeout, `max_concurrent_runs` and `queue`, and the jobs run
+  with the orchestrator's parameter values. A job that is already running, for example one started by hand, makes
+  the orchestrator wait for it, or fail if queueing is disabled.
 - Jobs that would depend on each other are refused, naming the cycle. Retag the resources so dependencies between
   jobs flow one way. For example, the tests of an untagged source run in `default`, so a job that reads the source
   cannot also feed an untagged model; give the source a split tag, such as `sources` with `--split-by-tag sources`.
+- Each job, including `default`, must stay within the 1,000-task limit, and the orchestrator within 1,000 jobs. A
+  job over the limit is refused; enable `--bundle-tests` or retag some of its resources, since another pattern
+  cannot split one tag.
 - Repairing a failed orchestrator run re-runs the failed tasks inside the failed job; Databricks does not allow
   repairing that job's own run. To rebuild its models as well, for example after fixing source data, run the
   orchestrator again, optionally only for the affected jobs (`run_now` with `only`).

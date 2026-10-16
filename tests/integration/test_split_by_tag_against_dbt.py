@@ -1,3 +1,4 @@
+import ast
 import json
 import random
 from pathlib import Path
@@ -8,8 +9,8 @@ import yaml
 from databricks_dbt_factory.main import main
 from databricks_dbt_factory.utils import generate_task_key
 from tests.conftest import create_dbt_factory
-from tests.integration.conftest import PROFILES
-from tests.integration.conftest import invoke_dbt as _dbt
+from tests.integration.dbt_helpers import PROFILES
+from tests.integration.dbt_helpers import invoke_dbt as _dbt
 
 TEMPLATE = Path(__file__).resolve().parent.parent / "test_data" / "job_definition_template.yaml"
 
@@ -256,6 +257,13 @@ def test_tags_naming_the_same_job_are_refused(tmp_path, tags, pattern, message):
         create_dbt_factory().create_partitions(manifest, [pattern])
 
 
+def test_a_tag_too_long_for_a_task_key_is_refused(tmp_path):
+    manifest = _parse(tmp_path, {"long.sql": "{{ config(tags=['" + "t" * 101 + "']) }} select 1 as id"})
+
+    with pytest.raises(ValueError, match=r"tag 't{101}' is longer than the 100 characters"):
+        create_dbt_factory().create_partitions(manifest, ["t*"])
+
+
 def test_cli_writes_a_valid_bundle_run_by_an_orchestrator(shop, monkeypatch, bundle_validator):
     root, _ = shop
     target = root / "resources" / "job.yaml"
@@ -320,11 +328,58 @@ def test_cli_refuses_to_split_a_job_spec_in_place(shop, monkeypatch, capsys, ali
     assert not list(root.glob("run_dbt_command_*.py"))
 
 
+def test_cli_dry_run_prints_each_job_and_may_target_the_template(shop, monkeypatch, capsys):
+    root, _ = shop
+    spec = root / "job.yaml"
+    spec.write_bytes(TEMPLATE.read_bytes())
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            str(root / "target" / "manifest.json"),
+            "--input-job-spec-path",
+            str(spec),
+            "--target-job-spec-path",
+            str(spec),
+            "--split-by-tag",
+            "finance",
+            "--split-by-tag",
+            "marketing",
+            "--dry-run",
+        ],
+    )
+
+    main()
+
+    jobs = ast.literal_eval(capsys.readouterr().out)
+    assert [(job["name"], job["depends_on"]) for job in jobs] == [
+        ("default", []),
+        ("finance", ["default"]),
+        ("marketing", ["default", "finance"]),
+    ]
+    assert spec.read_bytes() == TEMPLATE.read_bytes()
+    assert not list(root.glob("run_dbt_command_*.py"))
+
+
 def test_a_split_tag_that_matches_nothing_is_refused(shop):
     _, manifest = shop
 
     with pytest.raises(ValueError, match="'finanse' matches no tag"):
         create_dbt_factory().create_partitions(manifest, ["finance", "finanse"])
+
+
+@pytest.mark.parametrize("bundle_tests", [False, True])
+def test_a_split_tag_only_tests_carry_is_refused_saying_tests_follow_their_resources(tmp_path, bundle_tests):
+    manifest = _parse(
+        tmp_path,
+        {"orders.sql": "select 1 as id"},
+        "version: 2\nmodels:\n  - name: orders\n    columns:\n      - name: id\n        data_tests:\n"
+        "          - not_null:\n              config:\n                tags: [slow_tests]\n",
+    )
+
+    with pytest.raises(ValueError, match="tests run in the job of the resources they test, whatever their own tags"):
+        create_dbt_factory(bundle_tests=bundle_tests).create_partitions(manifest, ["slow_tests"])
 
 
 def _random_layout(rng: random.Random) -> tuple[dict[str, str], str, list[str]]:

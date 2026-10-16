@@ -37,8 +37,8 @@ from dbt.contracts.graph.manifest import Manifest
 from databricks_dbt_factory.dbt_factory import DbtFactory
 from databricks_dbt_factory.utils import build_task_key_maps
 from tests.conftest import create_dbt_factory
-from tests.integration.conftest import PROFILES
-from tests.integration.conftest import invoke_dbt as _dbt
+from tests.integration.dbt_helpers import PROFILES
+from tests.integration.dbt_helpers import invoke_dbt as _dbt
 
 MODEL_SQL = "select 1 as id\n"
 

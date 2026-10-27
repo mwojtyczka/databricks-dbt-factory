@@ -18,6 +18,9 @@ Selective code comparison alone is already available in dbt.
 
 ## Agreed scope
 
+- Preparation, model execution, and acceptance probes use serverless compute.
+  dbt queries use a serverless SQL warehouse.
+
 - Production warehouse-compute savings take priority over unchanged-run latency.
   Reused tasks still start and incur Lakeflow and state-check overhead.
 - SQL models using table materialization explicitly opt in through model metadata.
@@ -234,7 +237,7 @@ retry/repair, split jobs, required test gates, undeclared lineage inputs, and
 state read/write failures. View/ephemeral support stays disabled wherever its
 complete definition/dependency contract cannot pass those checks.
 
-Benchmark unchanged and changed runs on cold and warm compute. Report warehouse
+Benchmark unchanged and changed runs on cold and warm serverless compute. Report warehouse
 compute, runner compute, state/metadata overhead, and elapsed time separately.
 Include task startup, metadata-induced warehouse wake-up, retained test cost,
 number of distinct baseline comparisons, and small Delta-write overhead.

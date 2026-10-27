@@ -183,6 +183,32 @@ databricks bundle run <job-resource-key>    # trigger a run (e.g. dbt_sql_job)
 databricks bundle destroy --target dev
 ```
 
+### Serverless model-reuse metadata probe
+
+Before implementing reuse storage, validate the platform primitives with an explicitly selected
+profile, managed scratch catalog, and serverless SQL warehouse. Install the current dbt v1
+development environment (`make dev`); its Databricks SDK is used by the live driver.
+
+```shell
+hatch run python -m tests.databricks.reuse_acceptance \
+  --profile fevm-test-jg \
+  --catalog test_jg_catalog \
+  --warehouse-id 7b8cc32a9eba1da3 \
+  --directory /tmp/factory-reuse-probe-unique
+```
+
+The local directory must not exist. The probe validates and deploys a unique serverless bundle,
+creates a uniquely named schema and managed Volume, then checks Delta identity/version reads,
+view definitions, state MERGE idempotency, immutable Volume uploads, lineage access, and the
+Spark/SDK/dbt execution principals. The notebook pins dbt Core 1.12.5 and dbt Databricks 1.12.7.
+Lineage unavailability is recorded separately; an empty result never proves complete lineage.
+
+This starts billable serverless compute. The driver saves `result.json` locally before destroying
+its job and deleting only its ownership-marked schema. It leaves the selected warehouse available.
+Keep the local bundle and result for recovery after a process interruption; inspect its recorded
+run before manually destroying the bundle or removing scratch data. This is a primitive probe,
+not an acceptance test of implemented model reuse or a net-savings benchmark.
+
 ## Troubleshooting
 
 If you encounter any package dependency errors after `git pull`, run `make clean`

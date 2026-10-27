@@ -22,9 +22,9 @@ Use Python for orchestration and policy, and Databricks SQL operations for metad
 | Rust | Can accelerate proven CPU-heavy local processing | Another build, wheel/native platform support, and language boundary | Consider only after profiling identifies Python CPU as material |
 | Scala | Direct JVM/Spark access | Additional packaging/runtime surface beside the Python/dbt runner | No measured benefit for this feature |
 
-There is no separate service, queue, database server, parser, or generic backend interface. Use the existing notebook Spark session for metadata/state SQL; do not introduce another SQL warehouse solely for this feature. Confirm that the required metadata commands work on both supported notebook compute modes in Task 1. Record their runner-compute and startup costs rather than assuming metadata access is free.
+There is no separate service, queue, database server, parser, or generic backend interface. Use the existing notebook Spark session for metadata/state SQL; do not introduce another SQL warehouse solely for this feature. Use serverless notebook compute for preparation and model tasks, and a serverless SQL warehouse for dbt queries. Confirm the required metadata commands in Task 1. Record their runner-compute and startup costs rather than assuming metadata access is free.
 
-Reuse-enabled notebooks need the matching Factory wheel installed in their selected job cluster or serverless environment. Today, the auto-copied runner is self-contained; this feature must make its additional runtime-package requirement explicit. Non-reuse execution keeps its existing deployment requirements. Keep the existing `dbt-core`/`dbt-databricks` environment.
+Reuse-enabled notebooks need the matching Factory wheel installed in their serverless environment. Today, the auto-copied runner is self-contained; this feature must make its additional runtime-package requirement explicit. Non-reuse execution keeps its existing deployment requirements. Keep the existing `dbt-core`/`dbt-databricks` environment.
 
 ## File map
 
@@ -100,8 +100,8 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 **Files:** Create `tests/databricks/reuse_acceptance.py`; document its setup in `CONTRIBUTING.md`.
 
-- [ ] Have the user select a Databricks profile before the first workspace operation. Require explicit scratch catalog/schema/volume and compute identifiers. Local planning needs no profile and performs no deployment.
-- [ ] Build a small notebook probe using the actual execution identity:
+- [x] Have the user select a Databricks profile before the first workspace operation. Require explicit scratch catalog/schema/volume and compute identifiers. Local planning needs no profile and performs no deployment.
+- [x] Build a small notebook probe using the actual execution identity:
 
   ```python
   detail = spark.sql("DESCRIBE DETAIL `scratch`.`factory_probe`.`input_table`").first().asDict()
@@ -111,10 +111,12 @@ For definition-backed dependencies, store a separate definition digest and the r
   ```
 
   The named scratch resources are created by the harness in the user-selected workspace. Read the corresponding UC table identity using the SDK, then repeat after append and drop/recreate. Assert that append advances version and recreation cannot be mistaken for the old table at the same version.
-- [ ] Probe schema/table/view classification, deployed UC view-definition reads and changes, Volume publish/read integrity, state-table write access, and access to `system.access.table_lineage`. Record empty lineage separately from permission/query failure. Query with date and target filters; absence of records never establishes completeness.
-- [ ] Run on the chosen job compute and serverless notebook modes. Record cold/warm latency and query/compute usage. Unsupported metadata access makes the affected workload ineligible; do not introduce a second backend before confirming the supported path.
-- [ ] Verify the same job execution principal is used by Spark, SDK and dbt. Check the existing dbt/adapter installation in the actual compute environment.
-- [ ] Commit: `test: verify Databricks reuse metadata primitives`.
+- [x] Probe schema/table/view classification, deployed UC view-definition reads and changes, Volume publish/read integrity, state-table write access, and access to `system.access.table_lineage`. Record empty lineage separately from permission/query failure. Query with date and target filters; absence of records never establishes completeness.
+- [x] Run on serverless notebook compute only. Record first/repeated metadata latency, job timing, and available query/compute usage. Label cold/warm and billing evidence gaps explicitly; the representative savings benchmark remains in Task 10. Unsupported metadata access makes the affected workload ineligible; do not introduce a second backend before confirming the supported path.
+- [x] Verify the same job execution principal is used by Spark, SDK and dbt. Check the existing dbt/adapter installation in the actual compute environment.
+- [x] Commit: `test: verify Databricks reuse metadata primitives`.
+
+**Evidence:** [Serverless feasibility results](../validation/databricks-model-reuse.md). All primitive checks passed; first/repeated observation timings are available, while system query/billing records had not appeared at collection time.
 
 **Exit:** Identity, Delta versions, storage and execution context have real platform evidence. This is the first platform checkpoint and can block rollout without blocking local contract work.
 
@@ -137,7 +139,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 - [ ] Write failure-first checks for a wrong digest, partial file, existing different content, missing artifact, and a runtime wheel whose version differs from the descriptor. Extend the installed-wheel test to read packaged notebook resources and import the new pure module.
 - [ ] Generate content-addressed manifest, provenance and descriptor files locally using `atomic_write_bytes`. Extend the existing runner-publication helper narrowly to publish the preparation notebook as a second immutable resource. Dry-run remains write-free.
 - [ ] Add `publish_artifacts(workspace_client, local_bundle, volume_path)` in `reuse_runtime.py`. Upload without overwriting; if content exists, verify its digest. Return artifact references only after complete upload/verification. Do not rely on a cross-object atomic rename. Verify bytes again before using downloaded comparison state.
-- [ ] Document installation of the matching wheel in existing cluster/serverless environment dependencies, then artifact publication before bundle deployment. Do not silently replace user environments or move dbt dependencies into the Factory CLI. The reuse path checks its runtime/descriptor compatibility before reuse.
+- [ ] Document installation of the matching wheel in serverless environment dependencies, then artifact publication before bundle deployment. Do not silently replace user environments or move dbt dependencies into the Factory CLI. The reuse path checks its runtime/descriptor compatibility before reuse.
 - [ ] Verify: `hatch run pytest tests/test_app.py tests/test_reuse_runtime.py tests/integration/test_distribution.py -v`. Commit: `feat: publish immutable reuse artifacts`.
 
 **Exit:** Jobs and successful-build records can refer only to published, digest-verified artifacts. Publication failure leaves no new reusable evidence.
@@ -289,7 +291,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 **Files:** Modify `README.md`, `CONTRIBUTING.md` and the acceptance report.
 
-- [ ] Document model metadata/config, provenance capture, wheel/driver setup, explicit state initialization, grants, artifact publication, one-owner/non-overlapping-run contract and decision queries. Include the exact tested engine/runtime versions and supported compute modes.
+- [ ] Document model metadata/config, provenance capture, wheel/driver setup, explicit state initialization, grants, artifact publication, one-owner/non-overlapping-run contract and decision queries. Include the exact tested engine/runtime versions and serverless compute configuration.
 - [ ] Document normal-execution fallbacks and configuration errors separately. Explain that lineage absence is not proof, table maintenance may invalidate reuse, and the feature does not pin source snapshots or prevent external writers.
 - [ ] Provide a rollback procedure: disable the global reuse config or model opt-in, regenerate/redeploy normal tasks, and retain referenced artifacts/evidence. No artifact garbage collector is required for v1. Ownership reassignment must disable/drain the old job before registering the new owner.
 - [ ] Run `make lint`, `make test`, `make integration`, installed-wheel verification and bundle-schema validation. Regenerate any affected golden outputs with the real CLI and inspect the diff.

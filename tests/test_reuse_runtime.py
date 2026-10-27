@@ -36,6 +36,157 @@ from tests.test_reuse import CONFIG
 captured = test_reuse.captured
 
 
+def test_preparation_binds_exact_builds_and_publishes_only_a_small_pointer(evidence, captured, monkeypatch):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, client, config, context, build = evidence
+    claim_owner(store, config, context, build.output.relation, job_id="job")
+    assert record_build(store, client, config, context, build, successful=True) == "RECORDED"
+    payload = json.loads(context.canonical_json)
+    client.get_workspace_id = lambda: payload["workspace_id"]
+    client.metastores = SimpleNamespace(summary=lambda: SimpleNamespace(metastore_id=payload["metastore_id"]))
+    client.current_user = SimpleNamespace(me=lambda: SimpleNamespace(user_name=payload["principal"]))
+    monkeypatch.setattr(reuse_runtime, "verify_runtime_identity", lambda *_args: None)
+
+    def observe(_spark, _client, relation):
+        if relation == build.output.relation:
+            return build.output
+        raise EvidenceUnavailable("METADATA_UNAVAILABLE")
+
+    monkeypatch.setattr(reuse_runtime, "snapshot_relation", observe)
+    downloads = []
+    download = client.files.download
+
+    def counted(path):
+        downloads.append(path)
+        return download(path)
+
+    monkeypatch.setattr(client.files, "download", counted)
+    attempt = Attempt("job", "next-run", "prepare", 0)
+    result = reuse_runtime.prepare_run(store, client, config, build.descriptor, captured[0], captured[1], attempt)
+    assert len(downloads) == 3  # One verified download per deployment artifact during preparation.
+    baseline = read_build(store, client, config, context, build.model_id, build.output, job_id="job")
+    decision = result["models"][build.model_id]
+    assert decision["reason"] == "CODE_UNCHANGED"
+    assert decision["baseline"] == {"key": baseline["key"], "sha256": baseline["sha256"]}
+    assert result["attempt"] == asdict(attempt)
+    assert result["deployment"] == build.descriptor
+    pointer = reuse_runtime.publish_preparation(client, config, result)
+    assert set(pointer) == {"path", "sha256"}
+    assert len(canonical_json(pointer)) < 1024
+    assert json.loads(download_artifact(client, **pointer)) == result
+    assert reuse_runtime.publish_preparation(client, config, result) == pointer
+    client.files.objects[pointer["path"]] = b"corrupt"
+    with pytest.raises(ValueError, match="digest mismatch"):
+        reuse_runtime.publish_preparation(client, config, result)
+
+
+def test_preparation_missing_deployment_disables_reuse_and_unexpected_errors_fail(evidence, captured, monkeypatch):
+    from databricks_dbt_factory.reuse_runtime import prepare_run  # pylint: disable=import-outside-toplevel
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, client, config, _context, build = evidence
+
+    def unexpected(*_args):
+        raise RuntimeError("unexpected infrastructure failure")
+
+    monkeypatch.setattr(reuse_runtime, "verify_runtime_identity", unexpected)
+    with pytest.raises(RuntimeError, match="unexpected infrastructure"):
+        prepare_run(
+            store, client, config, build.descriptor, captured[0], captured[1], Attempt("job", "run", "prepare", 0)
+        )
+    client.files.objects.clear()
+    result = prepare_run(
+        store, client, config, build.descriptor, captured[0], captured[1], Attempt("job", "run", "prepare", 0)
+    )
+    assert result["reason"] == "ARTIFACT_UNAVAILABLE"
+    assert result["models"] == {}
+
+
+def test_runtime_identity_checks_both_platform_and_sql_principals(evidence):
+    from databricks_dbt_factory.reuse_runtime import verify_runtime_identity  # pylint: disable=import-outside-toplevel
+
+    _store, client, _config, context, _build = evidence
+    value = json.loads(context.canonical_json)
+    client.get_workspace_id = lambda: value["workspace_id"]
+    client.metastores = SimpleNamespace(summary=lambda: SimpleNamespace(metastore_id=value["metastore_id"]))
+    client.current_user = SimpleNamespace(me=lambda: SimpleNamespace(user_name=value["principal"]))
+    sql = SimpleNamespace(sql=lambda _query: SimpleNamespace(first=lambda: [value["principal"]]))
+    verify_runtime_identity(sql, client, context)
+    sql.sql = lambda _query: SimpleNamespace(first=lambda: ["different"])
+    with pytest.raises(EvidenceUnavailable, match="CONTEXT_CHANGED"):
+        verify_runtime_identity(sql, client, context)
+
+
+def test_preparation_state_outage_is_a_visible_per_model_fallback(evidence, captured, monkeypatch):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, client, config, _context, build = evidence
+    monkeypatch.setattr(reuse_runtime, "verify_runtime_identity", lambda *_args: None)
+
+    def unavailable(*_args, **_kwargs):
+        raise EvidenceUnavailable("STATE_UNAVAILABLE")
+
+    monkeypatch.setattr(reuse_runtime, "claim_owner", unavailable)
+    result = reuse_runtime.prepare_run(
+        store, client, config, build.descriptor, captured[0], captured[1], Attempt("job", "run", "prepare", 0)
+    )
+    assert result["models"][build.model_id] == {"reason": "STATE_UNAVAILABLE", "baseline": None}
+    assert result["comparisons"] == []
+
+
+def test_deployed_views_require_stable_definition_evidence(evidence, captured, monkeypatch):
+    from databricks_dbt_factory.reuse_runtime import ViewSnapshot, snapshot_view  # pylint: disable=import-outside-toplevel
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, client, config, context, build = evidence
+    relation = Relation("hive_metastore", "default", "view")
+    table = SimpleNamespace(
+        catalog_name=relation.catalog,
+        schema_name=relation.schema,
+        name=relation.identifier,
+        table_id="view-id",
+        view_definition="select 1 as id",
+        table_type=SimpleNamespace(value="VIEW"),
+    )
+    client.tables = SimpleNamespace(get=lambda _name: table)
+    view = snapshot_view(client, relation)
+    assert view == ViewSnapshot(relation, "view-id", digest_bytes(b"select 1 as id"))
+    consumer = replace(
+        build,
+        model_id="model.probe.consumer",
+        inputs_before=(),
+        inputs_after=(),
+        output=replace(build.output, relation=Relation("hive_metastore", "default", "consumer")),
+    )
+    claim_owner(store, config, context, consumer.output.relation, job_id=consumer.attempt.job_id)
+    assert record_build(store, client, config, context, consumer, successful=True) == "DEFINITION_UNKNOWN"
+    consumer = replace(consumer, views_before=(view,), views_after=(view,))
+    assert record_build(store, client, config, context, consumer, successful=True) == "RECORDED"
+    changed = replace(view, definition_sha256=digest_bytes(b"select 2 as id"))
+    assert (
+        record_build(store, client, config, context, replace(consumer, views_after=(changed,)), successful=True)
+        == "DEFINITION_CHANGED_DURING_BUILD"
+    )
+    table.view_definition = "select 2 as id"
+    monkeypatch.setattr(reuse_runtime, "verify_runtime_identity", lambda *_args: None)
+
+    def unchanged_output(_spark, _client, relation):
+        if relation == consumer.output.relation:
+            return consumer.output
+        raise EvidenceUnavailable("METADATA_UNAVAILABLE")
+
+    monkeypatch.setattr(reuse_runtime, "snapshot_relation", unchanged_output)
+    prepared = reuse_runtime.prepare_run(
+        store, client, config, build.descriptor, captured[0], captured[1], Attempt("job", "next", "prepare", 0)
+    )
+    assert prepared["models"][consumer.model_id]["reason"] == "DEFINITION_CHANGED"
+    assert prepared["models"][consumer.model_id]["baseline"] is not None
+    table.view_definition = None
+    with pytest.raises(EvidenceUnavailable, match="DEFINITION_UNKNOWN"):
+        snapshot_view(client, relation)
+
+
 @pytest.fixture
 def local_bundle(captured, tmp_path):
     _, _, manifest, provenance = captured

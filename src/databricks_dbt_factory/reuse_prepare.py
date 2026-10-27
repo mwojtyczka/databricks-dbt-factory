@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from databricks_dbt_factory.reuse import ExecutionContext, canonical_json, digest_bytes
+from databricks_dbt_factory.reuse import ExecutionContext, canonical_json, describe_models, digest_bytes
 
 
 @dataclass(frozen=True)
@@ -157,3 +157,171 @@ def capture_parse(
         "context_sha256": context.digest,
     }
     return manifest, canonical_json(provenance).encode()
+
+
+def _parse_graph(manifest):
+    """Ignore only dbt's parse timestamps when checking the deployed fresh parse."""
+    return {
+        section: {
+            uid: {key: value for key, value in node.items() if key != "created_at"}
+            for uid, node in manifest.get(section, {}).items()
+        }
+        for section in (
+            "nodes",
+            "sources",
+            "macros",
+            "unit_tests",
+            "semantic_models",
+            "saved_queries",
+            "metrics",
+            "exposures",
+        )
+    }
+
+
+def _native_modified(project, profiles, context, baseline, environment, manifest):
+    """Ask dbt itself; baseline artifacts and current output must never share a directory."""
+    with tempfile.TemporaryDirectory(prefix="factory-reuse-state-") as directory:
+        root = Path(directory)
+        state = root / "baseline"
+        state.mkdir()
+        (state / "manifest.json").write_bytes(baseline)
+        command = [
+            sys.executable,
+            "-c",
+            "from dbt.cli.main import cli; cli()",
+            "--no-partial-parse",
+            "--no-use-colors",
+            "ls",
+            "--select",
+            "state:modified",
+            "--resource-type",
+            "model",
+            "--state",
+            str(state),
+            "--output",
+            "json",
+            "--output-keys",
+            "unique_id",
+            "--project-dir",
+            str(Path(project).resolve()),
+            "--profiles-dir",
+            str(Path(profiles).resolve()),
+            "--target",
+            context["target"],
+            "--vars",
+            canonical_json(context["vars"]),
+            "--target-path",
+            str(root / "current"),
+            "--log-path",
+            str(root / "logs"),
+        ]
+        result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False, timeout=300)  # noqa: S603
+        diagnostics = {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
+        if result.returncode:
+            raise ValueError(f"dbt state comparison failed (exit {result.returncode}): {canonical_json(diagnostics)}")
+        changed = set()
+        for line in result.stdout.splitlines():
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue  # dbt emits diagnostics alongside the selected node JSON records.
+            if isinstance(value, dict) and set(value) == {"unique_id"} and isinstance(value["unique_id"], str):
+                changed.add(value["unique_id"])
+        # A successful command without a fresh manifest cannot establish comparison support.
+        if not (root / "current" / "manifest.json").is_file():
+            return None, diagnostics
+        parsed = json.loads((root / "current" / "manifest.json").read_bytes())
+        if _parse_graph(parsed) != _parse_graph(json.loads(manifest)):
+            raise ValueError(
+                "reuse preparation fresh parse differs from deployment; verify profiles, vars and environment"
+            )
+        return changed, diagnostics
+
+
+def _comparison_reason(current, previous):
+    if current is None or current.reason:
+        return current.reason if current else "MODEL_INELIGIBLE"
+    if previous is None or previous.reason:
+        return "NO_BASELINE"
+    if current.policy_digest != previous.policy_digest:
+        return "POLICY_CHANGED"
+    if (
+        current.output,
+        current.inputs,
+        current.extra_inputs,
+        current.dependencies,
+        current.definitions,
+        current.views,
+    ) != (
+        previous.output,
+        previous.inputs,
+        previous.extra_inputs,
+        previous.dependencies,
+        previous.definitions,
+        previous.views,
+    ):
+        return "DEPENDENCIES_CHANGED"
+    return None
+
+
+def _baseline_groups(models, current, manifest, baselines):
+    reasons = {uid: model.reason or "NO_BASELINE" for uid, model in models.items()}
+    groups: dict[tuple[str, str], dict] = {}
+    parsed_baselines = {}
+    schema = json.loads(manifest)["metadata"]["dbt_schema_version"]
+    for uid, baseline in baselines.items():
+        if baseline is None:
+            continue
+        artifact_key = baseline
+        if artifact_key not in parsed_baselines:
+            previous = read_provenance(baseline[1], baseline[0])
+            old_manifest = json.loads(baseline[0])
+            old_models = {model.unique_id: model for model in describe_models(old_manifest, previous.context)}
+            parsed_baselines[artifact_key] = (previous, old_models, old_manifest["metadata"]["dbt_schema_version"])
+        previous, old_models, old_schema = parsed_baselines[artifact_key]
+        if previous.context != current.context:
+            reasons[uid] = "CONTEXT_CHANGED"
+            continue
+        reason = _comparison_reason(models.get(uid), old_models.get(uid))
+        if reason:
+            reasons[uid] = reason
+            continue
+        if old_schema != schema:
+            reasons[uid] = "COMPARISON_UNSUPPORTED"
+            continue
+        key = (previous.manifest_sha256, previous.context.digest)
+        groups.setdefault(key, {"manifest": baseline[0], "models": []})["models"].append(uid)
+    return reasons, groups
+
+
+def compare_baselines(project, profiles, manifest: bytes, provenance: bytes, baselines: dict) -> dict:
+    """Per-model successful artifacts, grouped by manifest/context. This is code evidence only.
+
+    Baseline entries are verified manifest/provenance bytes or None. Runtime callers bind each
+    entry to an exact immutable successful-build reference in the published preparation result.
+    """
+    current = read_provenance(provenance, manifest)
+    verify_snapshot(current, project)
+    context = json.loads(current.context.canonical_json)
+    environment = os.environ.copy()
+    models = {model.unique_id: model for model in describe_models(json.loads(manifest), current.context)}
+    if runtime_versions() != context["versions"] or any(
+        environment.get(name) != value for name, value in context["environment_inputs"].items()
+    ):
+        return {"models": {uid: "CONTEXT_CHANGED" for uid in models}, "comparisons": []}
+    reasons, groups = _baseline_groups(models, current, manifest, baselines)
+    comparisons = []
+    for (manifest_sha256, context_sha256), group in groups.items():
+        changed, diagnostics = _native_modified(project, profiles, context, group["manifest"], environment, manifest)
+        comparisons.append(
+            {"manifest_sha256": manifest_sha256, "context_sha256": context_sha256, "diagnostics": diagnostics}
+        )
+        for uid in group["models"]:
+            if changed is None:
+                reasons[uid] = "COMPARISON_UNSUPPORTED"
+            else:
+                reasons[uid] = (
+                    "CODE_CHANGED" if changed.intersection((uid, *models[uid].definitions)) else "CODE_UNCHANGED"
+                )
+    return {"models": reasons, "comparisons": comparisons}

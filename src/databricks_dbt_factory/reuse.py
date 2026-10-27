@@ -111,6 +111,8 @@ class ModelDescriptor:
     dependencies: tuple[str, ...]
     policy_digest: str
     reason: str | None
+    definitions: tuple[str, ...] = ()
+    views: tuple[Relation, ...] = ()
 
 
 def _policy(model):
@@ -164,14 +166,41 @@ def _producer_key(relation: Relation) -> Relation:
     return Relation(relation.catalog.casefold(), relation.schema.casefold(), relation.identifier.casefold())
 
 
+def _definition_reason(node):
+    config = node.get("config", {})
+    return (
+        "DEFINITION_UNSUPPORTED"
+        if node.get("language") != "sql" or config.get("pre-hook") or config.get("post-hook")
+        else None
+    )
+
+
 def _input_relations(uid, nodes, dependencies):
     inputs = set()
+    definitions = set()
+    views = set()
     reason = None
-    for parent in sorted(dependencies):
+    pending = sorted(dependencies, reverse=True)
+    visited = set()
+    while pending:
+        parent = pending.pop()
+        if parent in visited:
+            continue
+        visited.add(parent)
         if parent not in nodes:
             raise ValueError(f"{uid}: missing declared dependency {parent}")
         upstream = nodes[parent]
         relation = _relation(upstream)
+        materialization = upstream.get("config", {}).get("materialized")
+        if upstream.get("resource_type") == "model" and materialization in {"view", "ephemeral"}:
+            definitions.add(parent)
+            reason = reason or _definition_reason(upstream)
+            if materialization == "view" and relation is None:
+                reason = reason or "RELATION_UNKNOWN"
+            if materialization == "view" and relation is not None:
+                views.add(relation)
+            pending.extend(sorted(upstream.get("depends_on", {}).get("nodes", []), reverse=True))
+            continue
         if relation is None:
             reason = reason or "RELATION_UNKNOWN"
         else:
@@ -183,7 +212,7 @@ def _input_relations(uid, nodes, dependencies):
             reason = reason or "DEPENDENCY_UNSUPPORTED"
         elif upstream.get("resource_type") not in {"model", "source", "seed", "snapshot"}:
             reason = reason or "DEPENDENCY_UNSUPPORTED"
-    return inputs, reason
+    return inputs, reason, definitions, views
 
 
 def _declared_dependencies(uid, node, extra, producers):
@@ -198,6 +227,7 @@ def _declared_dependencies(uid, node, extra, producers):
 
 
 def describe_models(manifest, context: ExecutionContext | None) -> tuple[ModelDescriptor, ...]:
+    # pylint: disable=too-many-locals
     """Resolve declarations; live UC/Delta checks still have to establish physical eligibility."""
     nodes = manifest.get("nodes", {}) | manifest.get("sources", {})
     producers: dict[Relation, list[str]] = {}
@@ -221,9 +251,9 @@ def describe_models(manifest, context: ExecutionContext | None) -> tuple[ModelDe
             reason = reason or "HOOKS_PRESENT"
         extra = tuple(sorted({Relation.from_dict(item, uid) for item in policy.get("extra_inputs", [])}))
         dependencies = _declared_dependencies(uid, node, extra, producers)
-        inputs, input_reason = _input_relations(uid, nodes, dependencies)
+        inputs, input_reason, definitions, views = _input_relations(uid, nodes, dependencies)
         reason = reason or input_reason
-        inputs.update(extra)
+        inputs.update(relation for relation in extra if not producers.get(_producer_key(relation)))
         descriptors.append(
             ModelDescriptor(
                 uid,
@@ -233,6 +263,8 @@ def describe_models(manifest, context: ExecutionContext | None) -> tuple[ModelDe
                 tuple(sorted(dependencies)),
                 digest_bytes(canonical_json(policy).encode()),
                 reason,
+                tuple(sorted(definitions)),
+                tuple(sorted(views)),
             )
         )
     graph = {uid: node.get("depends_on", {}).get("nodes", []) for uid, node in nodes.items()}
@@ -245,4 +277,4 @@ def describe_models(manifest, context: ExecutionContext | None) -> tuple[ModelDe
 
 
 def lineage_reason(model: ModelDescriptor, observed_inputs) -> str | None:
-    return "UNDECLARED_INPUT" if set(observed_inputs) - set(model.inputs) else None
+    return "UNDECLARED_INPUT" if set(observed_inputs) - set(model.inputs + model.views) else None

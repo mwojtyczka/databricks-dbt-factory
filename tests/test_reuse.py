@@ -109,7 +109,11 @@ def test_real_models_have_conservative_eligibility(captured):
     assert descriptors["model.probe.custom"].reason == "UNSUPPORTED_MATERIALIZATION"
     assert descriptors["model.probe.python_model"].reason == "UNSUPPORTED_LANGUAGE"
     assert descriptors["model.probe.hooked"].reason == "HOOKS_PRESENT"
-    assert descriptors["model.probe.consumer"].reason == "DEPENDENCY_UNSUPPORTED"
+    assert descriptors["model.probe.consumer"].reason is None
+    assert descriptors["model.probe.consumer"].definitions == ("model.probe.view",)
+    assert descriptors["model.probe.consumer"].inputs == ()
+    assert descriptors["model.probe.consumer"].views == (Relation("hive_metastore", "default", "view"),)
+    assert lineage_reason(descriptors["model.probe.consumer"], descriptors["model.probe.consumer"].views) is None
     orders = descriptors["model.probe.orders"]
     assert orders.inputs == (Relation("raw", "sales", "orders"),)
     assert orders.output == Relation("hive_metastore", "default", "orders")
@@ -333,3 +337,63 @@ def test_extra_inputs_bind_to_producers_and_reject_cycles(captured):
     ]
     with pytest.raises(ValueError, match="cycle.*model.probe"):
         describe_models(manifest, context)
+
+
+def test_definition_closure_uses_dbt_graph_and_rejects_unresolved_dependencies(captured, tmp_path):
+    import shutil  # pylint: disable=import-outside-toplevel
+
+    project = tmp_path / "project"
+    shutil.copytree(captured[0], project)
+    (project / "models" / "view.sql").write_text("select * from {{ ref('inline') }}")
+    (project / "models" / "inline.sql").write_text(
+        "{{ config(materialized='ephemeral') }} select * from {{ source('raw', 'orders') }}"
+    )
+    manifest_bytes, provenance = capture_parse(
+        project, captured[1], identity=IDENTITY, target="dev", deployment_ref="closure"
+    )
+    manifest = json.loads(manifest_bytes)
+    context = read_provenance(provenance, manifest_bytes).context
+    consumer = next(model for model in describe_models(manifest, context) if model.unique_id == "model.probe.consumer")
+    assert consumer.reason is None
+    assert consumer.inputs == (Relation("raw", "sales", "orders"),)
+    assert consumer.definitions == ("model.probe.inline", "model.probe.view")
+    del manifest["nodes"]["model.probe.inline"]
+    with pytest.raises(ValueError, match="consumer.*missing declared dependency"):
+        describe_models(manifest, context)
+
+
+def test_dependency_fallback_reasons_are_stable_across_processes(captured, tmp_path):
+    import os  # pylint: disable=import-outside-toplevel
+    import shutil  # pylint: disable=import-outside-toplevel
+    import subprocess  # pylint: disable=import-outside-toplevel
+    import sys  # pylint: disable=import-outside-toplevel
+
+    project = tmp_path / "project"
+    shutil.copytree(captured[0], project)
+    (project / "models" / "consumer.sql").write_text(
+        "{{ config(materialized='table', meta={'dbt_factory': {'reuse': {'enabled': true}}}) }} "
+        "select * from {{ ref('custom') }} union all select * from {{ source('raw', 'orders') }}"
+    )
+    manifest, provenance = capture_parse(project, captured[1], identity=IDENTITY, target="dev", deployment_ref="stable")
+    value = json.loads(manifest)
+    value["sources"]["source.probe.raw.orders"]["database"] = None  # Unavailable relation metadata.
+    artifact = tmp_path / "manifest.json"
+    artifact.write_text(json.dumps(value))
+    context = json.loads(provenance)["context"]
+    script = (
+        "import json,sys; from pathlib import Path; from dataclasses import asdict; "
+        "from databricks_dbt_factory.reuse import describe_models, ExecutionContext, canonical_json; "
+        "print(canonical_json([asdict(m) for m in describe_models(json.loads(Path(sys.argv[1]).read_bytes()), "
+        "ExecutionContext.from_dict(json.loads(sys.argv[2])))]))"
+    )
+    results = {
+        subprocess.run(
+            [sys.executable, "-c", script, str(artifact), json.dumps(context)],
+            env=os.environ | {"PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in range(8)
+    }
+    assert len(results) == 1  # Immutable descriptors cannot depend on the process hash seed.

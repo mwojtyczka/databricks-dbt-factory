@@ -17,7 +17,7 @@ from databricks_dbt_factory.reuse import (
     describe_models,
     digest_bytes,
 )
-from databricks_dbt_factory.reuse_prepare import read_provenance
+from databricks_dbt_factory.reuse_prepare import compare_baselines, read_provenance
 
 
 def _artifact_digest(name: str, kind: str = "manifest|provenance|descriptor") -> str:
@@ -179,6 +179,91 @@ class RelationSnapshot:
 
 
 @dataclass(frozen=True)
+class ViewSnapshot:
+    relation: Relation
+    uc_id: str
+    definition_sha256: str
+
+    def __post_init__(self):
+        Relation.from_dict(asdict(self.relation), "view evidence")
+        if not isinstance(self.uc_id, str) or not self.uc_id.strip():
+            raise ValueError("view evidence requires a UC identity")
+        if not isinstance(self.definition_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", self.definition_sha256):
+            raise ValueError("view evidence requires a definition digest")
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(Relation.from_dict(value["relation"], "view evidence"), value["uc_id"], value["definition_sha256"])
+
+
+def snapshot_view(workspace_client, relation: Relation) -> ViewSnapshot:
+    """Only dbt-declared views reach this path; do not infer dependencies from their SQL."""
+    name = ".".join((relation.catalog, relation.schema, relation.identifier))
+    try:
+        before = workspace_client.tables.get(name)
+        after = workspace_client.tables.get(name)
+    except Exception as error:
+        raise EvidenceUnavailable("METADATA_UNAVAILABLE") from error
+    expected = (relation.catalog.lower(), relation.schema.lower(), relation.identifier.lower())
+    observations = []
+    for table in (before, after):
+        if (
+            tuple((getattr(table, key, None) or "").lower() for key in ("catalog_name", "schema_name", "name"))
+            != expected
+            or getattr(getattr(table, "table_type", None), "value", None) != "VIEW"
+            or not isinstance(table.view_definition, str)
+            or not table.view_definition.strip()
+        ):
+            raise EvidenceUnavailable("DEFINITION_UNKNOWN")
+        try:
+            observations.append(ViewSnapshot(relation, table.table_id, digest_bytes(table.view_definition.encode())))
+        except ValueError as error:
+            raise EvidenceUnavailable("DEFINITION_UNKNOWN") from error
+    if observations[0] != observations[1]:
+        raise EvidenceUnavailable("DEFINITION_CHANGED")
+    return observations[0]
+
+
+def verify_runtime_identity(spark, workspace_client, context: ExecutionContext) -> None:
+    """Authenticate the execution identity instead of trusting notebook parameters."""
+    expected = json.loads(context.canonical_json)
+    try:
+        observed = {
+            "workspace_id": str(workspace_client.get_workspace_id()),
+            "metastore_id": workspace_client.metastores.summary().metastore_id,
+            "principal": workspace_client.current_user.me().user_name,
+        }
+        sql_principal = spark.sql("SELECT current_user()").first()[0]
+    except Exception as error:
+        raise EvidenceUnavailable("CONTEXT_UNKNOWN") from error
+    if any(value != expected[key] for key, value in observed.items()) or sql_principal != expected["principal"]:
+        raise EvidenceUnavailable("CONTEXT_CHANGED")
+
+
+def publish_preparation(workspace_client, config: ReuseConfig, result: dict) -> dict[str, str]:
+    """Immutable run evidence; only this small verified pointer is placed in a task value."""
+    from databricks.sdk.errors import AlreadyExists  # pylint: disable=import-outside-toplevel
+
+    if result.get("format_version") != 1:
+        raise ValueError("preparation requires format_version 1")
+    Attempt(**result["attempt"])
+    content = canonical_json(result).encode()
+    digest = digest_bytes(content)
+    path = "/Volumes/" + "/".join(config.artifact_volume) + f"/preparation_{digest}.json"
+    try:
+        workspace_client.files.upload(path, io.BytesIO(content), overwrite=False)
+    except AlreadyExists:
+        pass
+    except OSError as error:
+        raise EvidenceUnavailable("ARTIFACT_UNAVAILABLE") from error
+    try:
+        download_artifact(workspace_client, path, digest)
+    except OSError as error:
+        raise EvidenceUnavailable("ARTIFACT_UNAVAILABLE") from error
+    return {"path": path, "sha256": digest}
+
+
+@dataclass(frozen=True)
 class Attempt:
     job_id: str
     run_id: str
@@ -202,6 +287,8 @@ class BuildEvidence:
     inputs_before: tuple[RelationSnapshot, ...]
     inputs_after: tuple[RelationSnapshot, ...]
     output: RelationSnapshot | None
+    views_before: tuple[ViewSnapshot, ...] = ()
+    views_after: tuple[ViewSnapshot, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.model_id, str) or not self.model_id.strip():
@@ -220,6 +307,8 @@ class BuildEvidence:
                     "inputs_before": tuple(RelationSnapshot.from_dict(item) for item in value["inputs_before"]),
                     "inputs_after": tuple(RelationSnapshot.from_dict(item) for item in value["inputs_after"]),
                     "output": RelationSnapshot.from_dict(value["output"]) if value["output"] is not None else None,
+                    "views_before": tuple(ViewSnapshot.from_dict(item) for item in value.get("views_before", [])),
+                    "views_after": tuple(ViewSnapshot.from_dict(item) for item in value.get("views_after", [])),
                 }
             )
         )
@@ -363,7 +452,7 @@ def _timestamp(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _verified_descriptor(workspace_client, config, reference):
+def _descriptor_path(config, reference):
     if (
         not isinstance(reference, dict)
         or set(reference) != {"path", "sha256"}
@@ -376,6 +465,15 @@ def _verified_descriptor(workspace_client, config, reference):
         raise ValueError("reuse descriptor volume differs from config")
     if _artifact_digest(path.name, "descriptor") != reference["sha256"]:
         raise ValueError("reuse descriptor filename/digest mismatch")
+    return path
+
+
+def load_deployment(workspace_client, config, reference, *, deployments=None) -> tuple[dict, bytes, bytes]:
+    """Read immutable artifacts; only preparation shares a verified, attempt-local cache."""
+    path = _descriptor_path(config, reference)
+    key = (config, str(path), reference["sha256"])
+    if deployments is not None and key in deployments:
+        return deployments[key]
 
     def download(path, sha256):
         try:
@@ -393,7 +491,15 @@ def _verified_descriptor(workspace_client, config, reference):
         name = descriptor[kind]
         bundle[name] = download(path.parent / name, _artifact_digest(name, kind))
     _validate_bundle(bundle)
-    return descriptor, read_provenance(bundle[descriptor["provenance"]], bundle[descriptor["manifest"]])
+    result = descriptor, bundle[descriptor["manifest"]], bundle[descriptor["provenance"]]
+    if deployments is not None:
+        deployments[key] = result
+    return result
+
+
+def _verified_descriptor(workspace_client, config, reference, deployments=None):
+    descriptor, manifest, provenance = load_deployment(workspace_client, config, reference, deployments=deployments)
+    return descriptor, read_provenance(provenance, manifest)
 
 
 def _build_reason(build: BuildEvidence, descriptor: dict) -> str | None:
@@ -404,11 +510,20 @@ def _build_reason(build: BuildEvidence, descriptor: dict) -> str | None:
         return "OUTPUT_UNKNOWN"
     if asdict(build.output.relation) != model["output"]:
         raise ValueError("build output differs from deployment descriptor")
-    expected = {canonical_json(value) for value in model["inputs"] + model["extra_inputs"]}
+    expected = {canonical_json(value) for value in model["inputs"]}
     for snapshots in (build.inputs_before, build.inputs_after):
         actual = [canonical_json(asdict(snapshot.relation)) for snapshot in snapshots]
         if len(set(actual)) != len(actual) or set(actual) != expected:
             return "INPUT_UNKNOWN"
+    expected_views = {canonical_json(value) for value in model["views"]}
+    for view_snapshots in (build.views_before, build.views_after):
+        actual = [canonical_json(asdict(snapshot.relation)) for snapshot in view_snapshots]
+        if len(set(actual)) != len(actual) or set(actual) != expected_views:
+            return "DEFINITION_UNKNOWN"
+    if sorted(build.views_before, key=lambda item: item.relation) != sorted(
+        build.views_after, key=lambda item: item.relation
+    ):
+        return "DEFINITION_CHANGED_DURING_BUILD"
     if sorted(build.inputs_before, key=lambda item: item.relation) != sorted(
         build.inputs_after, key=lambda item: item.relation
     ):
@@ -465,6 +580,7 @@ def read_build(
     output: RelationSnapshot,
     *,
     job_id: str,
+    deployments=None,
 ) -> dict | None:
     """Select by live output evidence, then verify the complete record and immutable artifacts."""
     scope = _scope(config, context, job_id)
@@ -499,7 +615,7 @@ def read_build(
             raise ValueError("build record scope/output mismatch")
     except (KeyError, TypeError, ValueError) as error:
         raise EvidenceUnavailable("BUILD_INVALID") from error
-    descriptor, provenance = _verified_descriptor(workspace_client, config, build.descriptor)
+    descriptor, provenance = _verified_descriptor(workspace_client, config, build.descriptor, deployments)
     if (
         _scope(config, provenance.context, job_id) != scope
         or build.context_sha256 != provenance.context.digest
@@ -544,3 +660,79 @@ def record_decision(
     except EvidenceUnavailable as error:
         return str(error)
     return "RECORDED"
+
+
+def _prepare_model(spark, workspace_client, config, context, model, attempt, deployments):
+    # Keep expected metadata/state outages within this model's fallback boundary.
+    # pylint: disable=too-many-try-statements
+    if model.reason:
+        return {"reason": model.reason, "baseline": None}, None
+    try:
+        claim_owner(spark, config, context, model.output, job_id=attempt.job_id)
+        output = snapshot_relation(spark, workspace_client, model.output)
+        build = read_build(
+            spark,
+            workspace_client,
+            config,
+            context,
+            model.unique_id,
+            output,
+            job_id=attempt.job_id,
+            deployments=deployments,
+        )
+        if build is None:
+            return {"reason": "NO_BASELINE", "baseline": None}, None
+        decision = {"reason": None, "baseline": {"key": build["key"], "sha256": build["sha256"]}}
+        views = [asdict(snapshot_view(workspace_client, relation)) for relation in model.views]
+        if sorted(views, key=canonical_json) != sorted(build["build"].get("views_after", []), key=canonical_json):
+            return decision | {"reason": "DEFINITION_CHANGED"}, None
+        _descriptor, manifest, provenance = load_deployment(
+            workspace_client, config, build["build"]["descriptor"], deployments=deployments
+        )
+        return decision, (manifest, provenance)
+    except EvidenceUnavailable as error:
+        return {"reason": str(error), "baseline": None}, None
+
+
+def prepare_run(
+    spark, workspace_client, config, deployment, project, profiles, attempt, *, secret_versions=None
+) -> dict:
+    # pylint: disable=too-many-locals
+    """Collect exact successful baselines and publish code evidence, never permission to skip.
+
+    Expected evidence outages yield visible normal-execution reasons. Programming/configuration
+    errors propagate to the preparation task and retain Lakeflow's normal failure behavior.
+    """
+    result = {
+        "format_version": 1,
+        "deployment": deployment,
+        "attempt": asdict(attempt),
+        "reason": None,
+        "models": {},
+        "comparisons": [],
+    }
+    # Cache only within this preparation attempt. Model tasks always perform fresh verification.
+    deployments: dict = {}
+    try:
+        _descriptor, manifest, provenance = load_deployment(
+            workspace_client, config, deployment, deployments=deployments
+        )
+        context = read_provenance(provenance, manifest).context
+        verify_runtime_identity(spark, workspace_client, context)
+    except EvidenceUnavailable as error:
+        return result | {"reason": str(error)}
+    models = describe_models(json.loads(manifest), context)
+    if json.loads(context.canonical_json)["secret_versions"] != (secret_versions or {}):
+        return result | {"reason": "CONTEXT_CHANGED"}
+    decisions, baselines = {}, {}
+    for model in models:
+        decisions[model.unique_id], baseline = _prepare_model(
+            spark, workspace_client, config, context, model, attempt, deployments
+        )
+        if baseline is not None:
+            baselines[model.unique_id] = baseline
+    compared = compare_baselines(project, profiles, manifest, provenance, baselines)
+    for uid, decision in decisions.items():
+        if decision["reason"] is None:
+            decision["reason"] = compared["models"][uid]
+    return result | {"context_sha256": context.digest, "models": decisions, "comparisons": compared["comparisons"]}

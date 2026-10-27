@@ -16,8 +16,61 @@ from databricks_dbt_factory import file_io
 from databricks_dbt_factory.__version__ import __version__
 from databricks_dbt_factory.main import main, parse_args
 from databricks_dbt_factory.task_factory import validate_extra_dbt_options
+from tests import test_reuse
+
+captured = test_reuse.captured
 
 BASE_PATH = str(Path(__file__).resolve().parent)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_reuse_artifacts_are_content_addressed_and_dry_run_writes_nothing(monkeypatch, tmp_path, captured, dry_run):
+    from tests.test_reuse import CONFIG  # pylint: disable=import-outside-toplevel
+
+    _, _, manifest, provenance = captured
+    (tmp_path / "manifest.json").write_bytes(manifest)
+    (tmp_path / "provenance.json").write_bytes(provenance)
+    (tmp_path / "config.json").write_text(json.dumps(CONFIG))
+    target = tmp_path / "generated" / "out.yml"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            str(tmp_path / "manifest.json"),
+            "--reuse-provenance",
+            str(tmp_path / "provenance.json"),
+            "--reuse-config",
+            str(tmp_path / "config.json"),
+            "--target",
+            "dev",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target),
+            *(["--dry-run"] if dry_run else []),
+        ],
+    )
+    main()
+    if dry_run:
+        assert not target.parent.exists()
+        return
+    bundle = target.parent / "reuse_artifacts"
+    paths = list(bundle.iterdir())
+    assert len(paths) == 3
+    for path in paths:
+        assert path.stem.split("_")[1] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert next(bundle.glob("manifest_*.json")).read_bytes() == manifest
+    assert next(bundle.glob("provenance_*.json")).read_bytes() == provenance
+    descriptor = json.loads(next(bundle.glob("descriptor_*.json")).read_bytes())
+    assert descriptor["factory_version"] == __version__
+    assert descriptor["config"] == CONFIG
+    assert any(model["unique_id"] == "model.probe.orders" for model in descriptor["models"])
+    before = target.read_bytes()
+    next(bundle.glob("manifest_*.json")).write_bytes(b"partial")
+    with pytest.raises(SystemExit, match="immutable artifact"):
+        main()
+    assert target.read_bytes() == before
 
 
 @pytest.mark.parametrize(

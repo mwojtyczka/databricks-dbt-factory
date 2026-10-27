@@ -66,6 +66,7 @@ def _assert_wheel_executes_in_isolation(wheel: Path, tmp_path: Path) -> None:
     script = textwrap.dedent(
         """
         import importlib.metadata
+        import importlib.resources
         import pathlib
         import sys
 
@@ -74,6 +75,13 @@ def _assert_wheel_executes_in_isolation(wheel: Path, tmp_path: Path) -> None:
 
         import databricks_dbt_factory.file_io
         import databricks_dbt_factory.main
+        import databricks_dbt_factory.reuse
+        import databricks_dbt_factory.reuse_runtime
+
+        runner = importlib.resources.files("databricks_dbt_factory").joinpath("notebook", "run_dbt_command.py")
+        assert "dbtRunner" in runner.read_text()
+        assert not any(name == "dbt" or name.startswith("dbt.") for name in sys.modules)
+        assert not any(name == "databricks.sdk" or name.startswith("databricks.sdk.") for name in sys.modules)
 
         if not pathlib.Path(databricks_dbt_factory.main.__file__).is_relative_to(wheel):
             raise AssertionError(f"package imported outside the wheel: {databricks_dbt_factory.main.__file__}")

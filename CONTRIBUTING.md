@@ -256,6 +256,69 @@ unrelated source edit. SQL table models can be candidates; hooks, Python/custom/
 outputs, and unverified view/ephemeral dependencies execute normally. Physical Delta identity,
 version and complete-input checks still have to pass at runtime.
 
+### Immutable reuse artifacts and runtime wheel
+
+With valid provenance, an explicit `--target`, and task-local dependency resolution disabled,
+generation writes `reuse_artifacts/` beside the output job spec. It contains the exact manifest,
+provenance, and a canonical descriptor, each named with its full SHA-256 digest. The descriptor
+binds model declarations, reuse configuration and the generating Factory version. Existing files
+must match; dry-run writes nothing. Keep this directory outside the captured project snapshot.
+Missing context produces ordinary tasks without a reusable deployment bundle.
+
+Reuse runtime work is still pending. The generated tasks execute normally; these artifacts do
+not enable skipping. The preparation notebook and its immutable publication belong to the
+preparation implementation, so no placeholder notebook is shipped.
+
+Install the **same Factory wheel used for generation** in each reuse-enabled serverless notebook
+environment, alongside the existing exact dbt/adapter pins. Build it with `hatch build -t wheel`
+and upload it under a unique immutable release path. Add its Volume path to the chosen environment's
+`spec.dependencies`, for example:
+
+```yaml
+environments:
+  - environment_key: Default
+    spec:
+      environment_version: '5'
+      dependencies:
+        - /Volumes/test_jg_catalog/factory_state/artifacts/wheels/RELEASE/databricks_dbt_factory-0.4.0-py3-none-any.whl
+        - dbt-databricks==1.12.7
+        - dbt-core==1.12.5
+```
+
+These are the tested dbt v1 versions; retain your other pinned driver dependencies. For a workspace
+base environment, add the wheel there instead. The CLI does not modify environments or require dbt
+or the SDK as installation dependencies. `read_descriptor` rejects a different Factory runtime
+version or unsupported descriptor format before the future reuse path can use it.
+
+Publish the three deployment artifacts **before bundle validation/deployment**, using the exact
+descriptor path printed by generation (a directory may retain multiple deployments):
+
+```python
+from pathlib import Path
+from databricks.sdk import WorkspaceClient
+from databricks_dbt_factory.reuse_runtime import publish_artifacts, read_descriptor
+
+descriptor_path = Path("resources/reuse_artifacts/descriptor_FULL_SHA256.json")
+descriptor = read_descriptor(descriptor_path.read_bytes())
+local_bundle = tuple(descriptor_path.parent / name for name in (
+    descriptor["manifest"], descriptor["provenance"], descriptor_path.name,
+))
+client = WorkspaceClient(profile="fevm-test-jg")
+volume_path = "/Volumes/test_jg_catalog/factory_state/artifacts"
+# Provision the configured Volume and directory explicitly during deployment setup.
+client.files.create_directory(volume_path)
+references = publish_artifacts(client, local_bundle, volume_path)
+```
+
+Use the catalog/schema/volume in your validated config, with an explicitly selected profile.
+Publication validates all local bytes and references, uploads without overwrite, reads every object
+back, and verifies its digest. It uploads the descriptor last and returns references only after
+the whole batch succeeds. A failed batch may leave immutable orphan files; it returns no usable
+deployment references. Persist/pass `references` only after the call returns, then run
+`databricks bundle validate -t TARGET --profile fevm-test-jg` and deploy the bundle.
+`download_artifact(client, path, sha256)` rechecks downloaded bytes before comparison use.
+No cross-file transaction or artifact garbage collection is assumed. Retain referenced artifacts.
+
 ## Troubleshooting
 
 If you encounter any package dependency errors after `git pull`, run `make clean`

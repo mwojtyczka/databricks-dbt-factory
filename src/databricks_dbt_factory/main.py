@@ -13,6 +13,7 @@ from databricks_dbt_factory.dbt_factory import DbtFactory
 from databricks_dbt_factory.file_io import atomic_write_bytes
 from databricks_dbt_factory.reuse import ReuseConfig, describe_models
 from databricks_dbt_factory.reuse_prepare import read_provenance
+from databricks_dbt_factory.reuse_runtime import prepare_bundle, write_bundle
 from databricks_dbt_factory.job_spec import (
     JobSpecArtifact,
     prepare_job_spec,
@@ -178,17 +179,16 @@ def _prepare_generated_artifacts(
     args: argparse.Namespace,
     factory: DbtFactory,
     output_plan: _OutputPlan,
-) -> tuple[list, JobSpecArtifact | None]:
+) -> tuple[list, JobSpecArtifact | None, dict[str, bytes] | None]:
     """Generates tasks, or one job of tasks per split tag, and prepares the job spec without publishing files."""
     manifest = read_dbt_manifest(args.dbt_manifest_path)
-    if args.reuse_config:
-        _validate_reuse_inputs(args, manifest)
+    reuse_bundle = _validate_reuse_inputs(args, manifest) if args.reuse_config else None
     if args.split_by_tag:
         generated = factory.create_partitions(manifest, args.split_by_tag)
     else:
         generated = factory.create_tasks(manifest)
     if args.dry_run:
-        return generated, None
+        return generated, None, reuse_bundle
 
     assert output_plan.job_spec_destination is not None
     render = render_partitioned_job_spec if args.split_by_tag else render_job_spec
@@ -199,13 +199,15 @@ def _prepare_generated_artifacts(
         output_plan.job_spec_destination,
     )
     _validate_artifact_destinations(output_plan.runner_artifact, job_spec_artifact)
-    return generated, job_spec_artifact
+    return generated, job_spec_artifact, reuse_bundle
 
 
-def _validate_reuse_inputs(args: argparse.Namespace, manifest: dict) -> None:
+def _validate_reuse_inputs(args: argparse.Namespace, manifest: dict) -> dict[str, bytes] | None:
     """Validate declarations without emitting skip decisions or changing the task graph."""
-    config = ReuseConfig.from_dict(json.loads(Path(args.reuse_config).read_text(encoding="utf-8")))
+    config_value = json.loads(Path(args.reuse_config).read_text(encoding="utf-8"))
+    config = ReuseConfig.from_dict(config_value)
     context = None
+    bundle = None
     provenance_bytes = None
     if args.reuse_provenance:
         try:
@@ -224,6 +226,7 @@ def _validate_reuse_inputs(args: argparse.Namespace, manifest: dict) -> None:
             raise ValueError("reuse provenance target mismatch with --target")
         if args.target is not None and not args.enable_dbt_deps:
             context = provenance.context
+            bundle = prepare_bundle(manifest_bytes, provenance_bytes, config_value)
     descriptors = describe_models(manifest, context)
     reasons = sorted({item.reason for item in descriptors if item.reason})
     if context is None:
@@ -233,10 +236,19 @@ def _validate_reuse_inputs(args: argparse.Namespace, manifest: dict) -> None:
         "Runtime reuse is not enabled; generated tasks execute normally.",
         file=sys.stderr,
     )
+    return bundle
 
 
-def _publish_artifacts(runner_artifact: _RunnerArtifact | None, job_spec_artifact: JobSpecArtifact) -> None:
+def _publish_artifacts(
+    runner_artifact: _RunnerArtifact | None,
+    job_spec_artifact: JobSpecArtifact,
+    reuse_bundle: dict[str, bytes] | None,
+) -> None:
     """Publishes prepared artifacts after rechecking filesystem identity aliases."""
+    if reuse_bundle is not None:
+        paths = write_bundle(reuse_bundle, job_spec_artifact.destination.parent / "reuse_artifacts")
+        descriptor = next(path for path in paths if path.name.startswith("descriptor_"))
+        print(f"Reuse deployment descriptor: {descriptor}", file=sys.stderr)
     if runner_artifact is not None:
         _publish_runner_notebook(runner_artifact)
         if job_spec_artifact.destination.exists() and runner_artifact.destination.samefile(
@@ -257,7 +269,7 @@ def main():
     output_plan = _prepare_output_plan(args)
     factory = _create_dbt_factory(args, output_plan, dbt_options)
     try:
-        generated, job_spec_artifact = _prepare_generated_artifacts(args, factory, output_plan)
+        generated, job_spec_artifact, reuse_bundle = _prepare_generated_artifacts(args, factory, output_plan)
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(f"error: {error}") from error
 
@@ -267,7 +279,7 @@ def main():
 
     assert job_spec_artifact is not None
     try:
-        _publish_artifacts(output_plan.runner_artifact, job_spec_artifact)
+        _publish_artifacts(output_plan.runner_artifact, job_spec_artifact, reuse_bundle)
     except ValueError as error:
         raise SystemExit(f"error: {error}") from error
 

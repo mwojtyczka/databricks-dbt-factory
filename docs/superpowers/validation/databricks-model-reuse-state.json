@@ -1,0 +1,53 @@
+{
+  "profile": "fevm-test-jg",
+  "catalog": "test_jg_catalog",
+  "schema": "factory_reuse_probe_8b4fa209e722",
+  "compute": "serverless",
+  "scenario": "state",
+  "wheel_sha256": "4331681d1cdfe0d870c1133d5c50dc304b528194d5309b23d71520d8e5abfb6a",
+  "job_id": 783766706068862,
+  "run_id": 762048026668262,
+  "wall_seconds": 142.06886570795905,
+  "job_cleaned_up": true,
+  "schema_cleaned_up": true,
+  "probe": {
+    "compute": "serverless",
+    "factory_version": "0.4.0",
+    "python": "3.12.3",
+    "spark": "4.2.0",
+    "checks": {
+      "idempotent_build": {
+        "key": "27639103a291de62b679de6709bcd055d0d4a194af4c1176fd0d31286ce65358",
+        "sha256": "2b2422cf01b74d6a1683895fd34092414c522fde9328c9590d70bda1e7f0a356"
+      },
+      "conflicting_attempt": true,
+      "conflicting_owner": true,
+      "decision_separate_from_build": true,
+      "unstable_inputs_withheld": true,
+      "output_mutation_invalidates": true,
+      "output_recreation_invalidates": true,
+      "renamed_output": "METADATA_UNAVAILABLE",
+      "non_delta_input": "METADATA_UNAVAILABLE",
+      "state_write_outage_after_success": true,
+      "state_read_outage": "STATE_UNAVAILABLE"
+    },
+    "scope": "storage only; Spark SQL builds fixture tables and real dbt parse supplies mappings",
+    "passed": true,
+    "seconds": 82.70630569700006
+  },
+  "result_state": "SUCCESS",
+  "task_runs": [
+    {
+      "run_id": 754706383505784,
+      "setup_duration": 4000,
+      "execution_duration": 129000,
+      "cleanup_duration": 0,
+      "state": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "state_message": "",
+        "user_cancelled_or_timedout": false
+      }
+    }
+  ]
+}

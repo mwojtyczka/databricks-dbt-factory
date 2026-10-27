@@ -38,3 +38,31 @@ def test_probe_bundle_is_valid_and_uses_only_serverless(tmp_path, bundle_validat
 def test_probe_refuses_to_overwrite_an_existing_bundle_directory(tmp_path):
     with pytest.raises(FileExistsError):
         prepare_bundle(tmp_path, "catalog", "scratch", "artifacts", "warehouse")
+
+
+def test_state_probe_uses_matching_wheel_and_serverless_only(tmp_path, bundle_validator):
+    wheel = tmp_path / "databricks_dbt_factory-0.4.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel fixture")
+    directory = tmp_path / "state-probe"
+    prepare_bundle(
+        directory, "test_jg_catalog", "scratch", "artifacts", "warehouse", scenario="state", factory_wheel=wheel
+    )
+    config = json.loads((directory / "databricks.yml").read_text())
+    assert not list(bundle_validator.iter_errors(config))
+    job = config["resources"]["jobs"]["probe"]
+    task = job["tasks"][0]
+    assert task["notebook_task"]["notebook_path"] == "./state_probe.py"
+    assert task["notebook_task"]["base_parameters"]["job_id"] == "{{job.id}}"
+    assert task["notebook_task"]["base_parameters"]["run_id"] == "{{job.run_id}}"
+    assert (
+        job["environments"][0]["spec"]["dependencies"][-1] == f"/Volumes/test_jg_catalog/scratch/artifacts/{wheel.name}"
+    )
+    assert "job_clusters" not in job
+    assert not any("cluster" in key for key in task)
+    assert (directory / "state_probe.py").read_text().startswith("# Databricks notebook source")
+
+
+def test_state_probe_requires_a_built_wheel_before_creating_output(tmp_path):
+    with pytest.raises(ValueError, match="wheel"):
+        prepare_bundle(tmp_path / "output", "catalog", "scratch", "artifacts", "warehouse", scenario="state")
+    assert not (tmp_path / "output").exists()

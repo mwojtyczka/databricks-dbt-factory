@@ -65,7 +65,7 @@ The probe establishes availability under this user's identity in this workspace.
 It does not establish permissions for a deployment service principal, concurrent
 snapshot isolation, race-free external writes, complete view dependency closure,
 or complete/eventually available lineage. Those remain implementation/acceptance
-contracts. The state store and skip decisions are the next implementation work.
+contracts. Runtime preparation and skip decisions remain pending.
 
 ## Offline policy and provenance checkpoint
 
@@ -80,3 +80,36 @@ All 523 unit/integration tests passed across the full run and the sandbox-exempt
 Hatch packaging rerun; `make lint` passed. The generator imports neither dbt nor
 the SDK. Runtime preparation and model-task integration are still pending, so
 the new CLI flags validate declarations and emit ordinary execution tasks.
+
+## Delta state storage checkpoint
+
+The shipped Factory wheel passed the serverless state probe on 2026-10-27 using
+`fevm-test-jg` and `test_jg_catalog`. Job `783766706068862`, run `762048026668262`,
+task run `754706383505784` finished with `SUCCESS`. The harness removed the job
+and its marked schema `factory_reuse_probe_8b4fa209e722`. It provisioned no classic
+compute and left the existing serverless SQL warehouse unchanged.
+
+[State evidence](databricks-model-reuse-state.json) records the exact wheel digest,
+baseline key/digest, checks and cleanup. The notebook used serverless environment
+4, Python 3.12.3, Spark 4.2.0, Factory 0.4.0, dbt Core 1.12.5 and dbt Databricks
+1.12.7. A real dbt parse supplied model/source mappings; Spark SQL built the
+fixture tables. This validates storage APIs rather than dbt runner integration.
+
+The probe verified explicit/idempotent table setup, immutable attempt publication,
+rejection of conflicting attempt content and owners, separate decision history,
+original completion-time retention, and digest-verified artifact references.
+Changed inputs withheld evidence; changed/recreated outputs could not retrieve
+the old baseline. Renaming an output and using a view as a Delta input returned
+`METADATA_UNAVAILABLE`. Temporarily making the builds table unavailable returned
+`STATE_UNAVAILABLE` on reads and publication after successful fixture execution.
+
+The checks took **82.71 s** inside the notebook. Jobs reported 4 s setup and 129 s
+execution; driver wall time was 142.07 s. These totals include fresh setup, parse,
+artifact transport, repeated writes, mutation scenarios and recovery. They do
+not measure a per-model reuse check or establish net savings.
+
+All **574 unit/integration tests** and `make lint` pass, including wheel/sdist
+packaging. Controlled failure checks additionally reject malformed/partial build
+records, incorrect attempt keys, missing artifact bytes, mixed identity reads,
+and unavailable write readbacks. The generator still imports neither dbt nor
+the SDK. Native state preparation and runtime skipping remain disabled.

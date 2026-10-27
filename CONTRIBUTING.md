@@ -319,6 +319,56 @@ deployment references. Persist/pass `references` only after the call returns, th
 `download_artifact(client, path, sha256)` rechecks downloaded bytes before comparison use.
 No cross-file transaction or artifact garbage collection is assumed. Retain referenced artifacts.
 
+### Delta state storage checkpoint
+
+On serverless notebook compute, call `reuse_runtime.initialize_state(spark, config)` once in
+the configured, existing UC schema. It creates `factory_reuse_owners`, `factory_reuse_builds`
+and `factory_reuse_decisions`; model tasks never initialize tables. The setup identity needs
+`USE CATALOG`, `USE SCHEMA` and `CREATE TABLE`. The job identity needs the corresponding table
+read/write privileges and artifact Volume access.
+
+`claim_owner` binds a physical output name to the project/environment, workspace/metastore,
+logical owner and deployed job. All participating jobs must use the same registry. This is
+a conflict detector for serialized owning jobs, not a lock against concurrent or unregistered
+writers. Keep `max_concurrent_runs: 1`; ownership reassignment requires draining the old job.
+
+`snapshot_relation` brackets a Delta version read with UC/Delta identity checks. It returns
+separate relation-name components, UC ID, Delta ID and version. Missing/unreadable metadata,
+non-Delta relations and mixed recreation observations raise `EvidenceUnavailable` with a reason.
+
+`record_build` accepts a `BuildEvidence` record and an explicit successful-execution result.
+It verifies published artifacts, context, declared inputs and output mapping, and records only
+stable pre/post input evidence. Failed attempts, missing evidence and changing inputs cannot
+supply a reusable baseline. Builds retain their original completion time; decision events have
+their own observation times. Identical attempt publication is idempotent; different content
+for an existing attempt fails instead of overwriting it. SQL values use bound parameters.
+
+`read_build` selects by logical scope/model and current output identity/version, then verifies
+the stored record, attempt key and downloaded artifacts. Its returned `key` and `sha256` identify
+the exact baseline for preparation. Context comparison remains separate: a valid older context
+can be inspected, but cannot authorize reuse under a changed execution context.
+Missing state/artifacts raise `EvidenceUnavailable`; known artifact mismatches and ownership
+conflicts fail explicitly. After model success, state-write outages return a fallback reason
+from `record_build`/`record_decision`. Callers must report that reason in task output; durable
+decision logging is not guaranteed during an outage.
+
+Runtime preparation, identity verification and task skipping are still pending. To test the
+actual storage APIs in a disposable serverless job using the matching built wheel:
+
+```sh
+hatch build -t wheel
+hatch run python -m tests.databricks.reuse_acceptance \
+  --profile fevm-test-jg --catalog test_jg_catalog \
+  --warehouse-id 7b8cc32a9eba1da3 --scenario state \
+  --factory-wheel dist/databricks_dbt_factory-0.4.0-py3-none-any.whl \
+  --directory /tmp/factory-state-probe-unique
+```
+
+The harness verifies the uploaded wheel bytes, validates/deploys its serverless bundle, saves
+the result, and removes its job and ownership-marked scratch schema. The fixture tables are
+built with Spark SQL; a real dbt parse supplies their model/source mappings. This tests storage,
+not the unimplemented dbt runner integration or measured net savings.
+
 ## Troubleshooting
 
 If you encounter any package dependency errors after `git pull`, run `make clean`

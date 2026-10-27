@@ -1,6 +1,8 @@
-"""Run the disposable serverless metadata probe with an explicit profile/catalog."""
+"""Run disposable serverless metadata/state probes with an explicit profile/catalog."""
 
 import argparse
+import hashlib
+import io
 import json
 import shutil
 import subprocess
@@ -9,10 +11,15 @@ import uuid
 from pathlib import Path
 
 
-def prepare_bundle(directory, catalog, schema, volume, warehouse_id):
+def prepare_bundle(directory, catalog, schema, volume, warehouse_id, *, scenario="metadata", factory_wheel=None):
+    if scenario not in {"metadata", "state"}:
+        raise ValueError("unsupported probe scenario")
+    if scenario == "state" and (factory_wheel is None or not Path(factory_wheel).is_file()):
+        raise ValueError("state probe requires a built matching Factory wheel")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
-    shutil.copyfile(Path(__file__).with_name("metadata_probe.py"), directory / "metadata_probe.py")
+    notebook = f"{scenario}_probe.py"
+    shutil.copyfile(Path(__file__).with_name(notebook), directory / notebook)
     config = {
         "bundle": {"name": schema},
         "targets": {"probe": {"default": True}},
@@ -28,7 +35,7 @@ def prepare_bundle(directory, catalog, schema, volume, warehouse_id):
                             "task_key": "serverless",
                             "environment_key": "probe",
                             "notebook_task": {
-                                "notebook_path": "./metadata_probe.py",
+                                "notebook_path": f"./{notebook}",
                                 "base_parameters": {
                                     "catalog": catalog,
                                     "schema": schema,
@@ -52,6 +59,12 @@ def prepare_bundle(directory, catalog, schema, volume, warehouse_id):
             },
         },
     }
+    if scenario == "state":
+        job = config["resources"]["jobs"]["probe"]
+        job["tasks"][0]["notebook_task"]["base_parameters"].update(job_id="{{job.id}}", run_id="{{job.run_id}}")
+        job["environments"][0]["spec"]["dependencies"].append(
+            f"/Volumes/{catalog}/{schema}/{volume}/{Path(factory_wheel).name}"
+        )
     (directory / "databricks.yml").write_text(json.dumps(config, indent=2) + "\n")
 
 
@@ -79,9 +92,19 @@ def collect_result(client, run_id, report, report_path):
     return run.state.result_state.value
 
 
-def run_probe(profile, catalog, warehouse_id, directory):
+def publish_probe_wheel(client, wheel, directory):
+    wheel = Path(wheel)
+    content = wheel.read_bytes()
+    path = f"{directory}/{wheel.name}"
+    client.files.upload(path, io.BytesIO(content), overwrite=False)
+    with client.files.download(path).contents as stream:
+        assert stream.read() == content, "uploaded wheel differs from the local build"
+    return hashlib.sha256(content).hexdigest()
+
+
+def run_probe(profile, catalog, warehouse_id, directory, *, scenario="metadata", factory_wheel=None):
     # One lifecycle keeps ownership and cleanup visible together.
-    # pylint: disable=too-many-locals,too-many-try-statements
+    # pylint: disable=too-many-locals,too-many-try-statements,too-many-statements
     # Optional live dependency: importing the offline bundle builder needs only stdlib.
     from databricks.sdk import WorkspaceClient  # pylint: disable=import-outside-toplevel
     from databricks.sdk.service.catalog import VolumeType  # pylint: disable=import-outside-toplevel
@@ -93,8 +116,10 @@ def run_probe(profile, catalog, warehouse_id, directory):
     nonce = uuid.uuid4().hex
     schema = f"factory_reuse_probe_{nonce[:12]}"
     directory = Path(directory).resolve()
-    prepare_bundle(directory, catalog, schema, "artifacts", warehouse_id)
-    report = {"profile": profile, "catalog": catalog, "schema": schema, "compute": "serverless"}
+    prepare_bundle(
+        directory, catalog, schema, "artifacts", warehouse_id, scenario=scenario, factory_wheel=factory_wheel
+    )
+    report = {"profile": profile, "catalog": catalog, "schema": schema, "compute": "serverless", "scenario": scenario}
     marker = f"dbt-factory-probe:{nonce}"
     full_schema = f"{catalog}.{schema}"
     created = False
@@ -121,6 +146,10 @@ def run_probe(profile, catalog, warehouse_id, directory):
         client.volumes.create(
             catalog_name=catalog, schema_name=schema, name="artifacts", volume_type=VolumeType.MANAGED
         )
+        if scenario == "state":
+            report["wheel_sha256"] = publish_probe_wheel(
+                client, factory_wheel, f"/Volumes/{catalog}/{schema}/artifacts"
+            )
         deployed = True  # Also destroy resources after a partially failed deployment.
         bundle("deploy", "--auto-approve")
         summary = json.loads(bundle("summary", "--output", "json"))
@@ -162,5 +191,14 @@ if __name__ == "__main__":
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--warehouse-id", required=True)
     parser.add_argument("--directory", required=True, help="Fresh local directory for bundle and results")
+    parser.add_argument("--scenario", choices=["metadata", "state"], default="metadata")
+    parser.add_argument("--factory-wheel", help="Built matching wheel; required for --scenario state")
     args = parser.parse_args()
-    run_probe(args.profile, args.catalog, args.warehouse_id, args.directory)
+    run_probe(
+        args.profile,
+        args.catalog,
+        args.warehouse_id,
+        args.directory,
+        scenario=args.scenario,
+        factory_wheel=args.factory_wheel,
+    )

@@ -1,18 +1,33 @@
-"""Immutable artifact transport; dbt supplies the manifest used to build each bundle."""
+"""Immutable artifacts and concrete state access; manifests come from real dbt parses."""
+# pylint: disable=no-spark-argument-in-function
+# Tests receive the controlled Spark boundary through the evidence fixture.
 
 import io
 import json
+import re
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
 from databricks.sdk.errors import AlreadyExists
 
-from databricks_dbt_factory.reuse import canonical_json, digest_bytes
+from databricks_dbt_factory.reuse import ExecutionContext, Relation, ReuseConfig, canonical_json, digest_bytes
+from databricks_dbt_factory.reuse_prepare import read_provenance
 from databricks_dbt_factory.reuse_runtime import (
+    Attempt,
+    BuildEvidence,
+    EvidenceUnavailable,
+    RelationSnapshot,
+    claim_owner,
     download_artifact,
     prepare_bundle,
     publish_artifacts,
+    initialize_state,
+    read_build,
     read_descriptor,
+    record_build,
+    record_decision,
+    snapshot_relation,
     write_bundle,
 )
 from tests import test_reuse
@@ -164,7 +179,315 @@ def test_local_immutable_files_reject_corruption_and_symlinks(local_bundle, capt
     local_bundle[0].write_bytes(b"corrupt")
     with pytest.raises(ValueError, match="immutable artifact"):
         write_bundle(content, directory)
+
     local_bundle[0].unlink()
     local_bundle[0].symlink_to(tmp_path / "missing")
     with pytest.raises(ValueError, match="immutable artifact"):
         write_bundle(content, directory)
+
+
+class Rows:
+    def __init__(self, values):
+        self.values = [SimpleNamespace(asDict=lambda value=value: value) for value in values]
+
+    def collect(self):
+        return self.values
+
+    def first(self):
+        return self.values[0] if self.values else None
+
+
+class StateSQL:
+    """Controlled Spark boundary; real SQL is verified by the serverless state probe."""
+
+    def __init__(self):
+        self.tables = {}
+        self.calls = []
+        self.unavailable = False
+
+    def sql(self, statement, args=None):
+        self.calls.append((statement, args))
+        if self.unavailable:
+            raise OSError("state unavailable")
+        table = re.search(r"`[^`]*`\.`[^`]*`\.`[^`]*`", statement)[0]
+        rows = self.tables.setdefault(table, {})
+        if statement.startswith("MERGE"):
+            rows.setdefault(args["key"], dict(args))
+            return Rows([])
+        if statement.startswith("CREATE"):
+            return Rows([])
+        selected = list(rows.values())
+        if "key" in args:
+            selected = [row for row in selected if row["key"] == args["key"]]
+        else:
+            selected = [row for row in selected if all(row[key] == value for key, value in args.items())]
+            selected.sort(key=lambda row: row["completed_at"], reverse=True)
+        return Rows(selected[:2])
+
+
+@pytest.fixture
+def evidence(local_bundle, captured):
+    config = ReuseConfig.from_dict(CONFIG)
+    context = read_provenance(captured[3], captured[2]).context
+    files = Files()
+    client = SimpleNamespace(files=files)
+    refs = publish_artifacts(client, local_bundle, "/Volumes/state/factory/artifacts")
+    descriptor = next(ref for name, ref in refs.items() if name.startswith("descriptor_"))
+    source = RelationSnapshot(Relation("raw", "sales", "orders"), "source-uc", "source-delta", 0)
+    output = RelationSnapshot(Relation("scratch", "factory", "orders"), "output-uc", "output-delta", 0)
+    # The output mapping comes from the actual dbt parse, not an assumed manifest shape.
+    model = next(
+        model
+        for model in read_descriptor(download_artifact(client, **descriptor))["models"]
+        if model["unique_id"] == "model.probe.orders"
+    )
+    output = replace(output, relation=Relation.from_dict(model["output"], "output"))
+    build = BuildEvidence(
+        "model.probe.orders",
+        Attempt("job", "run", "orders", 0),
+        "2026-10-27T10:00:00+00:00",
+        descriptor,
+        context.digest,
+        (source,),
+        (source,),
+        output,
+    )
+    return StateSQL(), client, config, context, build
+
+
+def test_state_is_explicit_and_builds_are_attempt_idempotent(evidence):
+    spark, client, config, context, build = evidence
+    initialize_state(spark, config)
+    assert len(spark.tables) == 3
+    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    for _ in range(2):
+        assert record_build(spark, client, config, context, build, successful=True) == "RECORDED"
+    actual = read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+    assert actual["build"] == json.loads(canonical_json(asdict(build)))
+    assert actual["build"]["inputs_before"][0]["version"] == 0
+    assert actual["build"]["completed_at"] == build.completed_at
+    assert sum(len(rows) for rows in spark.tables.values()) == 2
+    with pytest.raises(ValueError, match="conflicting.*attempt"):
+        record_build(
+            spark, client, config, context, replace(build, completed_at="2026-10-27T11:00:00+00:00"), successful=True
+        )
+    assert sum(len(rows) for rows in spark.tables.values()) == 2
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("version", 1), ("uc_id", "new"), ("delta_id", "new"), ("relation", Relation("other", "schema", "orders"))],
+)
+def test_live_output_must_match_the_build(evidence, field, value):
+    spark, client, config, context, build = evidence
+    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    assert record_build(spark, client, config, context, build, successful=True) == "RECORDED"
+    changed = replace(build.output, **{field: value})
+    if field == "relation":
+        claim_owner(spark, config, context, changed.relation, job_id="job")
+    assert read_build(spark, client, config, context, build.model_id, changed, job_id="job") is None
+
+
+@pytest.mark.parametrize("change", ["version", "identity", "missing", "failed", "output"])
+def test_unstable_or_unsuccessful_builds_publish_no_evidence(evidence, change):
+    spark, client, config, context, build = evidence
+    source = build.inputs_before[0]
+    if change == "version":
+        build = replace(build, inputs_after=(replace(source, version=1),))
+    elif change == "identity":
+        build = replace(build, inputs_after=(replace(source, uc_id="new"),))
+    elif change == "missing":
+        build = replace(build, inputs_before=())
+    elif change == "output":
+        build = replace(build, output=None)
+    reason = record_build(spark, client, config, context, build, successful=change != "failed")
+    assert reason in {"INPUT_CHANGED_DURING_BUILD", "INPUT_UNKNOWN", "BUILD_FAILED", "OUTPUT_UNKNOWN"}
+    assert not spark.calls
+
+
+def test_ownership_conflicts_and_state_outages_are_distinct(evidence):
+    spark, client, config, context, build = evidence
+    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    for other_config, job in (
+        (replace(config, owner_key="other"), "job"),
+        (config, "other-job"),
+        (replace(config, environment="other"), "job"),
+    ):
+        other_context = type(context).from_dict(
+            json.loads(context.canonical_json) | {"environment": other_config.environment}
+        )
+        with pytest.raises(ValueError, match="conflicting.*owner"):
+            claim_owner(spark, other_config, other_context, build.output.relation, job_id=job)
+    spark.unavailable = True
+    assert record_build(spark, client, config, context, build, successful=True) == "STATE_UNAVAILABLE"
+    assert (
+        record_decision(
+            spark,
+            config,
+            context,
+            build.model_id,
+            build.attempt,
+            reason="STATE_UNAVAILABLE",
+            observed_at=build.completed_at,
+            evidence={},
+            durations={},
+        )
+        == "STATE_UNAVAILABLE"
+    )
+    with pytest.raises(EvidenceUnavailable, match="STATE_UNAVAILABLE"):
+        read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+
+
+def test_decisions_never_update_builds_and_keep_original_completion(evidence):
+    spark, client, config, context, build = evidence
+    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    record_build(spark, client, config, context, build, successful=True)
+    for _ in range(2):
+        assert (
+            record_decision(
+                spark,
+                config,
+                context,
+                build.model_id,
+                build.attempt,
+                reason="REUSED",
+                observed_at="2026-10-28T10:00:00+00:00",
+                evidence={"quoted": "a'b"},
+                durations={"metadata_seconds": 1.2},
+            )
+            == "RECORDED"
+        )
+    actual = read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+    assert actual["build"]["completed_at"] == build.completed_at
+    assert sum(len(rows) for rows in spark.tables.values()) == 3
+    assert all("a'b" not in sql for sql, _ in spark.calls)
+    assert not any(sql.startswith(("UPDATE", "DELETE")) for sql, _ in spark.calls)
+
+
+def test_unavailable_write_readback_does_not_invent_a_conflict_after_success(evidence, monkeypatch):
+    sql, client, config, context, build = evidence
+    claim_owner(sql, config, context, build.output.relation, job_id="job")
+    execute = sql.sql
+
+    def unavailable_readback(statement, args=None):
+        if statement.startswith("SELECT") and "factory_reuse_builds" in statement:
+            return Rows([])
+        return execute(statement, args)
+
+    monkeypatch.setattr(sql, "sql", unavailable_readback)
+    assert record_build(sql, client, config, context, build, successful=True) == "STATE_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_corrupt_or_missing_comparison_artifacts_do_not_produce_a_baseline(evidence, missing):
+    spark, client, config, context, build = evidence
+    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    record_build(spark, client, config, context, build, successful=True)
+    if missing:
+        del client.files.objects[build.descriptor["path"]]
+        with pytest.raises(EvidenceUnavailable, match="ARTIFACT_UNAVAILABLE"):
+            read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+        assert record_build(spark, client, config, context, build, successful=True) == "ARTIFACT_UNAVAILABLE"
+    else:
+        client.files.objects[build.descriptor["path"]] = b"changed"
+        with pytest.raises(ValueError, match="digest mismatch"):
+            read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+
+
+def test_missing_declared_inputs_or_changed_context_cannot_publish(evidence):
+    sql, client, config, context, build = evidence
+    assert (
+        record_build(sql, client, config, context, replace(build, inputs_before=(), inputs_after=()), successful=True)
+        == "INPUT_UNKNOWN"
+    )
+    other = ExecutionContext.from_dict(json.loads(context.canonical_json) | {"principal": "other@example.com"})
+    assert record_build(sql, client, config, other, build, successful=True) == "CONTEXT_CHANGED"
+    assert not sql.calls
+
+
+def test_other_execution_context_can_inspect_but_cannot_claim_the_baseline(evidence):
+    sql, client, config, context, build = evidence
+    claim_owner(sql, config, context, build.output.relation, job_id="job")
+    record_build(sql, client, config, context, build, successful=True)
+    other = ExecutionContext.from_dict(json.loads(context.canonical_json) | {"principal": "other@example.com"})
+    baseline = read_build(sql, client, config, other, build.model_id, build.output, job_id="job")
+    assert baseline["build"]["context_sha256"] == context.digest != other.digest
+    for field in ("workspace_id", "metastore_id"):
+        wrong_scope = ExecutionContext.from_dict(json.loads(context.canonical_json) | {field: "other"})
+        with pytest.raises(ValueError, match="conflicting.*owner"):
+            read_build(sql, client, config, wrong_scope, build.model_id, build.output, job_id="job")
+
+
+@pytest.mark.parametrize("damage", ["missing-field", "timestamp", "version", "attempt", "partial-input"])
+def test_malformed_builds_are_unusable(evidence, damage):
+    sql, client, config, context, build = evidence
+    claim_owner(sql, config, context, build.output.relation, job_id="job")
+    record_build(sql, client, config, context, build, successful=True)
+    row = next(
+        row for table, rows in sql.tables.items() if table.endswith("`factory_reuse_builds`") for row in rows.values()
+    )
+    payload = json.loads(row["evidence"])
+    if damage == "missing-field":
+        del payload["build"]["output"]
+    elif damage == "timestamp":
+        payload["build"]["completed_at"] = 123
+    elif damage == "version":
+        payload["build"]["inputs_before"][0]["version"] = True
+    elif damage == "attempt":
+        payload["build"]["attempt"]["attempt_number"] = 99
+    else:
+        payload["build"]["inputs_before"] = []
+    row["evidence"] = canonical_json(payload)
+    with pytest.raises(EvidenceUnavailable, match="BUILD_INVALID"):
+        read_build(sql, client, config, context, build.model_id, build.output, job_id="job")
+
+
+def test_identifier_components_are_quoted_without_splitting():
+    from databricks_dbt_factory.reuse_runtime import quote_relation  # pylint: disable=import-outside-toplevel
+
+    assert quote_relation(Relation("cat", "sch`ema", "a.b'c")) == "`cat`.`sch``ema`.`a.b'c`"
+
+
+def test_owner_names_are_case_insensitive_without_changing_evidence(evidence):
+    sql, _, config, context, build = evidence
+    claim_owner(sql, config, context, build.output.relation, job_id="job")
+    upper = Relation(*(value.upper() for value in asdict(build.output.relation).values()))
+    claim_owner(sql, config, context, upper, job_id="job")
+    assert sum(len(rows) for rows in sql.tables.values()) == 1
+
+
+@pytest.mark.parametrize("damage", [None, "uc-id", "delta-id", "name", "non-delta", "unreadable", "version"])
+def test_relation_snapshots_reject_mixed_or_unavailable_observations(damage):
+    relation = Relation("catalog", "schema", "orders")
+    before = {"table_id": "uc-id", "catalog_name": "catalog", "schema_name": "schema", "name": "orders"}
+    after = dict(before)
+    details = [{"format": "delta", "id": "delta-id"}, {"format": "delta", "id": "delta-id"}]
+    if damage == "uc-id":
+        after["table_id"] = "new"
+    elif damage == "delta-id":
+        details[1]["id"] = "new"
+    elif damage == "name":
+        after["name"] = "renamed"
+    elif damage == "non-delta":
+        details[0]["format"] = "parquet"
+    tables = iter([SimpleNamespace(**before), SimpleNamespace(**after)])
+    client = SimpleNamespace(tables=SimpleNamespace(get=lambda _name: next(tables)))
+    commands = []
+
+    def sql(statement):
+        commands.append(statement)
+        if damage == "unreadable":
+            raise OSError("metadata denied")
+        if "HISTORY" in statement:
+            return Rows([{"version": True if damage == "version" else 3}])
+        return Rows([details.pop(0)])
+
+    if damage:
+        with pytest.raises(EvidenceUnavailable):
+            snapshot_relation(SimpleNamespace(sql=sql), client, relation)
+    else:
+        assert snapshot_relation(SimpleNamespace(sql=sql), client, relation) == RelationSnapshot(
+            relation, "uc-id", "delta-id", 3
+        )
+        assert len(commands) == 3

@@ -80,6 +80,8 @@ def _assert_wheel_executes_in_isolation(wheel: Path, tmp_path: Path) -> None:
 
         runner = importlib.resources.files("databricks_dbt_factory").joinpath("notebook", "run_dbt_command.py")
         assert "dbtRunner" in runner.read_text()
+        preparation = importlib.resources.files("databricks_dbt_factory").joinpath("notebook", "prepare_dbt_reuse.py")
+        assert "prepare_run(" in preparation.read_text()
         assert not any(name == "dbt" or name.startswith("dbt.") for name in sys.modules)
         assert not any(name == "databricks.sdk" or name.startswith("databricks.sdk.") for name in sys.modules)
 

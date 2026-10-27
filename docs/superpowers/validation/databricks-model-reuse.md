@@ -112,4 +112,33 @@ All **574 unit/integration tests** and `make lint` pass, including wheel/sdist
 packaging. Controlled failure checks additionally reject malformed/partial build
 records, incorrect attempt keys, missing artifact bytes, mixed identity reads,
 and unavailable write readbacks. The generator still imports neither dbt nor
-the SDK. Native state preparation and runtime skipping remain disabled.
+the SDK. Runtime skipping remains disabled.
+
+## Native preparation checkpoint
+
+Local validation on 2026-10-27 uses dbt Core **1.12.5** and dbt Databricks **1.12.7**.
+The native comparison suite passes **17 checks** using fresh real-project artifacts and the
+installed engine's `dbt ls`. It covers model SQL, transitive/unused macros, unrelated edits,
+view/ephemeral definitions, dependency/reuse-policy changes, driver/engine and declared-context
+changes, and different per-model successful baselines after partial builds. Invocation counts
+match distinct supported baseline groups. Current output and baseline directories are separate;
+runtime profile drift fails the fresh-parse binding check.
+
+The full suite passes **600 tests**, including direct and sdist-derived wheel resources and
+execution outside the source tree. `make lint` passes. Controlled SDK/Spark boundaries exercise
+run/job/attempt and exact-build binding, deployed-view changes without changed output evidence,
+state/artifact outages, immutable publication/readback, and notebook credential cleanup with
+unexpected failures propagated. The task value contains a pointer/digest rather than model maps.
+An additional regression checks identical descriptors across eight process hash seeds, including
+mixed dependency fallback reasons; definition traversal uses deterministic ordering.
+
+One preparation attempt shares verified deployment artifacts. The regression fixture requires
+three artifact downloads for a deployment shared by preparation and its successful-build baseline,
+rather than repeating downloads per model. This establishes request-count behavior, not compute
+savings or a measured latency improvement. Native comparisons still require a fresh dbt process
+for each distinct supported baseline group; tests still need to execute.
+
+The preparation API and content-addressed notebook are shipped. Generated Lakeflow graphs still
+contain ordinary dbt tasks; preparation wiring, live runner reuse and lineage enforcement remain
+pending. This checkpoint has no new Databricks run and establishes no platform acceptance or
+net savings. The existing serverless profile/catalog constraints remain in effect for live work.

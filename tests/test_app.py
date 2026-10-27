@@ -66,6 +66,16 @@ def test_reuse_artifacts_are_content_addressed_and_dry_run_writes_nothing(monkey
     assert descriptor["factory_version"] == __version__
     assert descriptor["config"] == CONFIG
     assert any(model["unique_id"] == "model.probe.orders" for model in descriptor["models"])
+    preparation = next(target.parent.glob("prepare_dbt_reuse_*.py"))
+    assert preparation.stem.removeprefix("prepare_dbt_reuse_") == hashlib.sha256(preparation.read_bytes()).hexdigest()
+    assert b"prepare_run(" in preparation.read_bytes()
+    original = preparation.read_bytes()
+    before = target.read_bytes()
+    preparation.write_bytes(b"corrupt")
+    with pytest.raises(SystemExit, match="SHA-256"):
+        main()
+    assert target.read_bytes() == before
+    preparation.write_bytes(original)
     before = target.read_bytes()
     next(bundle.glob("manifest_*.json")).write_bytes(b"partial")
     with pytest.raises(SystemExit, match="immutable artifact"):

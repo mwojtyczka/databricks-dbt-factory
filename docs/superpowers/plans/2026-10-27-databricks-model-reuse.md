@@ -167,19 +167,21 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 **Files:** Extend `reuse_prepare.py` and `tests/test_reuse.py`; create `notebook/prepare_dbt_reuse.py`, `tests/integration/test_dbt_state_comparison.py`.
 
-- [ ] Write real-project baseline tests for model SQL, transitive macro, unused macro, unrelated model, dependency mapping, reuse metadata, engine version, declared vars/environment and partial previous failures. Produce baseline/current manifests with the tested engine. Keep them in different directories.
-- [ ] Invoke the installed engine with an argument list and separate current output directories:
+- [x] Write real-project baseline tests for model SQL, transitive macro, unused macro, unrelated model, dependency mapping, reuse metadata, engine version, declared vars/environment and partial previous failures. Produce baseline/current manifests with the tested engine. Keep them in different directories.
+- [x] Invoke the installed engine with an argument list and separate current output directories:
 
   ```text
   dbt ls --select state:modified --resource-type model --state BASELINE_DIRECTORY --output json --output-keys unique_id
   ```
 
   Add the validated project/profile/target settings. Parse only node JSON records; retain command diagnostics. A selector/configuration/graph error fails; an unavailable optimization artifact or unsupported comparison produces a visible normal-execution decision.
-- [ ] Group models by their own successful-build manifest and semantic context. Execute one native comparison per distinct valid baseline group, not per model or only against the previous deployment. An engine/driver upgrade invalidates broadly without cross-engine comparison. Keep model-level code changes selective.
-- [ ] Compare Factory policy, relation mapping and execution context separately from native state results. Track dbt-managed view/ephemeral definitions and walk their declared dependency graph to physical Delta leaves; intersect native changed-node results with that definition closure. For views, also snapshot the deployed UC definition using the metadata access verified in Task 1. Add real changed-view/ephemeral fixtures with unchanged physical input versions and assert that consumers rebuild. Unresolved definitions or incomplete physical closures make the consumer ineligible. Never infer SQL dependencies in Python.
-- [ ] Ship the functional preparation notebook and extend the existing runner-publication helper to publish it as a second immutable resource. Extend installed-wheel checks to read that notebook; preserve dry-run and immutable-file checks.
-- [ ] Publish immutable preparation output bound to the deployment, job/run/attempt and exact build references. Its task value contains a pointer/digest, not a large model map. Missing/state-unavailable preparation succeeds with reuse disabled; unexpected infrastructure errors retain normal failure behavior.
-- [ ] Verify: `hatch run pytest tests/integration/test_dbt_state_comparison.py -v` in the existing dbt environment. Assert invocation count equals distinct supported baseline groups. Commit: `feat: prepare selective reuse decisions with native dbt state`.
+- [x] Group models by their own successful-build manifest and semantic context. Execute one native comparison per distinct valid baseline group, not per model or only against the previous deployment. An engine/driver upgrade invalidates broadly without cross-engine comparison. Keep model-level code changes selective.
+- [x] Compare Factory policy, relation mapping and execution context separately from native state results. Track dbt-managed view/ephemeral definitions and walk their declared dependency graph to physical Delta leaves; intersect native changed-node results with that definition closure. For views, also snapshot the deployed UC definition using the metadata access verified in Task 1. Add real changed-view/ephemeral fixtures with unchanged physical input versions and assert that consumers rebuild. Unresolved definitions or incomplete physical closures make the consumer ineligible. Never infer SQL dependencies in Python.
+- [x] Ship the functional preparation notebook and extend the existing runner-publication helper to publish it as a second immutable resource. Extend installed-wheel checks to read that notebook; preserve dry-run and immutable-file checks.
+- [x] Publish immutable preparation output bound to the deployment, job/run/attempt and exact build references. Its task value contains a pointer/digest, not a large model map. Missing/state-unavailable preparation succeeds with reuse disabled; unexpected infrastructure errors retain normal failure behavior.
+- [x] Verify: `hatch run pytest tests/integration/test_dbt_state_comparison.py -v` in the existing dbt environment. Assert invocation count equals distinct supported baseline groups. Commit: `feat: prepare selective reuse decisions with native dbt state`.
+
+**Validation:** 17 native comparison checks pass against dbt Core 1.12.5 / dbt Databricks 1.12.7; the full 600-test suite includes isolated wheel/sdist packaging. Preparation/notebook boundary checks cover exact build binding, deployed view changes, state/artifact outages and unexpected failures. Artifact downloads are shared only within an attempt. [Recorded evidence](../validation/databricks-model-reuse.md#native-preparation-checkpoint) distinguishes local validation from platform acceptance. Lakeflow preparation wiring and runtime skipping remain disabled.
 
 **Exit:** The agreed selective-invalidation USP is present before enabling skipping. Context changes cannot hide behind unchanged SQL-only state results.
 

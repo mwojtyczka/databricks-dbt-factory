@@ -56,11 +56,14 @@ class _OutputPlan:
     notebook_path: str | None
     project_directory: str | None
     source: str | None
+    preparation_artifact: _RunnerArtifact | None = None
 
 
-def _prepare_runner_notebook(target_job_spec_destination: Path, project_directory: str | None) -> _RunnerArtifact:
+def _prepare_runner_notebook(
+    target_job_spec_destination: Path, project_directory: str | None, filename: str = _RUNNER_NOTEBOOK_FILENAME
+) -> _RunnerArtifact:
     """Reads the packaged runner and resolves its content-addressed bundle path without writing."""
-    source = resources.files("databricks_dbt_factory") / "notebook" / _RUNNER_NOTEBOOK_FILENAME
+    source = resources.files("databricks_dbt_factory") / "notebook" / filename
     content = source.read_bytes()
     digest = hashlib.sha256(content).hexdigest()
 
@@ -72,7 +75,7 @@ def _prepare_runner_notebook(target_job_spec_destination: Path, project_director
         at_project_root = False
         destination_dir = spec_dir
 
-    destination = destination_dir / f"run_dbt_command_{digest}.py"
+    destination = destination_dir / f"{Path(filename).stem}_{digest}.py"
     relative = Path(os.path.relpath(destination, start=spec_dir)).as_posix()
     notebook_path = relative if relative.startswith("..") else f"./{relative}"
     return _RunnerArtifact(content, destination, notebook_path, at_project_root)
@@ -112,6 +115,12 @@ def _prepare_output_plan(args: argparse.Namespace) -> _OutputPlan:
         except ValueError as error:
             raise SystemExit(f"error: {error}") from error
 
+    runner_target = job_spec_destination or Path(args.target_job_spec_path).resolve()
+    preparation_artifact = (
+        _prepare_runner_notebook(runner_target, args.project_directory, "prepare_dbt_reuse.py")
+        if args.reuse_config
+        else None
+    )
     if not auto_copy_runner:
         return _OutputPlan(
             job_spec_destination,
@@ -119,9 +128,9 @@ def _prepare_output_plan(args: argparse.Namespace) -> _OutputPlan:
             notebook_path,
             args.project_directory,
             args.source,
+            preparation_artifact,
         )
 
-    runner_target = job_spec_destination or Path(args.target_job_spec_path).resolve()
     runner_artifact = _prepare_runner_notebook(runner_target, args.project_directory)
     project_directory = "." if runner_artifact.at_project_root else args.project_directory
     return _OutputPlan(
@@ -130,6 +139,7 @@ def _prepare_output_plan(args: argparse.Namespace) -> _OutputPlan:
         runner_artifact.notebook_path,
         project_directory,
         "WORKSPACE",
+        preparation_artifact,
     )
 
 
@@ -199,6 +209,8 @@ def _prepare_generated_artifacts(
         output_plan.job_spec_destination,
     )
     _validate_artifact_destinations(output_plan.runner_artifact, job_spec_artifact)
+    if reuse_bundle is not None:
+        _validate_artifact_destinations(output_plan.preparation_artifact, job_spec_artifact)
     return generated, job_spec_artifact, reuse_bundle
 
 
@@ -243,18 +255,18 @@ def _publish_artifacts(
     runner_artifact: _RunnerArtifact | None,
     job_spec_artifact: JobSpecArtifact,
     reuse_bundle: dict[str, bytes] | None,
+    preparation_artifact: _RunnerArtifact | None = None,
 ) -> None:
     """Publishes prepared artifacts after rechecking filesystem identity aliases."""
     if reuse_bundle is not None:
         paths = write_bundle(reuse_bundle, job_spec_artifact.destination.parent / "reuse_artifacts")
         descriptor = next(path for path in paths if path.name.startswith("descriptor_"))
         print(f"Reuse deployment descriptor: {descriptor}", file=sys.stderr)
-    if runner_artifact is not None:
-        _publish_runner_notebook(runner_artifact)
-        if job_spec_artifact.destination.exists() and runner_artifact.destination.samefile(
-            job_spec_artifact.destination
-        ):
-            raise ValueError(f"runner and job spec destinations must be different: {runner_artifact.destination}")
+    for artifact in (runner_artifact, preparation_artifact if reuse_bundle is not None else None):
+        if artifact is not None:
+            _publish_runner_notebook(artifact)
+            if job_spec_artifact.destination.exists() and artifact.destination.samefile(job_spec_artifact.destination):
+                raise ValueError(f"runner and job spec destinations must be different: {artifact.destination}")
     write_job_spec(job_spec_artifact)
 
 
@@ -279,7 +291,9 @@ def main():
 
     assert job_spec_artifact is not None
     try:
-        _publish_artifacts(output_plan.runner_artifact, job_spec_artifact, reuse_bundle)
+        _publish_artifacts(
+            output_plan.runner_artifact, job_spec_artifact, reuse_bundle, output_plan.preparation_artifact
+        )
     except ValueError as error:
         raise SystemExit(f"error: {error}") from error
 

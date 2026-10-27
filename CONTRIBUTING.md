@@ -265,9 +265,9 @@ binds model declarations, reuse configuration and the generating Factory version
 must match; dry-run writes nothing. Keep this directory outside the captured project snapshot.
 Missing context produces ordinary tasks without a reusable deployment bundle.
 
-Reuse runtime work is still pending. The generated tasks execute normally; these artifacts do
-not enable skipping. The preparation notebook and its immutable publication belong to the
-preparation implementation, so no placeholder notebook is shipped.
+Generation also publishes `prepare_dbt_reuse_FULL_SHA256.py` using the runner's immutable-file
+checks and placement rules. Preparation is available as an API/notebook, but generated tasks
+still execute normally: Lakeflow preparation wiring and model skipping are pending.
 
 Install the **same Factory wheel used for generation** in each reuse-enabled serverless notebook
 environment, alongside the existing exact dbt/adapter pins. Build it with `hatch build -t wheel`
@@ -352,8 +352,7 @@ conflicts fail explicitly. After model success, state-write outages return a fal
 from `record_build`/`record_decision`. Callers must report that reason in task output; durable
 decision logging is not guaranteed during an outage.
 
-Runtime preparation, identity verification and task skipping are still pending. To test the
-actual storage APIs in a disposable serverless job using the matching built wheel:
+To test the actual storage APIs in a disposable serverless job using the matching built wheel:
 
 ```sh
 hatch build -t wheel
@@ -368,6 +367,40 @@ The harness verifies the uploaded wheel bytes, validates/deploys its serverless 
 the result, and removes its job and ownership-marked scratch schema. The fixture tables are
 built with Spark SQL; a real dbt parse supplies their model/source mappings. This tests storage,
 not the unimplemented dbt runner integration or measured net savings.
+
+### Native state preparation (integration pending)
+
+`reuse_prepare.compare_baselines(project, profiles, manifest_bytes, provenance_bytes, baselines)`
+uses the installed engine's `dbt ls --select state:modified --resource-type model` with isolated
+baseline/current directories. `baselines` maps model IDs to their own successful manifest/provenance
+bytes, or `None`. One invocation serves each distinct valid manifest/context group; partial prior
+failures do not replace an unchanged model's successful baseline with the latest deployment.
+Command diagnostics are retained. Configuration/graph/parse mismatches fail; unavailable comparison
+output falls back to ordinary execution. Context/version changes invalidate without cross-engine
+comparison, and Factory checks reuse policy and relation/dependency mappings separately.
+
+dbt-managed SQL view/ephemeral dependencies are traversed through the manifest graph to physical
+leaves. Changed definitions invalidate their consumers. View outputs themselves remain unsupported
+reuse outputs. `BuildEvidence.views_before`/`views_after` must contain matching `ViewSnapshot` records
+for every declared view, including its UC identity and deployed-definition digest. Missing, changed
+or unsupported definitions cannot supply reusable evidence; physical leaves still require live Delta
+snapshots. Factory does not parse view SQL to infer dependencies.
+
+`reuse_runtime.prepare_run(spark, client, config, deployment_reference, project, profiles, attempt)`
+verifies the authenticated workspace/metastore/principal and SQL principal, checks the captured
+snapshot once, and obtains exact successful-build keys/digests. Artifacts are verified once per
+deployment within that preparation attempt; caches are not shared across tasks. Pass explicit
+non-secret `secret_versions` when captured context declares them. The returned code decisions are
+**not permission to skip**: model tasks still need fresh data/output evidence and lineage checks.
+
+The packaged notebook accepts JSON widgets `factory_reuse_config`, `factory_reuse_deployment`
+(`path`/`sha256`), `factory_secret_versions`, explicit `project_directory`/`profiles_directory`,
+and `factory_job_id`, `factory_run_id`, `factory_task_key`, `factory_attempt_number`. Profiles must
+remain outside the immutable project tree. It publishes an immutable preparation artifact bound to
+the deployment and attempt, with per-model reasons and exact baseline references. The
+`factory_reuse_preparation` task value contains only its path/digest; an unavailable publication
+produces `{}` and a visible fallback. Expected metadata/state outages disable reuse; unexpected
+task failures propagate. No generated preparation task or runtime skip is enabled yet.
 
 ## Troubleshooting
 

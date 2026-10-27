@@ -23,6 +23,139 @@ captured = test_reuse.captured
 BASE_PATH = str(Path(__file__).resolve().parent)
 
 
+def test_reuse_generation_preserves_captured_tree_with_relative_project(monkeypatch, tmp_path, captured):
+    from databricks_dbt_factory.reuse_prepare import read_provenance, verify_snapshot  # pylint: disable=import-outside-toplevel
+
+    project, profiles, manifest, provenance = captured
+    (tmp_path / "manifest.json").write_bytes(manifest)
+    (tmp_path / "provenance.json").write_bytes(provenance)
+    (tmp_path / "config.json").write_text(json.dumps(test_reuse.CONFIG))
+    target = tmp_path / "generated" / "out.yml"
+    relative = os.path.relpath(project, target.parent)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            str(tmp_path / "manifest.json"),
+            "--reuse-provenance",
+            str(tmp_path / "provenance.json"),
+            "--reuse-config",
+            str(tmp_path / "config.json"),
+            "--target",
+            "dev",
+            "--project-directory",
+            relative,
+            "--profiles-directory",
+            str(profiles),
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target),
+        ],
+    )
+    main()
+    verify_snapshot(read_provenance(provenance, manifest), project)
+    tasks = next(iter(yaml.safe_load(target.read_text())["resources"]["jobs"].values()))["tasks"]
+    for task in tasks:
+        assert task["notebook_task"]["base_parameters"]["project_directory"] == relative
+    assert next(target.parent.glob("prepare_dbt_reuse_*.py"))
+    assert next(target.parent.glob("run_dbt_command_*.py"))
+
+
+@pytest.mark.parametrize(
+    "options, conflict",
+    [
+        (["--profiles-directory", "/Workspace/profiles"], "explicit"),
+        (["--project-directory", "/Workspace/project"], "explicit"),
+        (
+            [
+                "--project-directory",
+                "../project",
+                "--profiles-directory",
+                "../profiles",
+                "--notebook-path",
+                "./caller.py",
+            ],
+            "absolute",
+        ),
+        (["--project-directory", ".", "--profiles-directory", "../profiles"], "outside"),
+        (["--project-directory", "@output", "--profiles-directory", "../profiles"], "outside"),
+        (
+            ["--project-directory", "/Workspace/project", "--profiles-directory", "/Workspace/project/profiles"],
+            "outside",
+        ),
+        (
+            [
+                "--project-directory",
+                "/Workspace/project",
+                "--profiles-directory",
+                "/Workspace/profiles",
+                "--notebook-path",
+                "./caller.py",
+                "--source",
+                "GIT",
+            ],
+            "WORKSPACE",
+        ),
+    ],
+)
+def test_reuse_cli_rejects_unsafe_runtime_paths_without_writes(monkeypatch, tmp_path, captured, options, conflict):
+    (tmp_path / "manifest.json").write_bytes(captured[2])
+    (tmp_path / "provenance.json").write_bytes(captured[3])
+    (tmp_path / "config.json").write_text(json.dumps(test_reuse.CONFIG))
+    target = tmp_path / "generated" / "out.yml"
+    options = [str(target.parent) if value == "@output" else value for value in options]
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            str(tmp_path / "manifest.json"),
+            "--reuse-provenance",
+            str(tmp_path / "provenance.json"),
+            "--reuse-config",
+            str(tmp_path / "config.json"),
+            "--target",
+            "dev",
+            "--dry-run",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(target),
+            *options,
+        ],
+    )
+    with pytest.raises(SystemExit, match=conflict):
+        main()
+    assert not target.parent.exists()
+
+
+def test_unknown_reuse_context_preserves_relative_runner_layout(monkeypatch, tmp_path, captured):
+    (tmp_path / "manifest.json").write_bytes(captured[2])
+    (tmp_path / "config.json").write_text(json.dumps(test_reuse.CONFIG))
+    target = tmp_path / "resources" / "out.yml"
+    common = [
+        "main.py",
+        "--dbt-manifest-path",
+        str(tmp_path / "manifest.json"),
+        "--project-directory",
+        "../project",
+        "--profiles-directory",
+        "../profiles",
+        "--input-job-spec-path",
+        BASE_PATH + "/test_data/job_definition_template.yaml",
+        "--target-job-spec-path",
+        str(target),
+    ]
+    monkeypatch.setattr("sys.argv", common)
+    main()
+    ordinary = target.read_bytes()
+    monkeypatch.setattr("sys.argv", common + ["--reuse-config", str(tmp_path / "config.json")])
+    main()
+    assert target.read_bytes() == ordinary
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_reuse_artifacts_are_content_addressed_and_dry_run_writes_nothing(monkeypatch, tmp_path, captured, dry_run):
     from tests.test_reuse import CONFIG  # pylint: disable=import-outside-toplevel
@@ -44,6 +177,10 @@ def test_reuse_artifacts_are_content_addressed_and_dry_run_writes_nothing(monkey
             str(tmp_path / "config.json"),
             "--target",
             "dev",
+            "--project-directory",
+            "/Workspace/project",
+            "--profiles-directory",
+            "/Workspace/profiles",
             "--input-job-spec-path",
             BASE_PATH + "/test_data/job_definition_template.yaml",
             "--target-job-spec-path",
@@ -69,6 +206,8 @@ def test_reuse_artifacts_are_content_addressed_and_dry_run_writes_nothing(monkey
     preparation = next(target.parent.glob("prepare_dbt_reuse_*.py"))
     assert preparation.stem.removeprefix("prepare_dbt_reuse_") == hashlib.sha256(preparation.read_bytes()).hexdigest()
     assert b"prepare_run(" in preparation.read_bytes()
+    tasks = next(iter(yaml.safe_load(target.read_text())["resources"]["jobs"].values()))["tasks"]
+    assert len([task for task in tasks if "factory_reuse_models" in task["notebook_task"]["base_parameters"]]) == 1
     original = preparation.read_bytes()
     before = target.read_bytes()
     preparation.write_bytes(b"corrupt")

@@ -212,8 +212,8 @@ not an acceptance test of implemented model reuse or a net-savings benchmark.
 ### Reuse configuration and parse provenance
 
 `--reuse-config <json>` validates reuse declarations; `--reuse-provenance <json>` binds them to
-a captured manifest. Runtime reuse is pending: these flags currently generate ordinary tasks
-and print that limitation. Reuse requires serverless notebook tasks. Missing/unreadable provenance,
+a captured manifest. Eligible jobs receive a preparation task; model tasks still execute dbt
+normally while runtime skipping is pending. Reuse requires serverless notebook tasks. Missing/unreadable provenance,
 an unspecified runtime target, or task-local `dbt deps` gives `CONTEXT_UNKNOWN`; a known manifest,
 target, or project/environment mismatch fails before publishing output.
 
@@ -265,9 +265,23 @@ binds model declarations, reuse configuration and the generating Factory version
 must match; dry-run writes nothing. Keep this directory outside the captured project snapshot.
 Missing context produces ordinary tasks without a reusable deployment bundle.
 
-Generation also publishes `prepare_dbt_reuse_FULL_SHA256.py` using the runner's immutable-file
-checks and placement rules. Preparation is available as an API/notebook, but generated tasks
-still execute normally: Lakeflow preparation wiring and model skipping are pending.
+For eligible jobs, generation publishes `prepare_dbt_reuse_FULL_SHA256.py` and the immutable runner
+beside the output job spec, outside the captured project. Explicit `--project-directory` and
+`--profiles-directory` are required. Relative project paths resolve from these notebooks' directory;
+a caller-managed runner requires an absolute project path and WORKSPACE source. Profiles must stay
+outside the project. Missing context and jobs with no eligible models preserve ordinary task output.
+
+Declared extra inputs produced by the project add scheduling edges before test gates and tag
+partitioning. They do not change the captured dbt manifest or selectors. Each eligible child job
+gets one preparation task scoped to its own model IDs. Model tasks depend on its success and retain
+their upstream test gates. Preparation counts toward the 1,000-task limit.
+
+Generated jobs expose `factory_force_rebuild` with string default `false`; runners accept exactly
+`true` or `false`. Split orchestrators forward it to children. Owning jobs and orchestrators use
+`max_concurrent_runs: 1`. Conflicting template concurrency and job parameters named `factory_*`,
+`dbt_commands`, `project_directory`, or `profiles_directory` are refused, including during dry-run.
+Model skipping and fresh build-evidence publication remain pending; force and full-refresh both
+follow normal dbt execution at this checkpoint.
 
 Install the **same Factory wheel used for generation** in each reuse-enabled serverless notebook
 environment, alongside the existing exact dbt/adapter pins. Build it with `hatch build -t wheel`
@@ -390,17 +404,20 @@ snapshots. Factory does not parse view SQL to infer dependencies.
 verifies the authenticated workspace/metastore/principal and SQL principal, checks the captured
 snapshot once, and obtains exact successful-build keys/digests. Artifacts are verified once per
 deployment within that preparation attempt; caches are not shared across tasks. Pass explicit
-non-secret `secret_versions` when captured context declares them. The returned code decisions are
+non-secret `secret_versions` when captured context declares them. Generated tasks carry the captured
+version identifiers; deployments must update them when result-affecting secrets change. The returned code decisions are
 **not permission to skip**: model tasks still need fresh data/output evidence and lineage checks.
 
 The packaged notebook accepts JSON widgets `factory_reuse_config`, `factory_reuse_deployment`
-(`path`/`sha256`), `factory_secret_versions`, explicit `project_directory`/`profiles_directory`,
+(`path`/`sha256`), `factory_secret_versions`, `factory_reuse_models` (a JSON array of model IDs),
+explicit `project_directory`/`profiles_directory`,
 and `factory_job_id`, `factory_run_id`, `factory_task_key`, `factory_attempt_number`. Profiles must
 remain outside the immutable project tree. It publishes an immutable preparation artifact bound to
 the deployment and attempt, with per-model reasons and exact baseline references. The
 `factory_reuse_preparation` task value contains only its path/digest; an unavailable publication
 produces `{}` and a visible fallback. Expected metadata/state outages disable reuse; unexpected
-task failures propagate. No generated preparation task or runtime skip is enabled yet.
+task failures propagate. The API's optional `model_ids` scope rejects unknown or duplicate declarations
+before claiming output ownership. Generated jobs always supply that scope. Runtime skipping remains disabled.
 
 ## Troubleshooting
 

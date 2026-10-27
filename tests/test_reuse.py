@@ -257,6 +257,10 @@ def test_cli_checks_provenance_and_target_before_publication(captured, monkeypat
         str(config_path),
         "--reuse-provenance",
         str(provenance_path),
+        "--project-directory",
+        str(captured[0]),
+        "--profiles-directory",
+        str(captured[1]),
     ]
     monkeypatch.setattr("sys.argv", [*arguments, "--target", "other"])
     with pytest.raises(SystemExit, match="target mismatch"):

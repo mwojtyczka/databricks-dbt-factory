@@ -115,6 +115,16 @@ class ModelDescriptor:
     views: tuple[Relation, ...] = ()
 
 
+@dataclass(frozen=True)
+class ReuseDeployment:
+    """Verified deployment and the preparation notebook used by generated jobs."""
+
+    config: dict
+    context: ExecutionContext | None
+    descriptor: dict
+    notebook_path: str
+
+
 def _policy(model):
     label = f"{model['unique_id']} reuse metadata"
     meta = model.get("config", {}).get("meta", {})

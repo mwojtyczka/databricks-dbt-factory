@@ -138,7 +138,25 @@ rather than repeating downloads per model. This establishes request-count behavi
 savings or a measured latency improvement. Native comparisons still require a fresh dbt process
 for each distinct supported baseline group; tests still need to execute.
 
-The preparation API and content-addressed notebook are shipped. Generated Lakeflow graphs still
-contain ordinary dbt tasks; preparation wiring, live runner reuse and lineage enforcement remain
-pending. This checkpoint has no new Databricks run and establishes no platform acceptance or
-net savings. The existing serverless profile/catalog constraints remain in effect for live work.
+The preparation API and content-addressed notebook are shipped. Live runner reuse and lineage
+enforcement remain pending. This checkpoint has no new Databricks run and establishes no platform
+acceptance or net savings. The existing serverless profile/catalog constraints remain in effect for live work.
+
+## Lakeflow wiring checkpoint
+
+Local validation on 2026-10-27 passes **644 tests** and `make lint`, using dbt Core **1.12.5** /
+dbt Databricks **1.12.7**. This includes installed-engine selection/state checks, single/split-job
+bundle schemas and isolated wheel/sdist builds. The generated graphs add one preparation task
+per eligible job, scoped to that child's model IDs before ownership claims. Declared extra-input
+edges precede test gating and partitioning; native selectors and the captured manifest are unchanged.
+
+Real parsed fixtures cover per-test/bundled gates, dependency cycles, preparation-key collisions,
+zero opt-in and final 1,000-task boundaries. dbt refuses conflicting physical output aliases during
+capture. Controlled notebook checks cover strict force values before authentication and validated
+preparation scopes. Job templates reject parameter overrides and conflicting concurrency; split
+parents forward force controls. Missing context retains ordinary output. Snapshot checks prove
+relative/absolute notebook placement cannot silently modify the captured deployment.
+
+Model tasks still execute normal dbt. Fresh build publication and reuse before dbt initialization
+remain pending. No new Databricks resources were deployed, and no runtime overhead or savings
+were measured at this checkpoint.

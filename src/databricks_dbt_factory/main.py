@@ -11,7 +11,7 @@ from pathlib import Path
 from databricks_dbt_factory.__version__ import __version__
 from databricks_dbt_factory.dbt_factory import DbtFactory
 from databricks_dbt_factory.file_io import atomic_write_bytes
-from databricks_dbt_factory.reuse import ReuseConfig, describe_models
+from databricks_dbt_factory.reuse import ReuseConfig, ReuseDeployment, describe_models, digest_bytes
 from databricks_dbt_factory.reuse_prepare import read_provenance
 from databricks_dbt_factory.reuse_runtime import prepare_bundle, write_bundle
 from databricks_dbt_factory.job_spec import (
@@ -98,8 +98,14 @@ def _validate_runner_notebook(artifact: _RunnerArtifact) -> None:
         raise ValueError(f"Runner target {destination} does not match its SHA-256 filename.")
 
 
-def _prepare_output_plan(args: argparse.Namespace) -> _OutputPlan:
+def _prepare_output_plan(args: argparse.Namespace, reuse_bundle: dict[str, bytes] | None) -> _OutputPlan:
     """Resolves CLI output locations and effective notebook task settings."""
+    reuse_enabled = False
+    if reuse_bundle is not None:
+        descriptor = json.loads(
+            next(content for name, content in reuse_bundle.items() if name.startswith("descriptor_"))
+        )
+        reuse_enabled = any(model["reason"] is None for model in descriptor["models"])
     notebook_path = args.notebook_path
     auto_copy_runner = args.task_type == "notebook" and notebook_path is None
     if auto_copy_runner and args.source == "GIT":
@@ -116,10 +122,9 @@ def _prepare_output_plan(args: argparse.Namespace) -> _OutputPlan:
             raise SystemExit(f"error: {error}") from error
 
     runner_target = job_spec_destination or Path(args.target_job_spec_path).resolve()
+    notebook_project = None if reuse_enabled else args.project_directory
     preparation_artifact = (
-        _prepare_runner_notebook(runner_target, args.project_directory, "prepare_dbt_reuse.py")
-        if args.reuse_config
-        else None
+        _prepare_runner_notebook(runner_target, notebook_project, "prepare_dbt_reuse.py") if reuse_enabled else None
     )
     if not auto_copy_runner:
         return _OutputPlan(
@@ -127,11 +132,11 @@ def _prepare_output_plan(args: argparse.Namespace) -> _OutputPlan:
             None,
             notebook_path,
             args.project_directory,
-            args.source,
+            args.source or ("WORKSPACE" if reuse_enabled else None),
             preparation_artifact,
         )
 
-    runner_artifact = _prepare_runner_notebook(runner_target, args.project_directory)
+    runner_artifact = _prepare_runner_notebook(runner_target, notebook_project)
     project_directory = "." if runner_artifact.at_project_root else args.project_directory
     return _OutputPlan(
         job_spec_destination,
@@ -189,20 +194,24 @@ def _prepare_generated_artifacts(
     args: argparse.Namespace,
     factory: DbtFactory,
     output_plan: _OutputPlan,
+    manifest: dict,
+    reuse_bundle: dict[str, bytes] | None,
 ) -> tuple[list, JobSpecArtifact | None, dict[str, bytes] | None]:
     """Generates tasks, or one job of tasks per split tag, and prepares the job spec without publishing files."""
-    manifest = read_dbt_manifest(args.dbt_manifest_path)
-    reuse_bundle = _validate_reuse_inputs(args, manifest) if args.reuse_config else None
+    if reuse_bundle is not None:
+        factory.reuse = _reuse_deployment(args, output_plan, reuse_bundle)
     if args.split_by_tag:
         generated = factory.create_partitions(manifest, args.split_by_tag)
     else:
         generated = factory.create_tasks(manifest)
+    if args.dry_run and factory.reuse is None:
+        return generated, None, reuse_bundle
+    render = render_partitioned_job_spec if args.split_by_tag else render_job_spec
+    rendered = render(args.input_job_spec_path, generated, args.new_job_name)
     if args.dry_run:
         return generated, None, reuse_bundle
 
     assert output_plan.job_spec_destination is not None
-    render = render_partitioned_job_spec if args.split_by_tag else render_job_spec
-    rendered = render(args.input_job_spec_path, generated, args.new_job_name)
     job_spec_artifact = prepare_job_spec(
         rendered,
         args.input_job_spec_path,
@@ -214,8 +223,37 @@ def _prepare_generated_artifacts(
     return generated, job_spec_artifact, reuse_bundle
 
 
+def _reuse_deployment(args, output_plan, bundle) -> ReuseDeployment | None:
+    """Bind generated tasks to the documented Volume-root publication location."""
+    name = next(name for name in bundle if name.startswith("descriptor_"))
+    descriptor = json.loads(bundle[name])
+    if not any(model["reason"] is None for model in descriptor["models"]):
+        return None
+    if not output_plan.project_directory or not args.profiles_directory:
+        raise ValueError("reuse preparation requires explicit --project-directory and --profiles-directory")
+    if args.source == "GIT":
+        raise ValueError("reuse preparation requires WORKSPACE source")
+    if output_plan.runner_artifact is None and not Path(output_plan.project_directory).is_absolute():
+        raise ValueError("reuse with a caller-managed runner requires an absolute --project-directory")
+    project = (output_plan.preparation_artifact.destination.parent / output_plan.project_directory).resolve()
+    if output_plan.preparation_artifact.destination.is_relative_to(project):
+        raise ValueError("reuse requires the generated job spec and notebooks outside the captured project")
+    runtime_project = Path(os.path.normpath(output_plan.project_directory))
+    runtime_profiles = Path(os.path.normpath(os.path.join(runtime_project, args.profiles_directory)))
+    if runtime_profiles.is_relative_to(runtime_project):
+        raise ValueError("reuse requires profiles outside the captured project")
+    config = ReuseConfig.from_dict(descriptor["config"])
+    context = read_provenance(bundle[descriptor["provenance"]], bundle[descriptor["manifest"]]).context
+    return ReuseDeployment(
+        descriptor["config"],
+        context,
+        {"path": "/Volumes/" + "/".join(config.artifact_volume) + "/" + name, "sha256": digest_bytes(bundle[name])},
+        output_plan.preparation_artifact.notebook_path,
+    )
+
+
 def _validate_reuse_inputs(args: argparse.Namespace, manifest: dict) -> dict[str, bytes] | None:
-    """Validate declarations without emitting skip decisions or changing the task graph."""
+    """Validate immutable declarations and provenance before wiring preparation."""
     config_value = json.loads(Path(args.reuse_config).read_text(encoding="utf-8"))
     config = ReuseConfig.from_dict(config_value)
     context = None
@@ -275,13 +313,13 @@ def main():
 
     try:
         dbt_options = build_dbt_options(args)
-    except ValueError as error:
-        raise SystemExit(f"error: {error}") from error
-
-    output_plan = _prepare_output_plan(args)
-    factory = _create_dbt_factory(args, output_plan, dbt_options)
-    try:
-        generated, job_spec_artifact, reuse_bundle = _prepare_generated_artifacts(args, factory, output_plan)
+        manifest = read_dbt_manifest(args.dbt_manifest_path)
+        reuse_bundle = _validate_reuse_inputs(args, manifest) if args.reuse_config else None
+        output_plan = _prepare_output_plan(args, reuse_bundle)
+        factory = _create_dbt_factory(args, output_plan, dbt_options)
+        generated, job_spec_artifact, reuse_bundle = _prepare_generated_artifacts(
+            args, factory, output_plan, manifest, reuse_bundle
+        )
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(f"error: {error}") from error
 

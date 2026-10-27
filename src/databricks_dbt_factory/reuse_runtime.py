@@ -20,6 +20,7 @@ from databricks_dbt_factory.reuse import (
     canonical_json,
     describe_models,
     digest_bytes,
+    lineage_reason,
     reuse_reason,
 )
 from databricks_dbt_factory.reuse_prepare import compare_baselines, read_provenance, runtime_versions, verify_snapshot
@@ -670,6 +671,93 @@ def record_decision(
     return "RECORDED"
 
 
+def _lineage_input(value):
+    if not isinstance(value, dict) or set(value) != {"catalog", "schema", "identifier", "path"}:
+        raise EvidenceUnavailable("LINEAGE_INCOMPLETE")
+    components = [value[key] for key in ("catalog", "schema", "identifier")]
+    if all(isinstance(part, str) and part.strip() for part in components):
+        return {key: value[key].lower() for key in ("catalog", "schema", "identifier")} | {"path": None}
+    if components == [None, None, None] and isinstance(value["path"], str) and value["path"].strip():
+        return value
+    raise EvidenceUnavailable("LINEAGE_INCOMPLETE")
+
+
+def _lineage_history(spark, config, context, model, job_id):
+    scope = _scope(config, context, job_id)
+    binding = {
+        "format_version": 1,
+        "kind": "lineage_blocker",
+        "scope": scope,
+        "output": {key: value.lower() for key, value in asdict(model.output).items()},
+    }
+    binding = binding | {"lineage_key": _digest(binding)}
+    # ponytail: JSON routing in the existing decisions table; project columns if measured history size warrants it.
+    rows = _state_rows(
+        spark,
+        f"SELECT key, evidence FROM {_state_table(config, 'decisions')} "
+        "WHERE get_json_object(evidence, '$.lineage_key') = :lineage_key",
+        {"lineage_key": binding["lineage_key"]},
+    )
+    inputs = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["evidence"])
+            observation = _lineage_input(payload["input"])
+            if payload != binding | {"input": observation} or row["key"] != _digest(payload):
+                raise ValueError("invalid lineage evidence binding")
+        except (KeyError, TypeError, ValueError) as error:
+            raise EvidenceUnavailable("LINEAGE_STATE_INCOMPLETE") from error
+        inputs[canonical_json(observation)] = observation
+    return binding, inputs
+
+
+def _declared_lineage(model, observation):
+    return (
+        observation["path"] is None
+        and lineage_reason(model, (Relation(observation["catalog"], observation["schema"], observation["identifier"]),))
+        is None
+    )
+
+
+def _lineage_blockers(model, inputs):
+    return [value for _, value in sorted(inputs.items()) if not _declared_lineage(model, value)]
+
+
+def _observed_lineage(spark, targets):
+    for target in targets:
+        try:
+            rows = spark.sql(
+                "SELECT DISTINCT source_table_catalog AS catalog, source_table_schema AS schema, "
+                "source_table_name AS identifier, source_path AS path FROM `system`.`access`.`table_lineage` "
+                "WHERE event_date >= date_sub(current_date(), 365) "
+                "AND lower(target_table_catalog) = :catalog AND lower(target_table_schema) = :schema "
+                "AND lower(target_table_name) = :identifier "
+                "AND (source_table_full_name IS NOT NULL OR source_path IS NOT NULL)",
+                args={key: value.lower() for key, value in asdict(target).items()},
+            ).collect()
+        except Exception as error:
+            raise EvidenceUnavailable("LINEAGE_UNAVAILABLE") from error
+        for row in rows:
+            yield _lineage_input(row.asDict())
+
+
+def prepare_lineage(spark, config, context, model, *, job_id):
+    """Lineage only vetoes reuse; retained blockers require explicit dependency declarations."""
+    inputs, reason = {}, None
+    try:
+        binding, inputs = _lineage_history(spark, config, context, model, job_id)
+        for observation in _observed_lineage(spark, (model.output, *model.views)):
+            if _declared_lineage(model, observation) or canonical_json(observation) in inputs:
+                continue
+            payload = binding | {"input": observation}
+            _insert_immutable(spark, _state_table(config, "decisions"), _digest(payload), payload)
+            inputs[canonical_json(observation)] = observation
+    except EvidenceUnavailable as error:
+        reason = str(error)
+    blockers = _lineage_blockers(model, inputs)
+    return {"reason": reason or ("UNDECLARED_INPUT" if blockers else None), "blockers": blockers}
+
+
 def _prepare_model(spark, workspace_client, config, context, model, attempt, deployments):
     # Keep expected metadata/state outages within this model's fallback boundary.
     # pylint: disable=too-many-try-statements
@@ -677,6 +765,9 @@ def _prepare_model(spark, workspace_client, config, context, model, attempt, dep
         return {"reason": model.reason, "baseline": None}, None
     try:
         claim_owner(spark, config, context, model.output, job_id=attempt.job_id)
+        lineage = prepare_lineage(spark, config, context, model, job_id=attempt.job_id)
+        if lineage["reason"]:
+            return {"reason": lineage["reason"], "baseline": None, "lineage": lineage}, None
         output = snapshot_relation(spark, workspace_client, model.output)
         build = read_build(
             spark,
@@ -877,7 +968,8 @@ def begin_model(
     variables=None,
 ) -> ModelRun:
     # The notebook boundary supplies deployment, attempt, command and captured context together.
-    # pylint: disable=too-many-try-statements,too-many-arguments
+    # Keep the ordered fallback checks at the notebook's single evidence boundary.
+    # pylint: disable=too-many-try-statements,too-many-arguments,too-complex
     """Revalidate code binding and live physical evidence without importing dbt."""
     run = ModelRun(config, deployment, model_id, attempt)
     try:
@@ -902,6 +994,9 @@ def begin_model(
             run.context, secret_versions
         ):
             run.reason = "CONTEXT_CHANGED"
+            return run
+        if _lineage_blockers(run.model, _lineage_history(spark, config, run.context, run.model, attempt.job_id)[1]):
+            run.reason = "UNDECLARED_INPUT"
             return run
         claim_owner(spark, config, run.context, run.model.output, job_id=attempt.job_id)
         run.ready = True

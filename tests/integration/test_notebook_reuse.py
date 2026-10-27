@@ -499,3 +499,32 @@ def test_failed_data_test_retains_successful_model_evidence(notebook_runtime, mo
         == successful
     )
     assert "DBT_ACCESS_TOKEN" not in os.environ
+
+
+@pytest.mark.parametrize("forced", [False, True])
+def test_retained_lineage_blocks_stale_preparation_and_new_build_evidence(matching_preparation, monkeypatch, forced):
+    from dbt.cli.main import dbtRunner  # pylint: disable=import-outside-toplevel
+
+    store, client, config, context, build, _snapshots, values = matching_preparation
+    monkeypatch.setattr(reuse_runtime, "REUSE_ENABLED", True)
+    _descriptor, manifest, _provenance = reuse_runtime.load_deployment(client, config, build.descriptor)
+    model = next(
+        model for model in reuse.describe_models(json.loads(manifest), context) if model.unique_id == build.model_id
+    )
+    original = store.sql
+
+    def observed(statement, args=None):
+        if "`system`.`access`.`table_lineage`" in statement:
+            return state_tests.Rows([{"catalog": "raw", "schema": "sales", "identifier": "hidden", "path": None}])
+        return original(statement, args=args)
+
+    monkeypatch.setattr(store, "sql", observed)
+    assert reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")["reason"] == "UNDECLARED_INPUT"
+    monkeypatch.setattr(store, "sql", original)
+    values["factory_force_rebuild"] = "true" if forced else "false"
+    calls = []
+    monkeypatch.setattr(dbtRunner, "invoke", lambda _runner, args: calls.append(args) or SimpleNamespace(success=True))
+    result = execute_notebook(values, store)
+    assert len(calls) == 1
+    assert result["model_run"].reason == "UNDECLARED_INPUT"
+    assert result["model_run"].publication is None

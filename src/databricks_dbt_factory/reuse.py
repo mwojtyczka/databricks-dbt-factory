@@ -174,7 +174,7 @@ def _relation(node):
 
 def _producer_key(relation: Relation) -> Relation:
     # UC identifiers are case insensitive; descriptors retain their original components.
-    return Relation(relation.catalog.casefold(), relation.schema.casefold(), relation.identifier.casefold())
+    return Relation(relation.catalog.lower(), relation.schema.lower(), relation.identifier.lower())
 
 
 def _definition_reason(node):
@@ -288,7 +288,8 @@ def describe_models(manifest, context: ExecutionContext | None) -> tuple[ModelDe
 
 
 def lineage_reason(model: ModelDescriptor, observed_inputs) -> str | None:
-    return "UNDECLARED_INPUT" if set(observed_inputs) - set(model.inputs + model.views) else None
+    declared = {_producer_key(relation) for relation in model.inputs + model.views}
+    return "UNDECLARED_INPUT" if any(_producer_key(relation) not in declared for relation in observed_inputs) else None
 
 
 def _observed_relations(items, *, views=False):

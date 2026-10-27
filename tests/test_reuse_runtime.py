@@ -395,6 +395,10 @@ class StateSQL:
         if statement.startswith("CREATE"):
             return Rows([])
         selected = list(rows.values())
+        if "get_json_object" in statement:
+            return Rows(
+                [row for row in selected if json.loads(row["evidence"]).get("lineage_key") == args["lineage_key"]]
+            )
         if "key" in args:
             selected = [row for row in selected if row["key"] == args["key"]]
         else:
@@ -669,3 +673,219 @@ def test_relation_snapshots_reject_mixed_or_unavailable_observations(damage):
             relation, "uc-id", "delta-id", 3
         )
         assert len(commands) == 3
+
+
+@pytest.fixture
+def lineage_model(evidence):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+    from databricks_dbt_factory.reuse import describe_models  # pylint: disable=import-outside-toplevel
+
+    _store, client, config, context, build = evidence
+    manifest = reuse_runtime.load_deployment(client, config, build.descriptor)[1]
+    return next(model for model in describe_models(json.loads(manifest), context) if model.unique_id == build.model_id)
+
+
+@pytest.fixture
+def lineage_observations(evidence, monkeypatch):
+    store = evidence[0]
+    observations = {"rows": [], "targets": [], "unavailable": False}
+    original_sql = store.sql
+
+    def sql(statement, args=None):
+        if "`system`.`access`.`table_lineage`" in statement:
+            assert "event_date >=" in statement
+            observations["targets"].append(args)
+            if observations["unavailable"]:
+                raise OSError("lineage unavailable")
+            return Rows(observations["rows"])
+        return original_sql(statement, args=args)
+
+    monkeypatch.setattr(store, "sql", sql)
+    return observations
+
+
+@pytest.mark.parametrize("scenario", ["hidden", "declared", "historical", "empty", "unavailable", "path"])
+def test_lineage_blocks_undeclared_inputs_and_retains_history(evidence, lineage_model, lineage_observations, scenario):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, _client, config, context, _build = evidence
+    model = lineage_model
+    hidden = {"catalog": "raw", "schema": "sales", "identifier": "hidden.with.dot", "path": None}
+    observations = lineage_observations["rows"]
+    observations[:] = [] if scenario == "empty" else [hidden]
+    lineage_observations["unavailable"] = scenario == "unavailable"
+    if scenario == "declared":
+        model = replace(model, inputs=(*model.inputs, reuse_runtime.Relation("RAW", "SALES", "hidden.with.dot")))
+    if scenario == "path":
+        observations[:] = [{"catalog": None, "schema": None, "identifier": None, "path": "s3://bucket/raw"}]
+    before = model.dependencies
+    result = reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")
+    assert model.dependencies == before
+    assert lineage_observations["targets"] == [{key: value.lower() for key, value in asdict(model.output).items()}]
+    assert (
+        result["reason"]
+        == {
+            "hidden": "UNDECLARED_INPUT",
+            "historical": "UNDECLARED_INPUT",
+            "path": "UNDECLARED_INPUT",
+            "declared": None,
+            "empty": None,
+            "unavailable": "LINEAGE_UNAVAILABLE",
+        }[scenario]
+    )
+    if scenario not in {"historical", "hidden", "path"}:
+        return
+    observations.clear()
+    retained = reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")
+    assert retained["reason"] == "UNDECLARED_INPUT"
+    assert retained["blockers"] == result["blockers"]
+    if scenario != "path":
+        reviewed = replace(model, inputs=(*model.inputs, reuse_runtime.Relation("raw", "sales", "hidden.with.dot")))
+        assert reuse_runtime.prepare_lineage(store, config, context, reviewed, job_id="job")["reason"] is None
+        assert (
+            reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")["reason"] == "UNDECLARED_INPUT"
+        )
+
+
+@pytest.mark.parametrize("changed", ["rename", "output-case", "deployment", "job"])
+def test_retained_lineage_binding_and_declared_views(evidence, lineage_model, lineage_observations, changed):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, _client, config, context, _build = evidence
+    hidden = [{"catalog": "raw", "schema": "sales", "identifier": f"hidden_{i}", "path": None} for i in range(4)]
+    lineage_observations["rows"][:] = hidden
+    assert reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job")["blockers"] == hidden
+    lineage_observations["rows"].clear()
+    model = lineage_model
+    if changed == "rename":
+        model = replace(model, unique_id="model.probe.renamed")
+    elif changed == "output-case":
+        model = replace(model, output=Relation(*(value.upper() for value in asdict(model.output).values())))
+    elif changed == "deployment":
+        context = ExecutionContext.from_dict(
+            json.loads(context.canonical_json) | {"vars": {"release": "new-deployment"}}
+        )
+    job_id = "other-job" if changed == "job" else "job"
+    result = reuse_runtime.prepare_lineage(store, config, context, model, job_id=job_id)
+    assert result["blockers"] == ([] if changed == "job" else hidden)
+    model = replace(
+        model, views=tuple(Relation(value["catalog"], value["schema"], value["identifier"]) for value in hidden)
+    )
+    assert reuse_runtime.prepare_lineage(store, config, context, model, job_id=job_id)["reason"] is None
+    assert lineage_observations["targets"][-4:] == [asdict(view) for view in model.views]
+    assert model.dependencies == lineage_model.dependencies
+
+
+@pytest.mark.parametrize("damage", ["partial", "marker", "write", "view-outage"])
+def test_lineage_incomplete_evidence_disables_reuse(evidence, lineage_model, lineage_observations, monkeypatch, damage):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, _client, config, context, _build = evidence
+    lineage_observations["rows"][:] = [{"catalog": "raw", "schema": "sales", "identifier": "hidden", "path": None}]
+    if damage == "partial":
+        lineage_observations["rows"][0]["schema"] = None
+    elif damage == "write":
+        original_sql = store.sql
+
+        def sql(statement, args=None):
+            if statement.startswith("MERGE"):
+                raise OSError("write denied")
+            return original_sql(statement, args=args)
+
+        monkeypatch.setattr(store, "sql", sql)
+    else:
+        assert (
+            reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job")["reason"]
+            == "UNDECLARED_INPUT"
+        )
+        if damage == "marker":
+            row = next(iter(next(iter(store.tables.values())).values()))
+            row["evidence"] = json.dumps(json.loads(row["evidence"]) | {"kind": "invalid"})
+        else:
+            lineage_observations["unavailable"] = True
+            lineage_model = replace(lineage_model, views=(Relation("raw", "sales", "view"),))
+    result = reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job")
+    assert (
+        result["reason"]
+        == {
+            "partial": "LINEAGE_INCOMPLETE",
+            "marker": "LINEAGE_STATE_INCOMPLETE",
+            "write": "STATE_UNAVAILABLE",
+            "view-outage": "LINEAGE_UNAVAILABLE",
+        }[damage]
+    )
+
+
+def test_preparation_publishes_lineage_veto_without_baseline(evidence, captured, lineage_observations, monkeypatch):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, client, config, _context, build = evidence
+    lineage_observations["rows"][:] = [{"catalog": "raw", "schema": "sales", "identifier": "hidden", "path": None}]
+    monkeypatch.setattr(reuse_runtime, "verify_runtime_identity", lambda *_args: None)
+    result = reuse_runtime.prepare_run(
+        store,
+        client,
+        config,
+        build.descriptor,
+        captured[0],
+        captured[1],
+        Attempt("job", "run", "prepare", 0),
+        model_ids=[build.model_id],
+    )
+    pointer = reuse_runtime.publish_preparation(client, config, result)
+    decision = json.loads(download_artifact(client, **pointer))["models"][build.model_id]
+    assert decision["reason"] == "UNDECLARED_INPUT"
+    assert decision["baseline"] is None
+    assert decision["lineage"]["blockers"] == lineage_observations["rows"]
+    assert not result["comparisons"]
+
+
+def test_lineage_checks_view_inputs_without_adding_dependencies(evidence, lineage_model, monkeypatch):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, _client, config, context, _build = evidence
+    view = Relation("raw", "sales", "declared_view")
+    hidden = {"catalog": "raw", "schema": "sales", "identifier": "hidden", "path": "s3://backing/path"}
+    model = replace(lineage_model, views=(view,))
+    original_sql = store.sql
+
+    def sql(statement, args=None):
+        if "`system`.`access`.`table_lineage`" in statement:
+            if args == asdict(view):
+                return Rows([hidden])
+            return Rows([asdict(view) | {"path": None}])
+        return original_sql(statement, args=args)
+
+    monkeypatch.setattr(store, "sql", sql)
+    result = reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")
+    assert result == {"reason": "UNDECLARED_INPUT", "blockers": [hidden | {"path": None}]}
+    assert model.dependencies == lineage_model.dependencies
+    reviewed = replace(model, inputs=(*model.inputs, Relation("raw", "sales", "hidden")))
+    assert reuse_runtime.prepare_lineage(store, config, context, reviewed, job_id="job")["reason"] is None
+
+
+def test_known_lineage_blocker_does_not_repeat_state_writes(evidence, lineage_model, lineage_observations):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, _client, config, context, _build = evidence
+    lineage_observations["rows"][:] = [{"catalog": "raw", "schema": "sales", "identifier": "hidden", "path": None}]
+    first = reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job")
+    writes = sum(statement.startswith("MERGE") for statement, _args in store.calls)
+    assert writes == 1
+    assert reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job") == first
+    assert sum(statement.startswith("MERGE") for statement, _args in store.calls) == writes
+
+
+def test_lineage_policy_compares_physical_names_without_case(lineage_model):
+    from databricks_dbt_factory.reuse import lineage_reason  # pylint: disable=import-outside-toplevel
+
+    upper = tuple(Relation(*(value.upper() for value in asdict(item).values())) for item in lineage_model.inputs)
+    assert upper and upper != lineage_model.inputs
+    assert lineage_reason(lineage_model, upper) is None
+
+
+def test_lineage_does_not_merge_distinct_lowercase_identifiers(lineage_model):
+    from databricks_dbt_factory.reuse import lineage_reason  # pylint: disable=import-outside-toplevel
+
+    model = replace(lineage_model, inputs=(Relation("raw", "sales", "straße"),), views=())
+    assert lineage_reason(model, (Relation("raw", "sales", "STRASSE"),)) == "UNDECLARED_INPUT"

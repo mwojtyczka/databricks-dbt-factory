@@ -195,3 +195,52 @@ preparation. Profile immutability/version binding remains an explicit release ch
 `reuse_runtime.REUSE_ENABLED` is **False**. Tasks 8–9 must establish lineage and repair/outage
 correctness before production skipping is enabled. No cloud resources were deployed for this
 checkpoint; complete-path serverless overhead, billing and savings still require Task 10.
+
+## Lineage veto checkpoint
+
+All **717 tests** and `make lint` pass, including isolated wheel/sdist builds and native dbt
+Core **1.12.5** / Databricks **1.12.7** fixtures. Serverless job `666011975098521`, run
+`907310529658101`, task run `533652377278530` finished with `SUCCESS` using profile
+`fevm-test-jg` and catalog `test_jg_catalog`. The harness removed its job and marked schema
+`factory_reuse_probe_1ceec374a070`. No classic compute was provisioned.
+[Structured lineage evidence](databricks-model-reuse-lineage.json) records the matching wheel
+digest, real blocker, storage checks and cleanup. The notebook used environment version 4,
+Python **3.12.3** and Spark **4.2.0**.
+
+Reproduce with a freshly built matching wheel and a new local output directory:
+
+```sh
+PYENV_VERSION=3.10.20 hatch build -t wheel
+.venv/bin/python tests/databricks/reuse_acceptance.py \
+  --profile fevm-test-jg --catalog test_jg_catalog \
+  --warehouse-id 7b8cc32a9eba1da3 \
+  --directory /tmp/factory-lineage-probe-unique \
+  --scenario state --factory-wheel dist/databricks_dbt_factory-0.4.0-py3-none-any.whl
+```
+
+Preparation queries `system.access.table_lineage` for each opted-in output and declared
+view, using a 365-day date filter and separately bound catalog/schema/table components.
+Observed inputs outside the declared closure veto reuse without adding scheduling edges.
+Complete table components identify registered tables even when `source_path` contains their
+backing storage location. Path-only observations block reuse; v1 has no path declaration or
+ignore-list. Empty lineage supplies no completeness guarantee.
+
+Immutable blocker markers share the decisions Delta table. They bind to the execution scope
+and normalized physical output rather than the model ID or deployment digest, so a model
+rename or new deployment cannot discard known observations. Explicit declarations satisfy
+retained markers; removing a declaration blocks reuse again. Preparation avoids repeated
+MERGEs for markers it has already verified. Model tasks reread retained blockers before
+accepting preparation evidence or publishing a successful build, including forced runs.
+
+Controlled SQL/SDK checks cover undeclared/declared inputs, view dependencies, case and dotted
+identifiers, multiple retained blockers, renamed models, changed deployment context, path
+observations, partial metadata, corrupt marker content and read/write outages. Notebook checks
+prove an old preparation pointer cannot authorize skipping after a blocker is recorded and
+that normal dbt execution still occurs. Native UC identifier checks distinguish names that
+Unicode case folding would incorrectly merge. No lineage edge changes the generated dbt graph.
+
+Production reuse remains disabled. The live lineage probe uses existing system-table observations
+because fresh-event ingestion is asynchronous, with writes confined to the harness-owned scratch schema.
+Its empty-event check controls only the system-table boundary and verifies persistence against
+real Delta storage. It does not establish a complete fresh-build-to-lineage-to-skip Lakeflow path;
+Task 10 retains that acceptance scenario and the full overhead/savings measurement.

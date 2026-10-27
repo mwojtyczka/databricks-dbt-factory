@@ -245,12 +245,14 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 ## Task 8: Add lineage-based ineligibility without changing the dbt graph
 
-**Files:** Extend `reuse_runtime.py`, `reuse_prepare.py`, `tests/test_reuse_runtime.py`, `tests/databricks/reuse_acceptance.py`.
+**Files:** Extend `reuse.py`, `reuse_runtime.py`, `tests/test_reuse_runtime.py`, `tests/integration/test_notebook_reuse.py` and `tests/databricks/state_probe.py`.
 
-- [ ] Write failing cases for an observed undeclared input, a declared extra input, an old edge needing review, empty lineage, and unavailable lineage metadata. Verify that no discovered edge is silently added to scheduling.
-- [ ] Read filtered UC lineage during preparation and compare known inputs with the declared dependency closure. Persist blocking observations in decision evidence; a known blocker cannot disappear merely because the system-table retention window advanced. Clear it when a reviewed deployment explicitly declares the dependency. A historical edge is reviewed before it is declared; v1 adds no automatic expiry or ignore-list bypass.
-- [ ] Unavailable optimization metadata disables reuse for affected models and reports the reason. Empty lineage does not establish completeness; model opt-in/declarations remain required. If a declared extra input is produced by this job, Task 6's explicit edge is mandatory.
-- [ ] Verify: `hatch run pytest tests/test_reuse_runtime.py -v` and the live hidden-input scenario. Commit: `feat: disable model reuse for undeclared lineage inputs`.
+- [x] Write failing cases for an observed undeclared input, a declared extra input, an old edge needing review, empty lineage, and unavailable lineage metadata. Verify that no discovered edge is silently added to scheduling.
+- [x] Read filtered UC lineage during preparation and compare known inputs with the declared dependency closure. Persist blocking observations in decision evidence; a known blocker cannot disappear merely because the system-table retention window advanced. Clear it when a reviewed deployment explicitly declares the dependency. A historical edge is reviewed before it is declared; v1 adds no automatic expiry or ignore-list bypass.
+- [x] Unavailable optimization metadata disables reuse for affected models and reports the reason. Empty lineage does not establish completeness; model opt-in/declarations remain required. If a declared extra input is produced by this job, Task 6's explicit edge is mandatory.
+- [x] Verify: `hatch run pytest tests/test_reuse_runtime.py -v` and the live hidden-input scenario. Commit: `feat: disable model reuse for undeclared lineage inputs`.
+
+**Validation:** All **717 tests** and `make lint` pass. Serverless run `907310529658101` succeeded with the matching wheel; the harness removed its job and marked scratch schema. The live probe checks existing UC hidden-input observations and real Delta persistence, with the empty-event boundary controlled. Fresh-build lineage ingestion and complete Lakeflow skip acceptance remain in Task 10. See [lineage evidence](../validation/databricks-model-reuse.md#lineage-veto-checkpoint). Production reuse remains disabled.
 
 **Exit:** Additional lineage makes reuse more conservative and explainable, without becoming an alternate compiler or scheduler.
 

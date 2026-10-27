@@ -11,12 +11,13 @@ import time
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.runtime import dbutils, spark
 
 from databricks_dbt_factory.__version__ import __version__
-from databricks_dbt_factory.reuse import Relation, ReuseConfig
+from databricks_dbt_factory.reuse import Relation, ReuseConfig, describe_models
 from databricks_dbt_factory.reuse_prepare import capture_parse, read_provenance
 from databricks_dbt_factory.reuse_runtime import (
     Attempt,
@@ -25,6 +26,7 @@ from databricks_dbt_factory.reuse_runtime import (
     claim_owner,
     initialize_state,
     prepare_bundle,
+    prepare_lineage,
     publish_artifacts,
     quote_relation,
     read_build,
@@ -73,6 +75,51 @@ def expect_unavailable(function):
     except EvidenceUnavailable as error:
         return str(error)
     raise AssertionError("expected unavailable evidence")
+
+
+def run_lineage_checks(context, model):
+    # Match the native lower() filter without merging distinct Unicode names.
+    for name in ("straße", "STRASSE"):
+        spark.sql(f"CREATE VIEW {sql_table(name)} AS SELECT 1 AS id").collect()
+    assert w.tables.get(f"{catalog}.{schema}.straße").table_id != w.tables.get(f"{catalog}.{schema}.STRASSE").table_id
+    # Historical metadata avoids relying on asynchronous ingestion of fresh CTAS events.
+    # Only scratch state is written; the observed relations are never claimed or modified.
+    sample = spark.sql(
+        "SELECT target_table_catalog AS catalog, target_table_schema AS schema, target_table_name AS identifier "
+        "FROM system.access.table_lineage WHERE event_date >= date_sub(current_date(), 365) "
+        "AND target_table_catalog = :catalog AND target_table_schema <> :schema "
+        "AND source_table_catalog IS NOT NULL AND source_table_schema IS NOT NULL "
+        "AND source_table_name IS NOT NULL AND target_table_name IS NOT NULL LIMIT 1",
+        args={"catalog": catalog, "schema": schema},
+    ).first()
+    assert sample is not None, "live lineage check requires an existing table-to-table observation in the catalog"
+    model = replace(model, output=Relation.from_dict(sample.asDict(), "lineage target"), inputs=(), views=())
+    observed = prepare_lineage(spark, config, context, model, job_id=job_id)
+    assert observed["reason"] == "UNDECLARED_INPUT" and observed["blockers"], observed
+
+    def without_events(statement, args=None):
+        if "`system`.`access`.`table_lineage`" in statement:
+            return spark.sql("SELECT 1 WHERE false")
+        return spark.sql(statement, args=args)
+
+    retained = prepare_lineage(SimpleNamespace(sql=without_events), config, context, model, job_id=job_id)
+    assert retained == observed, "retained blockers must survive an empty system-table result"
+    assert all(value["path"] is None for value in retained["blockers"]), "path input cannot be declared in v1"
+    reviewed = replace(
+        model,
+        inputs=tuple(
+            Relation(value["catalog"], value["schema"], value["identifier"]) for value in retained["blockers"]
+        ),
+    )
+    assert prepare_lineage(spark, config, context, reviewed, job_id=job_id)["reason"] is None
+    assert prepare_lineage(spark, config, context, model, job_id=job_id)["reason"] == "UNDECLARED_INPUT"
+    report["checks"]["lineage"] = {
+        "scope": "existing UC observations, real scratch Delta persistence; empty event boundary controlled",
+        "target": asdict(model.output),
+        "blockers": observed["blockers"],
+        "explicit_declaration_satisfies_blocker": True,
+        "removing_declaration_blocks_again": True,
+    }
 
 
 def run_checks():
@@ -241,6 +288,8 @@ def run_checks():
     finally:
         spark.sql(f"ALTER TABLE {sql_table('saved_builds')} RENAME TO {sql_table('factory_reuse_builds')}").collect()
     assert spark.sql(f"SELECT count(*) FROM {sql_table('factory_reuse_builds')}").first()[0] == 1
+    model = next(model for model in describe_models(json.loads(manifest), context) if model.unique_id == build.model_id)
+    run_lineage_checks(context, model)
 
 
 started = time.monotonic()

@@ -144,6 +144,8 @@ class DbtFactory:
         assert self.reuse.context is not None
         ReuseConfig.from_dict(self.reuse.config)
         eligible = {model.unique_id for model in describe_models(manifest, self.reuse.context) if model.reason is None}
+        if eligible:
+            self._apply_reuse_variables(generated, json.loads(self.reuse.context.canonical_json)["vars"])
         bindings = {task.task_key: task.model_id for task in tasks if task.model_id in eligible}
         scoped = {task["task_key"]: bindings[task["task_key"]] for task in generated if task["task_key"] in bindings}
         if not scoped:
@@ -201,6 +203,21 @@ class DbtFactory:
             },
             *generated,
         ]
+
+    @staticmethod
+    def _apply_reuse_variables(generated: list[dict], variables: dict) -> None:
+        """Execution context survives metadata outages and applies to separate test tasks too."""
+        if not variables:
+            return
+        encoded = canonical_json(variables)
+        if DYNAMIC_VALUE_REFERENCE.search(encoded):
+            raise ValueError("reuse vars must be static; Databricks dynamic value reference found")
+        for task in generated:
+            if "notebook_task" not in task or "job_cluster_key" in task:
+                raise ValueError("reuse requires serverless notebook tasks")
+            parameters = task["notebook_task"]["base_parameters"]
+            parameters["factory_dbt_vars"] = encoded
+            validate_notebook_parameters(task["task_key"], parameters)
 
     _GATEABLE_TYPES = frozenset({"model", "seed", "snapshot"})
     _DBT_TEST_TARGET_PREFIXES = _DBT_TEST_TARGET_PREFIXES

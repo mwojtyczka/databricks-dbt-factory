@@ -160,3 +160,38 @@ relative/absolute notebook placement cannot silently modify the captured deploym
 Model tasks still execute normal dbt. Fresh build publication and reuse before dbt initialization
 remain pending. No new Databricks resources were deployed, and no runtime overhead or savings
 were measured at this checkpoint.
+
+
+## Runtime runner checkpoint
+
+All **696 tests** and `make lint` pass, including native selection/state comparisons and isolated
+wheel/sdist builds. The runner/policy suite contributes **48 checks**.
+
+The shipped runner evaluates live reuse evidence before importing dbt or creating its private
+artifact/log directory. An import guard on the complete notebook proves the unchanged-model
+path finishes successfully without importing dbt. It records a separate decision and leaves the
+original successful build intact. Test tasks still execute independently in the generated graph.
+
+Misses use a fresh native dbt parse, verify its graph against the captured manifest, and inject
+that parsed manifest into the model runner. Captured non-secret vars reach parse and every generated model/test task through task parameters,
+including partitions without reusable models. Artifact outages retain those execution vars.
+Only the exact generated run/selector/target command, optionally with full-refresh, can publish
+reusable evidence; unsupported flags execute normally. Force and full-refresh always execute.
+
+Controlled SDK/Spark boundaries exercise missing/stale/unavailable preparation, per-model baseline
+binding, input and output identities/versions, view definitions, changed deployment files and
+profiles, malformed preparation, and preparation values that cannot authorize skipping. Successful
+model invocations publish only actual model-result artifacts with stable before/after observations.
+Failed/cancelled/wrong-model and unstable-input cases retain the earlier build. Credentials and
+private directories are cleaned on success and failure. Native parse and injected-manifest selection
+are checked with dbt Core **1.12.5** / dbt Databricks **1.12.7**; warehouse model execution is controlled
+in these local tests.
+
+Profiles stay outside the content-verified project. The miss path detects profile graph drift;
+the pre-import path relies on preparation and model tasks sharing the deployed profile and declared
+non-secret version identifiers. It does not independently detect an out-of-band profile edit after
+preparation. Profile immutability/version binding remains an explicit release check for Tasks 8–9.
+
+`reuse_runtime.REUSE_ENABLED` is **False**. Tasks 8–9 must establish lineage and repair/outage
+correctness before production skipping is enabled. No cloud resources were deployed for this
+checkpoint; complete-path serverless overhead, billing and savings still require Task 10.

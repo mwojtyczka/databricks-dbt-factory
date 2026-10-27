@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from graphlib import CycleError, TopologicalSorter
 
@@ -288,3 +289,59 @@ def describe_models(manifest, context: ExecutionContext | None) -> tuple[ModelDe
 
 def lineage_reason(model: ModelDescriptor, observed_inputs) -> str | None:
     return "UNDECLARED_INPUT" if set(observed_inputs) - set(model.inputs + model.views) else None
+
+
+def _observed_relations(items, *, views=False):
+    if not isinstance(items, list):
+        raise ValueError("evidence observations must be a list")
+    relations, observations = set(), []
+    for item in items:
+        fields = ("relation", "uc_id", "definition_sha256") if views else ("relation", "uc_id", "delta_id", "version")
+        _object(item, fields, "data evidence")
+        relation = Relation.from_dict(item["relation"], "data evidence")
+        if relation in relations:
+            raise ValueError("duplicate evidence relation")
+        relations.add(relation)
+        _text(item["uc_id"], "data evidence UC identity")
+        if views:
+            if not isinstance(item["definition_sha256"], str) or not re.fullmatch(
+                r"[0-9a-f]{64}", item["definition_sha256"]
+            ):
+                raise ValueError("missing view definition digest")
+        else:
+            _text(item["delta_id"], "data evidence Delta identity")
+            if not isinstance(item["version"], int) or isinstance(item["version"], bool) or item["version"] < 0:
+                raise ValueError("missing Delta version")
+        observations.append(canonical_json(item))
+    return tuple(sorted(observations))
+
+
+def _data_evidence(value):
+    _object(value, ("complete", "inputs", "views", "output"), "data evidence")
+    if value["complete"] is not True:
+        raise ValueError("incomplete data evidence")
+    return (
+        _observed_relations(value["inputs"]),
+        _observed_relations(value["views"], views=True),
+        _observed_relations([value["output"]]),
+    )
+
+
+def reuse_reason(build, current, code_unchanged, context_unchanged, forced) -> str:
+    """Only complete, validated physical observations can authorize reuse."""
+    if forced is True:
+        return "FORCED"
+    if build is None:
+        return "NO_BASELINE"
+    if context_unchanged is not True:
+        return "CONTEXT_CHANGED"
+    if code_unchanged is not True:
+        return "CODE_CHANGED"
+    try:
+        before, after = _data_evidence(build), _data_evidence(current)
+    except (KeyError, TypeError, ValueError):
+        return "EVIDENCE_INCOMPLETE"
+    for old, new, reason in zip(before, after, ("INPUT_CHANGED", "DEFINITION_CHANGED", "OUTPUT_CHANGED")):
+        if old != new:
+            return reason
+    return "REUSED"

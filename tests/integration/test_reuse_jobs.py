@@ -240,3 +240,38 @@ def test_declared_graph_errors_are_refused_before_partitioning(reuse_graph, tmp_
     manifest, _ = capture_parse(project, profiles, identity=IDENTITY, target="dev", deployment_ref="invalid")
     with pytest.raises(ValueError, match="reuse dependency cycle|ambiguous output relation"):
         factory(reuse_graph[1]).create_partitions(json.loads(manifest), ["batch"])
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_captured_vars_reach_every_model_and_test_task(reuse_graph, split):
+    from databricks_dbt_factory.reuse import ExecutionContext  # pylint: disable=import-outside-toplevel
+
+    manifest, settings = reuse_graph
+    context = json.loads(settings.context.canonical_json) | {"vars": {"batch": 42}}
+    settings = replace(settings, context=ExecutionContext.from_dict(context))
+    generated = factory(settings)
+    tasks = (
+        [task for partition in generated.create_partitions(manifest, ["silver"]) for task in partition.tasks]
+        if split
+        else generated.create_tasks(manifest)
+    )
+    for task in tasks:
+        if "factory_reuse_models" not in task["notebook_task"]["base_parameters"]:
+            assert json.loads(task["notebook_task"]["base_parameters"]["factory_dbt_vars"]) == {"batch": 42}
+
+
+@pytest.mark.parametrize("invalid", ["native", "dynamic"])
+def test_captured_vars_reject_unsafe_task_parameters(reuse_graph, invalid):
+    from databricks_dbt_factory.reuse import ExecutionContext  # pylint: disable=import-outside-toplevel
+    from databricks_dbt_factory.dbt_task import TaskType  # pylint: disable=import-outside-toplevel
+
+    manifest, settings = reuse_graph
+    context = json.loads(settings.context.canonical_json) | {
+        "vars": {"batch": "{{job.id}}" if invalid == "dynamic" else 42}
+    }
+    generated = factory(replace(settings, context=ExecutionContext.from_dict(context)))
+    if invalid == "native":
+        for task_factory in generated.task_factories.values():
+            task_factory.task_options = replace(task_factory.task_options, task_type=TaskType.DBT)
+    with pytest.raises(ValueError, match="serverless notebook" if invalid == "native" else "vars must be static"):
+        generated.create_tasks(manifest)

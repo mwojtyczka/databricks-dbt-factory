@@ -202,10 +202,10 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 ## Task 7: Enable the reuse check before dbt initialization
 
-**Files:** Modify `reuse.py`, `reuse_runtime.py`, `notebook/run_dbt_command.py`; create `tests/integration/test_notebook_reuse.py`.
+**Files:** Modify `reuse.py`, `reuse_runtime.py`, `reuse_prepare.py`, `dbt_factory.py`, `notebook/run_dbt_command.py` and `tests/integration/test_reuse_jobs.py`; create `tests/integration/test_notebook_reuse.py`.
 
-- [ ] Specify the pure `reuse_reason` contract `(build, current, code_unchanged, context_unchanged, forced) -> reason`. A complete matching evidence record returns `REUSED`; missing state returns `NO_BASELINE`; changed context/code/input/output or force returns a normal-execution reason. Evidence records include explicit identities, versions and completeness, rather than relying on truthiness of partial dictionaries.
-- [ ] Write and run the failing pure-policy checks before implementing that function:
+- [x] Specify the pure `reuse_reason` contract `(build, current, code_unchanged, context_unchanged, forced) -> reason`. A complete matching evidence record returns `REUSED`; missing state returns `NO_BASELINE`; changed context/code/input/output or force returns a normal-execution reason. Evidence records include explicit identities, versions and completeness, rather than relying on truthiness of partial dictionaries.
+- [x] Write and run the failing pure-policy checks before implementing that function:
 
   ```python
   assert reuse_reason(None, current, True, True, False) == "NO_BASELINE"
@@ -216,7 +216,7 @@ For definition-backed dependencies, store a separate definition digest and the r
   ```
 
   Construct `build` and `current` as complete matching input/output identity/version records using Task 4's contract; one-field input/output identity/version mutations must change the decision. Implement only the branches covered by these evidence scenarios and the specified fallbacks.
-- [ ] Write the central failing check by executing the shipped notebook with matching evidence and an import guard:
+- [x] Write the central failing check by executing the shipped notebook with matching evidence and an import guard:
 
   ```python
   import builtins
@@ -230,12 +230,18 @@ For definition-backed dependencies, store a separate definition digest and the r
   ```
 
   Provide notebook widget/context stubs using the existing shipped-notebook test pattern. Assert successful notebook completion, a `REUSED` decision, and no model execution. This checks the actual import boundary, not just a policy helper.
-- [ ] Move the runner's dbt import/injection/initialization after reuse evaluation. Preserve project resolution, authentication and per-task artifact isolation. Keep the SDK/Spark metadata path independent of dbt. On reuse, finish the model task successfully; do not use a skipped status or fabricate `run_results.json`.
-- [ ] On a miss, snapshot inputs immediately before dbt invocation and again after successful execution, then snapshot output. Publish eligible evidence only for stable inputs and matching deployment/context. An input changing during the build records `INPUT_CHANGED_DURING_BUILD`, finishes normal execution, and forces the next invocation to rebuild.
-- [ ] Publish build evidence before subsequent tests determine their own result; tests remain separate tasks. Failed/cancelled model invocations publish no success. Retain existing exception reporting and credential/temp-directory cleanup on all paths.
-- [ ] Verify: `hatch run pytest tests/integration/test_notebook_reuse.py -v`. Commit: `feat: reuse unchanged models without initializing dbt`.
+- [x] Move the runner's dbt import/injection/initialization after reuse evaluation. Preserve project resolution, authentication and per-task artifact isolation. Keep the SDK/Spark metadata path independent of dbt. On reuse, finish the model task successfully; do not use a skipped status or fabricate `run_results.json`.
+- [x] On a miss, snapshot inputs immediately before dbt invocation and again after successful execution, then snapshot output. Publish eligible evidence only for stable inputs and matching deployment/context. An input changing during the build records `INPUT_CHANGED_DURING_BUILD`, finishes normal execution, and forces the next invocation to rebuild.
+- [x] Publish build evidence before subsequent tests determine their own result; tests remain separate tasks. Failed/cancelled model invocations publish no success. Retain existing exception reporting and credential/temp-directory cleanup on all paths.
+- [x] Verify: `hatch run pytest tests/integration/test_notebook_reuse.py -v`. Commit: `feat: reuse unchanged models without initializing dbt`.
 
-**Exit:** A second unchanged invocation can avoid model execution without importing dbt, and a failed data test does not erase valid model evidence.
+**Validation:** All **696 tests** and `make lint` pass, including isolated packaging and installed-engine selection/state comparisons.
+
+**Runtime checkpoint:** The shipped notebook can avoid model execution without importing dbt under controlled SDK/Spark evidence. Fresh native parsing binds successful model evidence to the captured graph; captured vars reach the actual invocation. Only the exact generated model command with optional full-refresh is eligible; other options execute without publishing reusable evidence. Reuse decisions do not write builds, and tests remain separate tasks.
+
+**Release gate:** `reuse_runtime.REUSE_ENABLED` remains `False` until Tasks 8–9 establish lineage and repair/outage correctness. The import-guard test enables this internal gate only within the test. No live reuse deployment, overhead measurement or savings claim is made here. See [runtime evidence](../validation/databricks-model-reuse.md#runtime-runner-checkpoint).
+
+**Exit:** A controlled second unchanged invocation avoids model execution without importing dbt. Model successes are retained independently of subsequent test results; production skipping remains gated.
 
 ## Task 8: Add lineage-based ineligibility without changing the dbt graph
 
@@ -249,6 +255,8 @@ For definition-backed dependencies, store a separate definition digest and the r
 **Exit:** Additional lineage makes reuse more conservative and explainable, without becoming an alternate compiler or scheduler.
 
 ## Task 9: Prove retries, repairs and optimization outages preserve execution
+
+- [ ] Establish immutable profile deployment/version binding between preparation and model tasks. The pre-import path cannot infer an out-of-band profile edit without dbt; keep production skipping disabled until this contract is enforced.
 
 **Files:** Extend `tests/integration/test_notebook_reuse.py`, `tests/test_reuse_runtime.py`, `tests/databricks/reuse_acceptance.py`; change only production branches exposed by these checks.
 

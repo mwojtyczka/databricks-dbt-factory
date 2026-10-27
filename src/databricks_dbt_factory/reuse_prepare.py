@@ -179,6 +179,12 @@ def _parse_graph(manifest):
     }
 
 
+def verify_parsed_manifest(parsed: dict, manifest: bytes) -> None:
+    """Bind a fresh native parse to the captured deployment graph."""
+    if _parse_graph(parsed) != _parse_graph(json.loads(manifest)):
+        raise ValueError("reuse preparation fresh parse differs from deployment; verify profiles, vars and environment")
+
+
 def _native_modified(project, profiles, context, baseline, environment, manifest):
     """Ask dbt itself; baseline artifacts and current output must never share a directory."""
     with tempfile.TemporaryDirectory(prefix="factory-reuse-state-") as directory:
@@ -232,10 +238,7 @@ def _native_modified(project, profiles, context, baseline, environment, manifest
         if not (root / "current" / "manifest.json").is_file():
             return None, diagnostics
         parsed = json.loads((root / "current" / "manifest.json").read_bytes())
-        if _parse_graph(parsed) != _parse_graph(json.loads(manifest)):
-            raise ValueError(
-                "reuse preparation fresh parse differs from deployment; verify profiles, vars and environment"
-            )
+        verify_parsed_manifest(parsed, manifest)
         return changed, diagnostics
 
 

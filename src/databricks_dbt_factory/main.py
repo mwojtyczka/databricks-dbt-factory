@@ -1,7 +1,9 @@
 import argparse
 import hashlib
+import json
 import os
 import shlex
+import sys
 from dataclasses import asdict, dataclass
 from importlib import resources
 from pathlib import Path
@@ -9,6 +11,8 @@ from pathlib import Path
 from databricks_dbt_factory.__version__ import __version__
 from databricks_dbt_factory.dbt_factory import DbtFactory
 from databricks_dbt_factory.file_io import atomic_write_bytes
+from databricks_dbt_factory.reuse import ReuseConfig, describe_models
+from databricks_dbt_factory.reuse_prepare import read_provenance
 from databricks_dbt_factory.job_spec import (
     JobSpecArtifact,
     prepare_job_spec,
@@ -177,6 +181,8 @@ def _prepare_generated_artifacts(
 ) -> tuple[list, JobSpecArtifact | None]:
     """Generates tasks, or one job of tasks per split tag, and prepares the job spec without publishing files."""
     manifest = read_dbt_manifest(args.dbt_manifest_path)
+    if args.reuse_config:
+        _validate_reuse_inputs(args, manifest)
     if args.split_by_tag:
         generated = factory.create_partitions(manifest, args.split_by_tag)
     else:
@@ -194,6 +200,39 @@ def _prepare_generated_artifacts(
     )
     _validate_artifact_destinations(output_plan.runner_artifact, job_spec_artifact)
     return generated, job_spec_artifact
+
+
+def _validate_reuse_inputs(args: argparse.Namespace, manifest: dict) -> None:
+    """Validate declarations without emitting skip decisions or changing the task graph."""
+    config = ReuseConfig.from_dict(json.loads(Path(args.reuse_config).read_text(encoding="utf-8")))
+    context = None
+    provenance_bytes = None
+    if args.reuse_provenance:
+        try:
+            provenance_bytes = Path(args.reuse_provenance).read_bytes()
+        except OSError:
+            pass  # An unavailable optimization artifact permits ordinary execution.
+    if provenance_bytes is not None:
+        manifest_bytes = Path(args.dbt_manifest_path).read_bytes()
+        if json.loads(manifest_bytes) != manifest:
+            raise ValueError("reuse manifest changed during generation; regenerate from one immutable artifact")
+        provenance = read_provenance(provenance_bytes, manifest_bytes)
+        payload = json.loads(provenance.context.canonical_json)
+        if (payload["project_id"], payload["environment"]) != (config.project_id, config.environment):
+            raise ValueError("reuse provenance project/environment mismatch with reuse config")
+        if args.target is not None and args.target != payload["target"]:
+            raise ValueError("reuse provenance target mismatch with --target")
+        if args.target is not None and not args.enable_dbt_deps:
+            context = provenance.context
+    descriptors = describe_models(manifest, context)
+    reasons = sorted({item.reason for item in descriptors if item.reason})
+    if context is None:
+        reasons = sorted(set(reasons) | {"CONTEXT_UNKNOWN"})
+    print(
+        f"Reuse declarations validated ({len(descriptors)} opted-in resources; reasons: {', '.join(reasons) or 'none'}). "
+        "Runtime reuse is not enabled; generated tasks execute normally.",
+        file=sys.stderr,
+    )
 
 
 def _publish_artifacts(runner_artifact: _RunnerArtifact | None, job_spec_artifact: JobSpecArtifact) -> None:
@@ -264,6 +303,10 @@ def parse_args():
         default=None,
     )
     parser.add_argument("--dbt-manifest-path", type=str, help="Path to the manifest file", required=True)
+    parser.add_argument(
+        "--reuse-config", help="JSON reuse configuration; validates declarations (runtime reuse pending)."
+    )
+    parser.add_argument("--reuse-provenance", help="JSON provenance captured with the supplied manifest's fresh parse.")
     parser.add_argument("--input-job-spec-path", type=str, help="Path to the input job spec file", required=True)
     parser.add_argument(
         "--target-job-spec-path",
@@ -400,6 +443,10 @@ def parse_args():
         help="Print the generated tasks, grouped by job with --split-by-tag, without updating the job spec file.",
     )
     args = parser.parse_args()
+    if args.reuse_provenance and not args.reuse_config:
+        parser.error("--reuse-provenance requires --reuse-config")
+    if args.reuse_config and (args.task_type != "notebook" or args.job_cluster_key):
+        parser.error("reuse requires serverless --task-type notebook; omit --job-cluster-key")
 
     # `--extra-dbt-command-options=--` parses to `[]` on Python 3.10 and to `'--'` on 3.12; both are in
     # the supported range and CI's matrix. Only the `=--` form gets here at all: a bare

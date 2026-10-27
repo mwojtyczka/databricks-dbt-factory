@@ -209,6 +209,53 @@ Keep the local bundle and result for recovery after a process interruption; insp
 run before manually destroying the bundle or removing scratch data. This is a primitive probe,
 not an acceptance test of implemented model reuse or a net-savings benchmark.
 
+### Reuse configuration and parse provenance
+
+`--reuse-config <json>` validates reuse declarations; `--reuse-provenance <json>` binds them to
+a captured manifest. Runtime reuse is pending: these flags currently generate ordinary tasks
+and print that limitation. Reuse requires serverless notebook tasks. Missing/unreadable provenance,
+an unspecified runtime target, or task-local `dbt deps` gives `CONTEXT_UNKNOWN`; a known manifest,
+target, or project/environment mismatch fails before publishing output.
+
+The configuration is a strict JSON object:
+
+```json
+{
+  "format_version": 1,
+  "project_id": "sales",
+  "environment": "prod",
+  "owner_key": "sales-job",
+  "state_catalog": "test_jg_catalog",
+  "state_schema": "factory_state",
+  "artifact_volume": {"catalog": "test_jg_catalog", "schema": "factory_state", "volume": "artifacts"}
+}
+```
+
+The build pipeline can call `reuse_prepare.capture_parse(snapshot, profiles, identity=identity,
+target="prod", deployment_ref=release_id)`. It returns manifest and provenance bytes from a fresh
+dbt parse in the calling Python environment. `identity` contains the trusted `project_id`,
+`environment`, `workspace_id`, `metastore_id`, and execution `principal`. Runtime verification of
+that declaration remains required before any reuse decision.
+
+Use a dedicated immutable deployment snapshot containing only project code/data and already
+installed, locked dbt packages. Keep credentials, profiles, generated artifacts, virtual
+environments and Git metadata outside it. Symlinks are refused; materialize local packages into
+the snapshot. Write the returned artifacts outside the snapshot. `verify_snapshot` checks its
+contents against provenance once during preparation; it is not intended for every model task.
+
+Optional `variables`, `environment_inputs` (an allowlist of environment variable names), and
+`secret_versions` must describe all result-affecting context. Vars and allowlisted values are
+caller-declared non-secret inputs. Never pass credentials or raw/hashed secrets in these fields.
+`DBT_ENV_SECRET_*` values are refused; use trustworthy non-secret version identifiers for
+result-affecting secrets. Undeclared context prevents safe reuse and remains the author's
+responsibility under the explicit model opt-in contract.
+
+Python and installed library versions belong to the context digest. Manifest/deployment digests
+are separate, allowing native per-model code comparison without invalidating every model for an
+unrelated source edit. SQL table models can be candidates; hooks, Python/custom/incremental
+outputs, and unverified view/ephemeral dependencies execute normally. Physical Delta identity,
+version and complete-input checks still have to pass at runtime.
+
 ## Troubleshooting
 
 If you encounter any package dependency errors after `git pull`, run `make clean`

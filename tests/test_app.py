@@ -20,6 +20,69 @@ from databricks_dbt_factory.task_factory import validate_extra_dbt_options
 BASE_PATH = str(Path(__file__).resolve().parent)
 
 
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        (["--task-type", "dbt", "--reuse-config", "config.json"], "reuse requires.*notebook"),
+        (["--job-cluster-key", "classic", "--reuse-config", "config.json"], "reuse requires serverless"),
+        (["--reuse-provenance", "provenance.json"], "reuse-provenance requires --reuse-config"),
+    ],
+)
+def test_reuse_cli_refuses_incompatible_execution(monkeypatch, capsys, tmp_path, options, message):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--dbt-manifest-path",
+            BASE_PATH + "/test_data/manifest.json",
+            "--input-job-spec-path",
+            BASE_PATH + "/test_data/job_definition_template.yaml",
+            "--target-job-spec-path",
+            str(tmp_path / "out.yml"),
+            *options,
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+    assert re.search(message, capsys.readouterr().err)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("missing_file", [False, True])
+def test_reuse_without_provenance_validates_config_and_preserves_ordinary_output(
+    monkeypatch, capsys, tmp_path, missing_file
+):
+    from tests.test_reuse import CONFIG  # pylint: disable=import-outside-toplevel
+
+    config = tmp_path / "reuse.json"
+    config.write_text(json.dumps(CONFIG))
+    target = tmp_path / "out.yml"
+    arguments = [
+        "main.py",
+        "--dbt-manifest-path",
+        BASE_PATH + "/test_data/manifest.json",
+        "--input-job-spec-path",
+        BASE_PATH + "/test_data/job_definition_template.yaml",
+        "--target-job-spec-path",
+        str(target),
+    ]
+    monkeypatch.setattr("sys.argv", arguments)
+    main()
+    expected = target.read_bytes()
+    options = ["--reuse-config", str(config)]
+    if missing_file:
+        options += ["--reuse-provenance", str(tmp_path / "missing.json")]
+    monkeypatch.setattr("sys.argv", [*arguments, *options])
+    main()
+    assert target.read_bytes() == expected
+    assert "CONTEXT_UNKNOWN" in capsys.readouterr().err
+    config.write_text('{"format_version": 99}')
+    with pytest.raises(SystemExit, match="reuse config"):
+        main()
+    assert target.read_bytes() == expected
+
+
 def prepare_runner_notebook(target: Path, project_directory: str | None):
     return main_module._prepare_runner_notebook(  # pylint: disable=protected-access
         target,

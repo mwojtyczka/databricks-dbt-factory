@@ -66,3 +66,17 @@ It does not establish permissions for a deployment service principal, concurrent
 snapshot isolation, race-free external writes, complete view dependency closure,
 or complete/eventually available lineage. Those remain implementation/acceptance
 contracts. The state store and skip decisions are the next implementation work.
+
+## Offline policy and provenance checkpoint
+
+Task 2 adds immutable configuration/context/model records, conservative eligibility,
+declared-input resolution, cycle checks, and fresh-parse provenance. Tests use real
+dbt Core 1.12.5 / dbt Databricks 1.12.7 manifests, including an installed package,
+Python/custom materializations and project hooks. They verify manifest/snapshot
+binding, context/artifact separation, the captured environment used by dbt, normal
+execution when provenance is unavailable, and rejection of known mismatches.
+
+All 523 unit/integration tests passed across the full run and the sandbox-exempt
+Hatch packaging rerun; `make lint` passed. The generator imports neither dbt nor
+the SDK. Runtime preparation and model-task integration are still pending, so
+the new CLI flags validate declarations and emit ordinary execution tasks.

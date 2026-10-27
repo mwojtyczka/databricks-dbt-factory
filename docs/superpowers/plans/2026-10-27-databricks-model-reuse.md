@@ -6,9 +6,9 @@
 
 **Architecture:** Add a preparation task to each generated job containing eligible models, followed by a reuse check in the existing notebook runner. Preparation uses public dbt artifacts and state selection; model tasks check current UC/Delta evidence before deciding to reuse or invoke dbt. Delta tables hold evidence and decisions, and a UC Volume holds immutable artifacts and preparation results.
 
-**Tech stack:** Python, the existing Factory package and Databricks SDK, native Spark SQL for Delta metadata/state operations, dbt's public invocation/artifact interfaces, Unity Catalog, and Lakeflow Jobs. dbt v1 and v2 run in separate environments.
+**Tech stack:** Python, the existing Factory package and Databricks SDK, native Spark SQL for Delta metadata/state operations, dbt's public invocation/artifact interfaces, Unity Catalog, and Lakeflow Jobs. Use the existing dbt v1 environment.
 
-**Scope:** This is a plan, not authorization to deploy or a claim that reuse is implemented. The source of requirements is [the approved design](../specs/2026-10-23-databricks-model-reuse-design.md). dbt 2.0 compatibility is a first-release acceptance requirement; native `dbt_task` remains available without reuse.
+**Scope:** This is a plan, not authorization to deploy or a claim that reuse is implemented. The source of requirements is [the approved design](../specs/2026-10-23-databricks-model-reuse-design.md). The first release targets the existing dbt v1 setup. Separate dbt 2.0 compatibility work, environments and CI checks are deferred; native `dbt_task` remains available without reuse.
 
 ---
 
@@ -22,9 +22,9 @@ Use Python for orchestration and policy, and Databricks SQL operations for metad
 | Rust | Can accelerate proven CPU-heavy local processing | Another build, wheel/native platform support, and language boundary | Consider only after profiling identifies Python CPU as material |
 | Scala | Direct JVM/Spark access | Additional packaging/runtime surface beside the Python/dbt runner | No measured benefit for this feature |
 
-There is no separate service, queue, database server, parser, or generic backend interface. Use the existing notebook Spark session for metadata/state SQL; do not introduce another SQL warehouse solely for this feature. Confirm that the required metadata commands work on both supported notebook compute modes in Task 2. Record their runner-compute and startup costs rather than assuming metadata access is free.
+There is no separate service, queue, database server, parser, or generic backend interface. Use the existing notebook Spark session for metadata/state SQL; do not introduce another SQL warehouse solely for this feature. Confirm that the required metadata commands work on both supported notebook compute modes in Task 1. Record their runner-compute and startup costs rather than assuming metadata access is free.
 
-Reuse-enabled notebooks need the matching Factory wheel installed in their selected job cluster or serverless environment. Today, the auto-copied runner is self-contained; this feature must make its additional runtime-package requirement explicit. Non-reuse execution keeps its existing deployment requirements. Install the dbt v2 `dbt` distribution and its Databricks driver separately from v1's `dbt-core`/`dbt-databricks` environment.
+Reuse-enabled notebooks need the matching Factory wheel installed in their selected job cluster or serverless environment. Today, the auto-copied runner is self-contained; this feature must make its additional runtime-package requirement explicit. Non-reuse execution keeps its existing deployment requirements. Keep the existing `dbt-core`/`dbt-databricks` environment.
 
 ## File map
 
@@ -47,7 +47,7 @@ All paths below are relative to the repository root.
 | `tests/integration/test_notebook_reuse.py` (new) | Complete shipped notebook execution with controlled metadata/dbt boundaries |
 | Existing selector, CLI, distribution, partition and job-spec tests | Preserve Factory's existing guarantees |
 | `tests/databricks/reuse_acceptance.py` (new) | Runnable acceptance/benchmark scenarios against explicitly chosen scratch resources |
-| `README.md`, `CONTRIBUTING.md`, `.github/workflows/integration.yml`, `pyproject.toml` | Runtime setup, isolated engine checks, documented support and operating procedure |
+| `README.md`, `CONTRIBUTING.md` | Runtime setup, documented support and operating procedure |
 
 Keep modules as functions and small immutable records. Add a class only where it holds concrete shared state; do not introduce a storage-provider or engine-plugin hierarchy. Reuse `atomic_write_bytes`, existing task-key maps, graph gates, notebook publishing, and bundle-schema validation.
 
@@ -96,42 +96,7 @@ Resolve ownership before enabling reuse, and validate `max_concurrent_runs: 1` f
 
 For definition-backed dependencies, store a separate definition digest and the resolved physical Delta input closure. A dbt-managed view needs its deployed UC definition checked as well as its dbt code; an ephemeral model needs its manifest definition/dependencies checked. Unknown external view/UDF dependencies remain ineligible. Code comparisons for a consumer include changes to these definitions even if every physical input version is unchanged.
 
-## Task 1: Establish real dbt v2 selector and runner compatibility
-
-**Files:** Modify `dbt_factory.py`, `notebook/run_dbt_command.py`, `tests/integration/test_selector_against_dbt.py`, `tests/integration/dbt_helpers.py`, `.github/workflows/integration.yml`; add isolated v2 test dependencies in the workflow.
-
-- [ ] Add a real generic-test regression to the selector integration suite and run it first against dbt 2.0.9. A minimal fixture is:
-
-  ```python
-  @pytest.mark.parametrize("bundle_tests", [False, True])
-  def test_generic_test_selection_on_current_engine(tmp_path, bundle_tests):
-      _write_project(
-          tmp_path,
-          {"a.sql": "select 1 as id\n"},
-          schema_yml="version: 2\nmodels:\n  - name: a\n    columns:\n      - name: id\n        data_tests: [not_null]\n",
-      )
-      manifest = _parse(tmp_path)
-      _assert_each_task_selects_its_own_node(tmp_path, manifest, bundle_tests=bundle_tests)
-  ```
-
-- [ ] Set up a separate v2 environment. Do not install it into the existing v1 Hatch environment:
-
-  ```sh
-  uv venv --python 3.12 /tmp/dbt-factory-plan-v2
-  uv pip install --python /tmp/dbt-factory-plan-v2/bin/python -e . 'dbt==2.0.9' pytest pytest-cov pytest-mock pytest-timeout pytest-xdist jsonschema
-  /tmp/dbt-factory-plan-v2/bin/python -m pytest tests/integration/test_selector_against_dbt.py -k generic_test_selection_on_current_engine -v
-  ```
-
-  Expected initial failure: empty selection for the emitted generic-test selector. Move v1 msgpack imports out of module scope before collecting engine-neutral selector tests. Only injection-specific tests are v1-only; selector tests must execute on v2.
-
-- [ ] Reproduce the failing `file:schema.yml` term using `dbt ls`. Change the shared selector construction/validation based on observed behavior. Prefer a selector strategy valid on both engines if exactness can be proved; otherwise make the relevant engine distinction explicit from provenance. Re-run collision, package, versioned-model, shared-schema, source, unit-test and bundled-mode fixtures. Refuse layouts whose exactness cannot be established; do not merely delete the file term and trust the FQN.
-- [ ] Retain the v1 injection path where already supported. For v2, use the public runner without injecting a manifest. Check successful parse and failed-command result handling through the complete shipped notebook. Disable hosted State management for the Databricks-owned v2 mode.
-- [ ] Add a separate Python 3.12/v2 CI job with no v1 adapter packages; keep the existing v1 checks. Run engine-neutral selector/runner tests in both. Report exact engine versions and failures; do not skip a v2 selector failure because it differs from v1.
-- [ ] Verify: `make integration` on v1, plus the selector suite in the isolated v2 environment. Commit: `fix: support exact task selection on dbt v2`.
-
-**Exit:** Both engines select intended resources exactly in per-test and bundled modes. The local probe previously established feasibility; it did not establish this exit condition.
-
-## Task 2: Verify Databricks primitives before implementing the state store
+## Task 1: Verify Databricks primitives before implementing the state store
 
 **Files:** Create `tests/databricks/reuse_acceptance.py`; document its setup in `CONTRIBUTING.md`.
 
@@ -148,12 +113,12 @@ For definition-backed dependencies, store a separate definition digest and the r
   The named scratch resources are created by the harness in the user-selected workspace. Read the corresponding UC table identity using the SDK, then repeat after append and drop/recreate. Assert that append advances version and recreation cannot be mistaken for the old table at the same version.
 - [ ] Probe schema/table/view classification, deployed UC view-definition reads and changes, Volume publish/read integrity, state-table write access, and access to `system.access.table_lineage`. Record empty lineage separately from permission/query failure. Query with date and target filters; absence of records never establishes completeness.
 - [ ] Run on the chosen job compute and serverless notebook modes. Record cold/warm latency and query/compute usage. Unsupported metadata access makes the affected workload ineligible; do not introduce a second backend before confirming the supported path.
-- [ ] Verify the same job execution principal is used by Spark, SDK and dbt. Check dbt v2 driver installation/download behavior in the actual compute environment.
+- [ ] Verify the same job execution principal is used by Spark, SDK and dbt. Check the existing dbt/adapter installation in the actual compute environment.
 - [ ] Commit: `test: verify Databricks reuse metadata primitives`.
 
 **Exit:** Identity, Delta versions, storage and execution context have real platform evidence. This is the first platform checkpoint and can block rollout without blocking local contract work.
 
-## Task 3: Define minimal configuration, eligibility and provenance
+## Task 2: Define minimal configuration, eligibility and provenance
 
 **Files:** Create `reuse.py`, the provenance-capture portion of `reuse_prepare.py`, and `tests/test_reuse.py`; modify `main.py`, `tests/test_app.py`.
 
@@ -165,7 +130,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 **Exit:** Eligibility and context comparison are testable without Spark, SDK, or dbt installed. No skip decision is emitted yet.
 
-## Task 4: Publish immutable artifacts and make runtime packaging explicit
+## Task 3: Publish immutable artifacts and make runtime packaging explicit
 
 **Files:** Create `reuse_runtime.py` and `tests/test_reuse_runtime.py`; modify `main.py`, `tests/test_app.py`, `tests/integration/test_distribution.py`. Reuse `file_io.py` without changing it unless publication checks establish a necessary change.
 
@@ -177,7 +142,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 **Exit:** Jobs and successful-build records can refer only to published, digest-verified artifacts. Publication failure leaves no new reusable evidence.
 
-## Task 5: Implement concrete Delta evidence and relation snapshots
+## Task 4: Implement concrete Delta evidence and relation snapshots
 
 **Files:** Implement `reuse_runtime.py`; test in `tests/test_reuse_runtime.py` and `tests/databricks/reuse_acceptance.py`.
 
@@ -186,11 +151,11 @@ For definition-backed dependencies, store a separate definition digest and the r
 - [ ] Quote SQL identifier components by doubling embedded backticks and surrounding each component with backticks. Use SQL parameter bindings for data values; do not concatenate model names, paths or JSON values into SQL literals. Preserve case/quoted identifier semantics in relation mapping.
 - [ ] Make attempt publication idempotent and verify an existing attempt's evidence matches. Never overwrite a different attempt or another environment's state. Persist the original build time separately from later reuse decisions. Let Delta write conflicts/unavailable state lose optimization with a visible reason.
 - [ ] Reuse eligibility requires both successful model execution and stable input observations before/after it. Record the pre-build input versions as consumed evidence; do not substitute newer post-build observations. Missing output or unstable identity withholds reusable evidence.
-- [ ] Verify: `hatch run pytest tests/test_reuse_runtime.py -v`, then the corresponding scratch Delta scenarios from Task 2. Commit: `feat: persist Databricks model build evidence`.
+- [ ] Verify: `hatch run pytest tests/test_reuse_runtime.py -v`, then the corresponding scratch Delta scenarios from Task 1. Commit: `feat: persist Databricks model build evidence`.
 
 **Exit:** A malformed, partial, stale or unverified record cannot authorize reuse. State-write failure cannot change successful dbt execution into failure.
 
-## Task 6: Add native selective comparison and run-scoped preparation
+## Task 5: Add native selective comparison and run-scoped preparation
 
 **Files:** Extend `reuse_prepare.py` and `tests/test_reuse.py`; create `notebook/prepare_dbt_reuse.py`, `tests/integration/test_dbt_state_comparison.py`.
 
@@ -201,15 +166,15 @@ For definition-backed dependencies, store a separate definition digest and the r
   dbt ls --select state:modified --resource-type model --state BASELINE_DIRECTORY --output json --output-keys unique_id
   ```
 
-  Add the validated project/profile/target settings and v2 `--no-manage-state`. Parse only node JSON records; retain command diagnostics. A selector/configuration/graph error fails; an unavailable optimization artifact or unsupported comparison produces a visible normal-execution decision.
+  Add the validated project/profile/target settings. Parse only node JSON records; retain command diagnostics. A selector/configuration/graph error fails; an unavailable optimization artifact or unsupported comparison produces a visible normal-execution decision.
 - [ ] Group models by their own successful-build manifest and semantic context. Execute one native comparison per distinct valid baseline group, not per model or only against the previous deployment. An engine/driver upgrade invalidates broadly without cross-engine comparison. Keep model-level code changes selective.
-- [ ] Compare Factory policy, relation mapping and execution context separately from native state results. Track dbt-managed view/ephemeral definitions and walk their declared dependency graph to physical Delta leaves; intersect native changed-node results with that definition closure. For views, also snapshot the deployed UC definition using the metadata access verified in Task 2. Add real changed-view/ephemeral fixtures with unchanged physical input versions and assert that consumers rebuild. Unresolved definitions or incomplete physical closures make the consumer ineligible. Never infer SQL dependencies in Python.
+- [ ] Compare Factory policy, relation mapping and execution context separately from native state results. Track dbt-managed view/ephemeral definitions and walk their declared dependency graph to physical Delta leaves; intersect native changed-node results with that definition closure. For views, also snapshot the deployed UC definition using the metadata access verified in Task 1. Add real changed-view/ephemeral fixtures with unchanged physical input versions and assert that consumers rebuild. Unresolved definitions or incomplete physical closures make the consumer ineligible. Never infer SQL dependencies in Python.
 - [ ] Publish immutable preparation output bound to the deployment, job/run/attempt and exact build references. Its task value contains a pointer/digest, not a large model map. Missing/state-unavailable preparation succeeds with reuse disabled; unexpected infrastructure errors retain normal failure behavior.
-- [ ] Verify: `hatch run pytest tests/integration/test_dbt_state_comparison.py -v` and the same module in the isolated v2 environment. Assert invocation count equals distinct supported baseline groups. Commit: `feat: prepare selective reuse decisions with native dbt state`.
+- [ ] Verify: `hatch run pytest tests/integration/test_dbt_state_comparison.py -v` in the existing dbt environment. Assert invocation count equals distinct supported baseline groups. Commit: `feat: prepare selective reuse decisions with native dbt state`.
 
 **Exit:** The agreed selective-invalidation USP is present before enabling skipping. Context changes cannot hide behind unchanged SQL-only state results.
 
-## Task 7: Wire preparation, additional inputs and force controls into Lakeflow
+## Task 6: Wire preparation, additional inputs and force controls into Lakeflow
 
 **Files:** Modify `dbt_factory.py`, `dbt_task.py`, `job_partition.py`, `job_spec.py`, `main.py`; extend the corresponding existing unit/integration tests.
 
@@ -222,7 +187,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 **Exit:** Existing test gates, partition semantics, bundle schema, repair structure and task limits hold with preparation enabled. Opt-out jobs preserve existing behavior.
 
-## Task 8: Enable the reuse check before dbt initialization
+## Task 7: Enable the reuse check before dbt initialization
 
 **Files:** Modify `reuse.py`, `reuse_runtime.py`, `notebook/run_dbt_command.py`; create `tests/integration/test_notebook_reuse.py`.
 
@@ -237,7 +202,7 @@ For definition-backed dependencies, store a separate definition digest and the r
   assert reuse_reason(build, current, True, True, False) == "REUSED"
   ```
 
-  Construct `build` and `current` as complete matching input/output identity/version records using Task 5's contract; one-field input/output identity/version mutations must change the decision. Implement only the branches covered by these evidence scenarios and the specified fallbacks.
+  Construct `build` and `current` as complete matching input/output identity/version records using Task 4's contract; one-field input/output identity/version mutations must change the decision. Implement only the branches covered by these evidence scenarios and the specified fallbacks.
 - [ ] Write the central failing check by executing the shipped notebook with matching evidence and an import guard:
 
   ```python
@@ -255,22 +220,22 @@ For definition-backed dependencies, store a separate definition digest and the r
 - [ ] Move the runner's dbt import/injection/initialization after reuse evaluation. Preserve project resolution, authentication and per-task artifact isolation. Keep the SDK/Spark metadata path independent of dbt. On reuse, finish the model task successfully; do not use a skipped status or fabricate `run_results.json`.
 - [ ] On a miss, snapshot inputs immediately before dbt invocation and again after successful execution, then snapshot output. Publish eligible evidence only for stable inputs and matching deployment/context. An input changing during the build records `INPUT_CHANGED_DURING_BUILD`, finishes normal execution, and forces the next invocation to rebuild.
 - [ ] Publish build evidence before subsequent tests determine their own result; tests remain separate tasks. Failed/cancelled model invocations publish no success. Retain existing exception reporting and credential/temp-directory cleanup on all paths.
-- [ ] Verify: `hatch run pytest tests/integration/test_notebook_reuse.py -v`, then repeat on v2 with public result handling. Commit: `feat: reuse unchanged models without initializing dbt`.
+- [ ] Verify: `hatch run pytest tests/integration/test_notebook_reuse.py -v`. Commit: `feat: reuse unchanged models without initializing dbt`.
 
 **Exit:** A second unchanged invocation can avoid model execution without importing dbt, and a failed data test does not erase valid model evidence.
 
-## Task 9: Add lineage-based ineligibility without changing the dbt graph
+## Task 8: Add lineage-based ineligibility without changing the dbt graph
 
 **Files:** Extend `reuse_runtime.py`, `reuse_prepare.py`, `tests/test_reuse_runtime.py`, `tests/databricks/reuse_acceptance.py`.
 
 - [ ] Write failing cases for an observed undeclared input, a declared extra input, an old edge needing review, empty lineage, and unavailable lineage metadata. Verify that no discovered edge is silently added to scheduling.
 - [ ] Read filtered UC lineage during preparation and compare known inputs with the declared dependency closure. Persist blocking observations in decision evidence; a known blocker cannot disappear merely because the system-table retention window advanced. Clear it when a reviewed deployment explicitly declares the dependency. A historical edge is reviewed before it is declared; v1 adds no automatic expiry or ignore-list bypass.
-- [ ] Unavailable optimization metadata disables reuse for affected models and reports the reason. Empty lineage does not establish completeness; model opt-in/declarations remain required. If a declared extra input is produced by this job, Task 7's explicit edge is mandatory.
+- [ ] Unavailable optimization metadata disables reuse for affected models and reports the reason. Empty lineage does not establish completeness; model opt-in/declarations remain required. If a declared extra input is produced by this job, Task 6's explicit edge is mandatory.
 - [ ] Verify: `hatch run pytest tests/test_reuse_runtime.py -v` and the live hidden-input scenario. Commit: `feat: disable model reuse for undeclared lineage inputs`.
 
 **Exit:** Additional lineage makes reuse more conservative and explainable, without becoming an alternate compiler or scheduler.
 
-## Task 10: Prove retries, repairs and optimization outages preserve execution
+## Task 9: Prove retries, repairs and optimization outages preserve execution
 
 **Files:** Extend `tests/integration/test_notebook_reuse.py`, `tests/test_reuse_runtime.py`, `tests/databricks/reuse_acceptance.py`; change only production branches exposed by these checks.
 
@@ -291,23 +256,23 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 - [ ] Execute full notebook paths for read/write failures and stale pointers. Use real dbt fixture artifacts for graph/state behavior; use controlled SDK/SQL failures only at those external boundaries.
 - [ ] Run repair with and without rerunning preparation. Recheck current input/output evidence and exact successful-build reference in both cases. A changed baseline can conservatively execute if no matching comparison result exists; an old plan cannot authorize reuse.
-- [ ] Verify: `make lint`, `make test`, `make integration`, plus the isolated v2 engine checks. Commit: `test: preserve dbt execution guarantees during reuse failures`.
+- [ ] Verify: `make lint`, `make test`, `make integration`. Commit: `test: preserve dbt execution guarantees during reuse failures`.
 
 **Exit:** Missing optimization evidence cannot skip work, and reuse never bypasses a required test failure.
 
-## Task 11: Run Databricks acceptance and measure net savings
+## Task 10: Run Databricks acceptance and measure net savings
 
 **Files:** Complete `tests/databricks/reuse_acceptance.py`; record reproducible commands/results in `docs/superpowers/validation/databricks-model-reuse.md`.
 
-- [ ] Deploy only to the explicitly selected scratch profile/resources using the existing generate → publish artifacts → bundle validate → deploy → run workflow. Always pass `--profile` and the intended bundle target. Use separate job/owner identities for v1 and v2 runs.
-- [ ] Give the local acceptance driver this required-input interface, also used with `--scenario metadata` for Task 2 and `--scenario benchmark` for performance checks:
+- [ ] Deploy only to the explicitly selected scratch profile/resources using the existing generate → publish artifacts → bundle validate → deploy → run workflow. Always pass `--profile` and the intended bundle target.
+- [ ] Give the local acceptance driver this required-input interface, also used with `--scenario metadata` for Task 1 and `--scenario benchmark` for performance checks:
 
   ```sh
   python tests/databricks/reuse_acceptance.py \
     --profile "$FACTORY_PROFILE" \
     --catalog "$FACTORY_CATALOG" --schema "$FACTORY_SCHEMA" --volume "$FACTORY_VOLUME" \
     --bundle-dir "$FACTORY_BUNDLE_DIR" --target "$FACTORY_TARGET" \
-    --engine dbt2 --scenario acceptance
+    --scenario acceptance
   ```
 
   The operator supplies these values after choosing scratch resources; the bundle defines the chosen compute. The driver generates the probe notebook/job artifacts, invokes the documented bundle workflow with an explicit profile, checks task-level result states, and cleans up only resources it created. Do not delete user input tables or a pre-existing bundle during cleanup.
@@ -318,32 +283,32 @@ For definition-backed dependencies, store a separate definition digest and the r
 - [ ] Require positive measured net compute savings for the adopted workload. Publish the break-even workload and retained startup latency. If metadata/state writes dominate, first reduce redundant reads and batch preparation work; consider another implementation language only if profiling specifically identifies Python CPU cost.
 - [ ] Commit: `test: validate model reuse on Databricks and measure overhead`.
 
-**Exit:** Both supported engines pass platform checks and the target workload saves compute after all checking/recording costs. Local tests alone cannot satisfy this gate.
+**Exit:** The existing dbt v1 setup passes platform checks and the target workload saves compute after all checking/recording costs. Local tests alone cannot satisfy this gate.
 
-## Task 12: Document supported operation and release the opt-in feature
+## Task 11: Document supported operation and release the opt-in feature
 
-**Files:** Modify `README.md`, `CONTRIBUTING.md`, `pyproject.toml`, CI workflow and the acceptance report.
+**Files:** Modify `README.md`, `CONTRIBUTING.md` and the acceptance report.
 
 - [ ] Document model metadata/config, provenance capture, wheel/driver setup, explicit state initialization, grants, artifact publication, one-owner/non-overlapping-run contract and decision queries. Include the exact tested engine/runtime versions and supported compute modes.
 - [ ] Document normal-execution fallbacks and configuration errors separately. Explain that lineage absence is not proof, table maintenance may invalidate reuse, and the feature does not pin source snapshots or prevent external writers.
 - [ ] Provide a rollback procedure: disable the global reuse config or model opt-in, regenerate/redeploy normal tasks, and retain referenced artifacts/evidence. No artifact garbage collector is required for v1. Ownership reassignment must disable/drain the old job before registering the new owner.
-- [ ] Run `make lint`, `make test`, `make integration`, the isolated v2 checks, installed-wheel verification and bundle-schema validation. Regenerate any affected golden outputs with the real CLI and inspect the diff.
+- [ ] Run `make lint`, `make test`, `make integration`, installed-wheel verification and bundle-schema validation. Regenerate any affected golden outputs with the real CLI and inspect the diff.
 - [ ] Commit: `docs: document Databricks model reuse deployment and operation`.
 
 **Exit:** Reuse is explicitly opt-in, supported versions/limits are stated, and the normal execution path is the documented rollback.
 
 ## Delivery sequence and review checkpoints
 
-1. **Compatibility:** Task 1 is a useful standalone fix. Tasks 2–4 establish platform evidence and artifact contracts without skipping models.
-2. **Complete local path:** Tasks 5–8 implement selective code comparison plus live data checks. Keep the feature unadvertised/disabled until lineage and failure checks pass.
-3. **Correctness:** Tasks 9–10 complete required lineage/fallback/repair behavior.
-4. **Release:** Tasks 11–12 establish actual compatibility and savings, then document the opt-in feature.
+1. **Foundations:** Tasks 1–3 establish platform evidence and artifact contracts without skipping models.
+2. **Complete local path:** Tasks 4–7 implement selective code comparison plus live data checks. Keep the feature unadvertised/disabled until lineage and failure checks pass.
+3. **Correctness:** Tasks 8–9 complete required lineage/fallback/repair behavior.
+4. **Release:** Tasks 10–11 establish platform acceptance and savings, then document the opt-in feature.
 
 The critical path is correctness and platform validation, not choosing a faster local language. Do not replace selective invalidation with a project-wide checksum to shorten delivery. Do not add incremental-model reuse, native-task skip gates, development clones, automatic lineage adoption, distributed locks, freshness windows, column/row change inference or a UI to this plan.
 
 ## Plan self-review
 
-- Every design requirement maps to a task: opt-in/context/eligibility (3), immutable artifacts (4), identities/ownership/evidence (2, 5), per-model baselines and native selective invalidation (6), extra edges/splits/task limits/force (7), no-dbt reuse and stable build observations (8), lineage (9), tests/fallbacks/repair (10), and measured acceptance (11–12).
+- Every in-scope design requirement maps to a task: opt-in/context/eligibility (2), immutable artifacts (3), identities/ownership/evidence (1, 4), per-model baselines and native selective invalidation (5), extra edges/splits/task limits/force (6), no-dbt reuse and stable build observations (7), lineage (8), tests/fallbacks/repair (9), and measured acceptance (10–11).
 - Whole-project content verification detects deployment/runtime drift; semantic context and native state determine reuse across valid deployments. These are different comparisons.
 - Successful model builds and data-test outcomes remain separate. Every reused task succeeds normally and preserves its downstream gates.
 - Platform operations require an explicitly selected profile. No resources have been selected or deployed by writing this plan.

@@ -38,6 +38,8 @@ Selective code comparison alone is already available in dbt.
   is no distributed locking or coordination between independent writers.
 - Tests rerun even when a model is reused. Build evidence and test outcomes are
   separate; required tests retain their downstream gates.
+- The first release targets the existing dbt v1 setup. Separate dbt 2.0
+  compatibility work, runtime environments, and CI checks are deferred.
 
 ## Architecture
 
@@ -175,7 +177,10 @@ normal Lakeflow outcomes.
 
 ## Verification and performance acceptance
 
-### dbt 2.0 compatibility
+### dbt 2.0 feasibility (deferred)
+
+These findings inform future compatibility work; they are not first-release
+implementation or acceptance requirements.
 
 The architecture can use dbt 2.0's public artifacts and state selection, but
 Factory is not yet verified for end-to-end v2 execution. Local checks with the
@@ -195,12 +200,13 @@ Factory is not yet verified for end-to-end v2 execution. Local checks with the
   reestablishing exact selection across supported project layouts.
 
 Keep comparisons within the executing engine/version and invalidate existing
-reuse evidence when upgrading engines. Disable dbt's hosted State management
-for this Databricks-owned mode (`--no-manage-state` in v2). Provision v2's `dbt`
-package and Databricks ADBC driver through its supported installation path.
-Warehouse execution, authentication, driver startup, required-test gates, and
-Lakeflow retry/repair still need real Databricks acceptance checks. These local
-checks establish feasibility, not production compatibility or measured savings.
+reuse evidence when upgrading engines. Future v2 support would disable dbt's
+hosted State management (`--no-manage-state`) and provision its `dbt` package
+and Databricks ADBC driver through the supported installation path. It would
+also require real Databricks acceptance checks for warehouse execution,
+authentication, driver startup, required-test gates, and Lakeflow retry/repair.
+These local checks establish feasibility, not production compatibility or
+measured savings.
 
 ### dbt v1 feasibility
 
@@ -240,7 +246,8 @@ compute savings for the opted-in workload, including checking/recording costs.
 
 Development cloning/deferral automation, freshness windows, native `dbt_task`
 reuse gates, distributed locks, automatic lineage adoption, non-Delta sources,
-row/column-level change inference, and a separate UI/service are outside v1.
+row/column-level change inference, separate dbt 2.0 compatibility work, and a
+separate UI/service are outside the first release.
 
 ## References
 

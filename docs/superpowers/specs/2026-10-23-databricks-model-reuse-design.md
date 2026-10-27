@@ -175,6 +175,35 @@ normal Lakeflow outcomes.
 
 ## Verification and performance acceptance
 
+### dbt 2.0 compatibility
+
+The architecture can use dbt 2.0's public artifacts and state selection, but
+Factory is not yet verified for end-to-end v2 execution. Local checks with the
+`dbt==2.0.9` distribution and a dummy Databricks profile confirmed:
+
+- `dbtRunner(manifest=None).invoke(["parse", ...])` succeeds and emits manifest v12.
+- `dbt ls --select state:modified --resource-type model --state <baseline>`
+  selects the dependent model after a transitive macro change, selects nothing
+  after an unused macro change, and selects only the edited unrelated model.
+- Supplying a nonempty manifest to `dbtRunner` raises `NotImplementedError`.
+  The v1 msgpack injection optimization is unsupported in v2; use normal parsing.
+- A Factory-generated generic-test selector matches no nodes in both tested
+  Factory test configurations. Its `file:schema.yml` term selects nothing even
+  though the test's manifest records `models/schema.yml`; the other terms each
+  select that test. Existing selectors require v2 regression coverage and a fix
+  before claiming compatibility. Do not simply drop a discriminator without
+  reestablishing exact selection across supported project layouts.
+
+Keep comparisons within the executing engine/version and invalidate existing
+reuse evidence when upgrading engines. Disable dbt's hosted State management
+for this Databricks-owned mode (`--no-manage-state` in v2). Provision v2's `dbt`
+package and Databricks ADBC driver through its supported installation path.
+Warehouse execution, authentication, driver startup, required-test gates, and
+Lakeflow retry/repair still need real Databricks acceptance checks. These local
+checks establish feasibility, not production compatibility or measured savings.
+
+### dbt v1 feasibility
+
 Local feasibility checks using dbt-core 1.12.5 and dbt-databricks 1.12.7 show:
 
 | Fixture change | Observed native comparison |
@@ -218,6 +247,8 @@ row/column-level change inference, and a separate UI/service are outside v1.
 - [dbt State GA](https://www.getdbt.com/blog/dbt-state-is-ga)
 - [dbt state selector methods](https://docs.getdbt.com/reference/node-selection/methods)
 - [dbt state comparison caveats](https://docs.getdbt.com/reference/node-selection/state-comparison-caveats)
+- [dbt v2 upgrade guide](https://docs.getdbt.com/docs/dbt-versions/dbt-upgrade/upgrading-to-v2)
+- [dbt programmatic invocations](https://docs.getdbt.com/reference/programmatic-invocations)
 - [UC lineage system tables](https://docs.databricks.com/aws/en/admin/system-tables/lineage)
 - [Databricks table history](https://docs.databricks.com/aws/en/delta/history)
 - [Existing Factory runner](../../../src/databricks_dbt_factory/notebook/run_dbt_command.py)

@@ -15,10 +15,15 @@ from dbt.cli.main import dbtRunner
 dbutils.widgets.text("dbt_commands", "")
 dbutils.widgets.text("project_directory", "")
 dbutils.widgets.text("profiles_directory", "")
+dbutils.widgets.text("factory_force_rebuild", "false")
 
 dbt_commands = dbutils.widgets.get("dbt_commands")
 project_directory = dbutils.widgets.get("project_directory")
 profiles_directory = dbutils.widgets.get("profiles_directory")
+force_value = dbutils.widgets.get("factory_force_rebuild")
+if force_value not in {"true", "false"}:
+    raise ValueError("factory_force_rebuild must be exactly 'true' or 'false'")
+force_rebuild = force_value == "true"
 
 if not dbt_commands:
     raise ValueError("dbt_commands parameter is required")

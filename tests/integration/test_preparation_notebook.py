@@ -11,6 +11,41 @@ import databricks.sdk
 
 from databricks_dbt_factory import reuse_runtime
 from tests.test_reuse import CONFIG
+from tests import test_reuse
+
+captured = test_reuse.captured
+
+
+@pytest.mark.parametrize("force", ["true", "false", "TRUE", "1", "", " true", "{{job.parameters.force}}"])
+def test_runner_strictly_validates_force_before_authentication(monkeypatch, captured, force):
+    project, profiles = captured[:2]
+    values = {
+        "dbt_commands": json.dumps(["dbt parse --target dev"]),
+        "project_directory": "",
+        "profiles_directory": str(profiles),
+        "factory_force_rebuild": force,
+    }
+    widgets = SimpleNamespace(text=values.setdefault, get=values.__getitem__)
+    dbutils = SimpleNamespace(widgets=widgets)
+    authenticated = []
+
+    def authenticate():
+        authenticated.append(True)
+        return {"Authorization": "Bearer private-token"}
+
+    client = SimpleNamespace(config=SimpleNamespace(host="https://example.databricks.com", authenticate=authenticate))
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", lambda: client)
+    monkeypatch.chdir(project)
+    notebook = resources.files("databricks_dbt_factory") / "notebook" / "run_dbt_command.py"
+    if force in {"true", "false"}:
+        result = runpy.run_path(str(notebook), init_globals={"dbutils": dbutils})
+        assert result["result"].success
+        assert result["force_rebuild"] == (force == "true")
+        assert authenticated == [True]
+    else:
+        with pytest.raises(ValueError, match="factory_force_rebuild"):
+            runpy.run_path(str(notebook), init_globals={"dbutils": dbutils})
+        assert not authenticated
 
 
 @pytest.mark.parametrize("failure", [None, "unavailable", "unexpected"])
@@ -27,6 +62,7 @@ def test_shipped_preparation_notebook_publishes_pointer_and_cleans_credentials(m
         "factory_task_key": "prepare",
         "factory_attempt_number": "0",
         "factory_secret_versions": "{}",
+        "factory_reuse_models": '["model.probe.orders"]',
     }
     published, exited = {}, []
     dbutils = SimpleNamespace(
@@ -45,7 +81,7 @@ def test_shipped_preparation_notebook_publishes_pointer_and_cleans_credentials(m
         assert args[4].resolve() == tmp_path.resolve()
         assert os.environ["DBT_ACCESS_TOKEN"] == "private-token"
         assert os.environ["DBT_HOST"] == "example.databricks.com"
-        assert kwargs == {"secret_versions": {}}
+        assert kwargs == {"secret_versions": {}, "model_ids": ["model.probe.orders"]}
         if failure == "unexpected":
             raise RuntimeError("unexpected task failure")
         return {"format_version": 1, "reason": None, "models": {}}

@@ -23,6 +23,7 @@ for name in (
     "factory_task_key",
     "factory_attempt_number",
     "factory_secret_versions",
+    "factory_reuse_models",
 ):
     dbutils.widgets.text(name, "")
 
@@ -62,6 +63,7 @@ try:
         profiles,
         attempt,
         secret_versions=json.loads(dbutils.widgets.get("factory_secret_versions") or "{}"),
+        model_ids=json.loads(dbutils.widgets.get("factory_reuse_models")),
     )
     pointer = {}
     try:

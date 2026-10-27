@@ -695,7 +695,7 @@ def _prepare_model(spark, workspace_client, config, context, model, attempt, dep
 
 
 def prepare_run(
-    spark, workspace_client, config, deployment, project, profiles, attempt, *, secret_versions=None
+    spark, workspace_client, config, deployment, project, profiles, attempt, *, secret_versions=None, model_ids=None
 ) -> dict:
     # pylint: disable=too-many-locals
     """Collect exact successful baselines and publish code evidence, never permission to skip.
@@ -722,6 +722,16 @@ def prepare_run(
     except EvidenceUnavailable as error:
         return result | {"reason": str(error)}
     models = describe_models(json.loads(manifest), context)
+    if model_ids is not None:
+        if (
+            not isinstance(model_ids, list)
+            or not all(isinstance(uid, str) for uid in model_ids)
+            or len(set(model_ids)) != len(model_ids)
+            or set(model_ids) - {model.unique_id for model in models}
+        ):
+            raise ValueError("preparation model scope must contain unique declared model ids")
+        models = tuple(model for model in models if model.unique_id in model_ids)
+        result["model_ids"] = sorted(model_ids)
     if json.loads(context.canonical_json)["secret_versions"] != (secret_versions or {}):
         return result | {"reason": "CONTEXT_CHANGED"}
     decisions, baselines = {}, {}

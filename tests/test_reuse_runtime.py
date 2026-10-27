@@ -36,6 +36,33 @@ from tests.test_reuse import CONFIG
 captured = test_reuse.captured
 
 
+@pytest.mark.parametrize(
+    "scope", [["model.probe.orders"], [], ["model.probe.missing"], ["model.probe.orders"] * 2, "orders"]
+)
+def test_preparation_claims_only_validated_job_scope(evidence, captured, monkeypatch, scope):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, client, config, _context, build = evidence
+    visited = []
+    monkeypatch.setattr(reuse_runtime, "verify_runtime_identity", lambda *_args: None)
+
+    def prepare(*args):
+        visited.append(args[4].unique_id)
+        return {"reason": "NO_BASELINE"}, None
+
+    monkeypatch.setattr(reuse_runtime, "_prepare_model", prepare)
+    args = (store, client, config, build.descriptor, captured[0], captured[1], Attempt("job", "run", "prepare", 0))
+    if scope in (["model.probe.orders"], []):
+        result = reuse_runtime.prepare_run(*args, model_ids=scope)
+        assert visited == scope
+        assert sorted(result["models"]) == scope
+        assert result["model_ids"] == scope
+    else:
+        with pytest.raises(ValueError, match="model scope"):
+            reuse_runtime.prepare_run(*args, model_ids=scope)
+        assert not visited
+
+
 def test_preparation_binds_exact_builds_and_publishes_only_a_small_pointer(evidence, captured, monkeypatch):
     from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
 

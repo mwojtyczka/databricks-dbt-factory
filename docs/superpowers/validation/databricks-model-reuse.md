@@ -362,3 +362,39 @@ Reproduce the complete current scenario with a matching wheel and fresh schema/d
 Use `--scenario benchmark` with another fresh schema/directory for short and expensive
 workloads; `--rows` sets the expensive model's input range. Neither scenario marks Task 10
 complete or enables production reuse.
+
+## Paired serverless benchmark and acceptance evidence
+
+The four-cohort benchmark completed all **20 measured stages** on 2026-10-28 using
+`fevm-test-jg` / `test_jg_catalog`. Both arms retained required tests. The harness removed
+all owned jobs, the scratch schema and all four serverless warehouses.
+[Structured evidence](databricks-model-reuse-benchmark.json) records run IDs, counts,
+warehouse lifecycle bounds, telemetry coverage and source-evidence hashes.
+
+| Warm unchanged workload | Reuse off | Reuse on |
+| --- | ---: | ---: |
+| Short fixture | 103.4 s | 239.0 s |
+| Synthetic hash aggregate over 100 million rows | 104.7 s | 150.2 s |
+
+These are actual Lakeflow run durations for single observations, with tests included.
+The synthetic aggregate's ordinary model CREATE calls took only **6.3 s** in its warm
+run. Despite its row count, it remains a seconds-long transformation; these results
+measure checking/startup overhead and do not establish economics for substantial dbt
+workloads. A representative minutes-long model and repeated off/on runs are required
+to establish break-even. Warm reuse runner Spark calls occupied 81.5 s for the short
+fixture and 20.7 s for the synthetic aggregate; these sums exclude preparation and
+cannot be interpreted as total billed compute. Billing returned no rows, including
+on a subsequent collection. Net savings remain unproven.
+
+The acceptance suite completed **12 stages**, including input/output invalidation,
+maintenance commits, unrelated edits, partial deployment, mixed successful baselines,
+transitive macros, vars and environment changes. Its deliberate failed test ran twice
+under Lakeflow retry and blocked the downstream report. The harness rejected the second
+attempt's metrics because it expected one execution per task. Retry accounting now
+requires one unique metric per observed test attempt and counts every invocation;
+duplicate attempts remain an error. The saved failure validates with two real test
+invocations, no model invocations and no dbt import on the reused orders task.
+
+The interrupted suite cleaned up its owned jobs/schema. A fresh complete acceptance
+run is required for repairs and the remaining checks. Production `REUSE_ENABLED` remains
+**False**; these partial results do not satisfy Task 10 or authorize release.

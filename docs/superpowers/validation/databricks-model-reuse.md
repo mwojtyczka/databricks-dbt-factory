@@ -303,3 +303,54 @@ PYENV_VERSION=3.10.20 hatch build -t wheel
   --directory /tmp/factory-runtime-probe-unique \
   --scenario runtime --factory-wheel dist/databricks_dbt_factory-0.4.0-py3-none-any.whl
 ```
+
+## Generated Lakeflow acceptance checkpoint
+
+The Task 10 harness captures real dbt artifacts in serverless, renders jobs through Factory,
+validates/deploys an explicit bundle target, records model/test invocation counts, and uses
+actual Lakeflow repairs. Its acceptance scenario includes data/code/context changes, partial
+deployments with distinct successful manifests, test gates, interrupted warehouse execution,
+state outages, fresh undeclared lineage, split jobs and ordinary native dbt tasks. These are
+runnable assertions; the complete live scenario has **not yet passed**.
+
+Discovery on `fevm-test-jg` / `test_jg_catalog` established initial and unchanged generated-job
+behavior: two model commands plus one test initially, then zero model commands plus one test.
+Both reused tasks avoided importing dbt. The observed durations were 272.2 and 257.1 seconds;
+these are correctness-run durations, **not an off/on savings comparison**. Spark calls alone
+occupied 41.9 and 46.2 seconds in the two unchanged model runners. Metadata/state round trips
+are a measured overhead to investigate before considering another implementation language.
+
+Query history returned 167 records (155 serverless-compute and 12 warehouse records), covering
+all captured Cursor identifiers. This does not prove complete Spark-history coverage. Billing
+returned no rows at collection time; costs and net savings remain unavailable. Discovery was
+stopped before its remaining scenarios, and its owned jobs/schema were removed.
+[Structured discovery evidence](databricks-model-reuse-acceptance-discovery.json) records these
+limits alongside run/query identifiers and task counters.
+
+The benchmark scenario generates ordinary jobs without preparation/reuse metadata and retains
+tests in both arms. It uses an owned temporary serverless warehouse for cold/warm SQL runs,
+without stopping the supplied shared warehouse. Billing corrections, effective list prices,
+query timings and raw warehouse usage are collected separately. Warehouse usage remains
+unallocated between individual runs, and serverless notebook coldness is not controlled;
+these limitations prevent a complete net-savings claim. Production `REUSE_ENABLED` stays **False**.
+
+Local verification: the full suite passed 791 tests; its packaging test then passed separately
+with build-cache access. All 34 acceptance-focused tests pass, including three additional
+regressions added after that full run. Ruff, mypy and pylint pass. The harness has passed spec
+and code-quality review; these checks do not replace the pending platform acceptance.
+
+Reproduce the complete current scenario with a matching wheel and fresh schema/directory:
+
+```sh
+.venv/bin/python tests/databricks/reuse_acceptance.py \
+  --profile fevm-test-jg --catalog test_jg_catalog \
+  --schema factory_acceptance_jg_unique --volume artifacts \
+  --warehouse-id 7b8cc32a9eba1da3 \
+  --bundle-dir /tmp/factory-acceptance-unique --target probe \
+  --scenario acceptance \
+  --factory-wheel dist/databricks_dbt_factory-0.4.0-py3-none-any.whl
+```
+
+Use `--scenario benchmark` with another fresh schema/directory for short and expensive
+workloads; `--rows` sets the expensive model's input range. Neither scenario marks Task 10
+complete or enables production reuse.

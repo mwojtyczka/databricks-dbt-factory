@@ -1,0 +1,226 @@
+{
+  "status": "discovery_only",
+  "task10_complete": false,
+  "production_reuse_enabled": false,
+  "profile": "fevm-test-jg",
+  "catalog": "test_jg_catalog",
+  "schema": "factory_acceptance_jg_20261028_a",
+  "compute": "serverless",
+  "warehouse_id": "7b8cc32a9eba1da3",
+  "wheel_sha256": "bde93e67bc9314fe7754541473034a1d3356d18e49e63e43ee7585780f3ca3b4",
+  "limitations": [
+    "Earlier harness; later assertions and scenarios require a new live run.",
+    "Initial build versus unchanged rerun is correctness evidence, not an ordinary off/on benchmark.",
+    "Discovery was interrupted to run the corrected harness; input-append stage has no acceptance result.",
+    "No billing rows were available. Net savings and complete SQL coverage are unproven."
+  ],
+  "runs": [
+    {
+      "stage": "initial",
+      "run_id": 502296553465815,
+      "invocations": {
+        "run": 2,
+        "test": 1,
+        "parse": 2
+      },
+      "observed_wall_seconds": 272.2384517499595,
+      "job_id": 216059281491002,
+      "state": "SUCCESS",
+      "lakeflow_duration_seconds": 260.089,
+      "tasks": [
+        {
+          "task_key": "orders_model",
+          "reason": "METADATA_UNAVAILABLE",
+          "publication": "RECORDED",
+          "success": true,
+          "imported_dbt": true,
+          "invocations": {
+            "run": 1,
+            "test": 0,
+            "parse": 1
+          },
+          "elapsed_seconds": 68.530529828,
+          "spark_sql_count": 18,
+          "spark_sql_kinds": {
+            "SELECT": 6,
+            "MERGE": 3,
+            "DESCRIBE": 9
+          },
+          "spark_observed_seconds": 46.66725673700034,
+          "warehouse_query_ids": [
+            "01f1d2ac-f468-1f75-8c74-e6506df1cbbc",
+            "01f1d2ac-f4eb-189c-b349-e00546f24088",
+            "01f1d2ac-f62b-19f8-a359-1b3c6dc888a7",
+            "01f1d2ac-f6b1-1ad9-a906-28f903b7e1e3"
+          ]
+        },
+        {
+          "task_key": "report_model",
+          "reason": "METADATA_UNAVAILABLE",
+          "publication": "RECORDED",
+          "success": true,
+          "imported_dbt": true,
+          "invocations": {
+            "run": 1,
+            "test": 0,
+            "parse": 1
+          },
+          "elapsed_seconds": 52.95918892399982,
+          "spark_sql_count": 24,
+          "spark_sql_kinds": {
+            "SELECT": 6,
+            "MERGE": 3,
+            "DESCRIBE": 15
+          },
+          "spark_observed_seconds": 36.44982579899988,
+          "warehouse_query_ids": [
+            "01f1d2ad-3328-16d6-a386-73d01c38699c",
+            "01f1d2ad-3373-153c-96f6-cfdbe9a41c21",
+            "01f1d2ad-3424-14f3-aed6-c708560a4b88",
+            "01f1d2ad-3482-1bdd-896b-0e6e5f352d7f"
+          ]
+        },
+        {
+          "task_key": "required_gate_test",
+          "reason": null,
+          "publication": null,
+          "success": true,
+          "imported_dbt": true,
+          "invocations": {
+            "run": 0,
+            "test": 1,
+            "parse": 0
+          },
+          "elapsed_seconds": 10.116255949999868,
+          "spark_sql_count": 0,
+          "spark_sql_kinds": {},
+          "spark_observed_seconds": 0,
+          "warehouse_query_ids": [
+            "01f1d2ad-1135-1d97-8a5e-996e856a0ffa",
+            "01f1d2ad-11b1-1041-8a3c-74ad9ef98998"
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "unchanged",
+      "run_id": 427670178614457,
+      "invocations": {
+        "run": 0,
+        "test": 1,
+        "parse": 0
+      },
+      "observed_wall_seconds": 257.09299899998587,
+      "job_id": 216059281491002,
+      "state": "SUCCESS",
+      "lakeflow_duration_seconds": 252.169,
+      "tasks": [
+        {
+          "task_key": "orders_model",
+          "reason": "REUSED",
+          "publication": null,
+          "success": true,
+          "imported_dbt": false,
+          "invocations": {
+            "run": 0,
+            "test": 0,
+            "parse": 0
+          },
+          "elapsed_seconds": 44.251956642000096,
+          "spark_sql_count": 14,
+          "spark_sql_kinds": {
+            "SELECT": 6,
+            "MERGE": 2,
+            "DESCRIBE": 6
+          },
+          "spark_observed_seconds": 41.84596990899922,
+          "warehouse_query_ids": []
+        },
+        {
+          "task_key": "report_model",
+          "reason": "REUSED",
+          "publication": null,
+          "success": true,
+          "imported_dbt": false,
+          "invocations": {
+            "run": 0,
+            "test": 0,
+            "parse": 0
+          },
+          "elapsed_seconds": 48.522762991000036,
+          "spark_sql_count": 17,
+          "spark_sql_kinds": {
+            "SELECT": 6,
+            "MERGE": 2,
+            "DESCRIBE": 9
+          },
+          "spark_observed_seconds": 46.22036521299947,
+          "warehouse_query_ids": []
+        },
+        {
+          "task_key": "required_gate_test",
+          "reason": null,
+          "publication": null,
+          "success": true,
+          "imported_dbt": true,
+          "invocations": {
+            "run": 0,
+            "test": 1,
+            "parse": 0
+          },
+          "elapsed_seconds": 10.583521891999908,
+          "spark_sql_count": 0,
+          "spark_sql_kinds": {},
+          "spark_observed_seconds": 0,
+          "warehouse_query_ids": [
+            "01f1d2ad-b46b-105f-8517-3537e12a812d",
+            "01f1d2ad-b4e3-19b4-b234-d1494a62cdc3"
+          ]
+        }
+      ]
+    }
+  ],
+  "measurements": {
+    "query_history": {
+      "status": "incomplete",
+      "complete": false,
+      "captured_statement_ids_complete": true,
+      "expected_statement_ids": [
+        "01f1d2ac-f468-1f75-8c74-e6506df1cbbc",
+        "01f1d2ac-f4eb-189c-b349-e00546f24088",
+        "01f1d2ac-f62b-19f8-a359-1b3c6dc888a7",
+        "01f1d2ac-f6b1-1ad9-a906-28f903b7e1e3",
+        "01f1d2ad-1135-1d97-8a5e-996e856a0ffa",
+        "01f1d2ad-11b1-1041-8a3c-74ad9ef98998",
+        "01f1d2ad-3328-16d6-a386-73d01c38699c",
+        "01f1d2ad-3373-153c-96f6-cfdbe9a41c21",
+        "01f1d2ad-3424-14f3-aed6-c708560a4b88",
+        "01f1d2ad-3482-1bdd-896b-0e6e5f352d7f",
+        "01f1d2ad-b46b-105f-8517-3537e12a812d",
+        "01f1d2ad-b4e3-19b4-b234-d1494a62cdc3"
+      ],
+      "missing_statement_ids": [],
+      "reason": "Cursor identifier coverage is reported separately; serverless Spark history may be incomplete",
+      "row_count": 167
+    },
+    "job_billing": {
+      "status": "incomplete",
+      "complete": false,
+      "reason": "Provisional list-price evidence; delayed ingestion and corrections prevent finality",
+      "row_count": 0
+    },
+    "warehouse_usage": {
+      "status": "incomplete",
+      "complete": false,
+      "allocation": "unallocated",
+      "reason": "Provisional list-price evidence; delayed ingestion and corrections prevent finality",
+      "row_count": 0
+    }
+  },
+  "query_compute_counts": {
+    "SERVERLESS_COMPUTE": 155,
+    "WAREHOUSE": 12
+  },
+  "jobs_cleaned_up": true,
+  "schema_cleaned_up": true
+}

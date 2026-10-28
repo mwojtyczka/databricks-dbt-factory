@@ -3,7 +3,7 @@
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from graphlib import CycleError, TopologicalSorter
 
 from databricks_dbt_factory.utils import DYNAMIC_VALUE_REFERENCE
@@ -40,6 +40,46 @@ class Relation:
         fields = ("catalog", "schema", "identifier")
         value = _object(value, fields, label)
         return cls(*(_text(value[key], f"{label}.{key}") for key in fields))
+
+
+@dataclass(frozen=True)
+class RelationSnapshot:
+    relation: Relation
+    uc_id: str
+    delta_id: str
+    version: int
+
+    def __post_init__(self):
+        Relation.from_dict(asdict(self.relation), "relation evidence")
+        if any(not isinstance(value, str) or not value.strip() for value in (self.uc_id, self.delta_id)):
+            raise ValueError("relation evidence requires UC and Delta identities")
+        if not isinstance(self.version, int) or isinstance(self.version, bool) or self.version < 0:
+            raise ValueError("relation evidence requires a nonnegative integer version")
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(
+            Relation.from_dict(value["relation"], "relation evidence"),
+            **{key: item for key, item in value.items() if key != "relation"},
+        )
+
+
+@dataclass(frozen=True)
+class ViewSnapshot:
+    relation: Relation
+    uc_id: str
+    definition_sha256: str
+
+    def __post_init__(self):
+        Relation.from_dict(asdict(self.relation), "view evidence")
+        if not isinstance(self.uc_id, str) or not self.uc_id.strip():
+            raise ValueError("view evidence requires a UC identity")
+        if not isinstance(self.definition_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", self.definition_sha256):
+            raise ValueError("view evidence requires a definition digest")
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(Relation.from_dict(value["relation"], "view evidence"), value["uc_id"], value["definition_sha256"])
 
 
 @dataclass(frozen=True)
@@ -295,26 +335,16 @@ def lineage_reason(model: ModelDescriptor, observed_inputs) -> str | None:
 def _observed_relations(items, *, views=False):
     if not isinstance(items, list):
         raise ValueError("evidence observations must be a list")
-    relations, observations = set(), []
-    for item in items:
-        fields = ("relation", "uc_id", "definition_sha256") if views else ("relation", "uc_id", "delta_id", "version")
-        _object(item, fields, "data evidence")
-        relation = Relation.from_dict(item["relation"], "data evidence")
-        if relation in relations:
-            raise ValueError("duplicate evidence relation")
-        relations.add(relation)
-        _text(item["uc_id"], "data evidence UC identity")
-        if views:
-            if not isinstance(item["definition_sha256"], str) or not re.fullmatch(
-                r"[0-9a-f]{64}", item["definition_sha256"]
-            ):
-                raise ValueError("missing view definition digest")
-        else:
-            _text(item["delta_id"], "data evidence Delta identity")
-            if not isinstance(item["version"], int) or isinstance(item["version"], bool) or item["version"] < 0:
-                raise ValueError("missing Delta version")
-        observations.append(canonical_json(item))
-    return tuple(sorted(observations))
+    fields = ("relation", "uc_id", "definition_sha256") if views else ("relation", "uc_id", "delta_id", "version")
+    snapshot_type = ViewSnapshot if views else RelationSnapshot
+    observations = [snapshot_type.from_dict(_object(item, fields, "data evidence")) for item in items]
+    if len({item.relation for item in observations}) != len(observations):
+        raise ValueError("duplicate evidence relation")
+    for item in observations:
+        _text(item.uc_id, "data evidence UC identity")
+        if not views:
+            _text(item.delta_id, "data evidence Delta identity")
+    return frozenset(observations)
 
 
 def _data_evidence(value):

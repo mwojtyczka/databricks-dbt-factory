@@ -16,6 +16,8 @@ from databricks_dbt_factory.reuse import (
     ExecutionContext,
     ModelDescriptor,
     Relation,
+    RelationSnapshot,
+    ViewSnapshot,
     ReuseConfig,
     canonical_json,
     describe_models,
@@ -170,46 +172,6 @@ def publish_artifacts(workspace_client, local_bundle: tuple[Path, ...], volume_p
 
 class EvidenceUnavailable(Exception):
     """Expected optimization failure. The runner reports the reason and executes dbt."""
-
-
-@dataclass(frozen=True)
-class RelationSnapshot:
-    relation: Relation
-    uc_id: str
-    delta_id: str
-    version: int
-
-    def __post_init__(self):
-        Relation.from_dict(asdict(self.relation), "relation evidence")
-        if any(not isinstance(value, str) or not value.strip() for value in (self.uc_id, self.delta_id)):
-            raise ValueError("relation evidence requires UC and Delta identities")
-        if not isinstance(self.version, int) or isinstance(self.version, bool) or self.version < 0:
-            raise ValueError("relation evidence requires a nonnegative integer version")
-
-    @classmethod
-    def from_dict(cls, value):
-        return cls(
-            Relation.from_dict(value["relation"], "relation evidence"),
-            **{key: item for key, item in value.items() if key != "relation"},
-        )
-
-
-@dataclass(frozen=True)
-class ViewSnapshot:
-    relation: Relation
-    uc_id: str
-    definition_sha256: str
-
-    def __post_init__(self):
-        Relation.from_dict(asdict(self.relation), "view evidence")
-        if not isinstance(self.uc_id, str) or not self.uc_id.strip():
-            raise ValueError("view evidence requires a UC identity")
-        if not isinstance(self.definition_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", self.definition_sha256):
-            raise ValueError("view evidence requires a definition digest")
-
-    @classmethod
-    def from_dict(cls, value):
-        return cls(Relation.from_dict(value["relation"], "view evidence"), value["uc_id"], value["definition_sha256"])
 
 
 def snapshot_view(workspace_client, relation: Relation) -> ViewSnapshot:

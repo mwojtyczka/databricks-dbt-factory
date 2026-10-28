@@ -408,21 +408,7 @@ def _comparison_reason(current, previous):
         return "NO_BASELINE"
     if current.policy_digest != previous.policy_digest:
         return "POLICY_CHANGED"
-    if (
-        current.output,
-        current.inputs,
-        current.extra_inputs,
-        current.dependencies,
-        current.definitions,
-        current.views,
-    ) != (
-        previous.output,
-        previous.inputs,
-        previous.extra_inputs,
-        previous.dependencies,
-        previous.definitions,
-        previous.views,
-    ):
+    if current != previous:
         return "DEPENDENCIES_CHANGED"
     return None
 

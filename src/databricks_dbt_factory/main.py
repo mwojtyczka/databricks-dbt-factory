@@ -195,21 +195,18 @@ def _prepare_generated_artifacts(
     factory: DbtFactory,
     output_plan: _OutputPlan,
     manifest: dict,
-    reuse_bundle: dict[str, bytes] | None,
-) -> tuple[list, JobSpecArtifact | None, dict[str, bytes] | None]:
+) -> tuple[list, JobSpecArtifact | None]:
     """Generates tasks, or one job of tasks per split tag, and prepares the job spec without publishing files."""
-    if reuse_bundle is not None:
-        factory.reuse = _reuse_deployment(args, output_plan, reuse_bundle)
     if args.split_by_tag:
         generated = factory.create_partitions(manifest, args.split_by_tag)
     else:
         generated = factory.create_tasks(manifest)
     if args.dry_run and factory.reuse is None:
-        return generated, None, reuse_bundle
+        return generated, None
     render = render_partitioned_job_spec if args.split_by_tag else render_job_spec
     rendered = render(args.input_job_spec_path, generated, args.new_job_name)
     if args.dry_run:
-        return generated, None, reuse_bundle
+        return generated, None
 
     assert output_plan.job_spec_destination is not None
     job_spec_artifact = prepare_job_spec(
@@ -218,9 +215,8 @@ def _prepare_generated_artifacts(
         output_plan.job_spec_destination,
     )
     _validate_artifact_destinations(output_plan.runner_artifact, job_spec_artifact)
-    if reuse_bundle is not None:
-        _validate_artifact_destinations(output_plan.preparation_artifact, job_spec_artifact)
-    return generated, job_spec_artifact, reuse_bundle
+    _validate_artifact_destinations(output_plan.preparation_artifact, job_spec_artifact)
+    return generated, job_spec_artifact
 
 
 def _reuse_deployment(args, output_plan, bundle) -> ReuseDeployment | None:
@@ -317,9 +313,8 @@ def main():
         reuse_bundle = _validate_reuse_inputs(args, manifest) if args.reuse_config else None
         output_plan = _prepare_output_plan(args, reuse_bundle)
         factory = _create_dbt_factory(args, output_plan, dbt_options)
-        generated, job_spec_artifact, reuse_bundle = _prepare_generated_artifacts(
-            args, factory, output_plan, manifest, reuse_bundle
-        )
+        factory.reuse = _reuse_deployment(args, output_plan, reuse_bundle) if reuse_bundle is not None else None
+        generated, job_spec_artifact = _prepare_generated_artifacts(args, factory, output_plan, manifest)
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(f"error: {error}") from error
 

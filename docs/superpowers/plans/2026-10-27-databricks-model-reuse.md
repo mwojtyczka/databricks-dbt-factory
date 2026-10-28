@@ -159,7 +159,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 - [x] Reuse eligibility requires both successful model execution and stable input observations before/after it. Record the pre-build input versions as consumed evidence; do not substitute newer post-build observations. Missing output or unstable identity withholds reusable evidence.
 - [x] Verify: `hatch run pytest tests/test_reuse_runtime.py -v`, then the corresponding scratch Delta scenarios from Task 1. Commit: `feat: persist Databricks model build evidence`.
 
-**Validation:** 574 unit/integration tests and `make lint` pass. The final matching wheel passes the real serverless state probe; job and marked scratch schema are removed. [Recorded evidence](../validation/databricks-model-reuse.md#delta-state-storage-checkpoint) covers immutable attempts, owner conflicts, input/output mutations and state outages. Runtime preparation/skipping remain disabled.
+**Validation:** 574 unit/integration tests and `make lint` pass. The final matching wheel passes the real serverless state probe; job and marked scratch schema are removed. [Recorded evidence](../validation/databricks-model-reuse.md#verified-behavior) covers immutable attempts, owner conflicts, input/output mutations and state outages. Runtime preparation/skipping remain disabled.
 
 **Exit:** A malformed, partial, stale or unverified record cannot authorize reuse. State-write failure cannot change successful dbt execution into failure.
 
@@ -181,7 +181,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 - [x] Publish immutable preparation output bound to the deployment, job/run/attempt and exact build references. Its task value contains a pointer/digest, not a large model map. Missing/state-unavailable preparation succeeds with reuse disabled; unexpected infrastructure errors retain normal failure behavior.
 - [x] Verify: `hatch run pytest tests/integration/test_dbt_state_comparison.py -v` in the existing dbt environment. Assert invocation count equals distinct supported baseline groups. Commit: `feat: prepare selective reuse decisions with native dbt state`.
 
-**Validation:** 17 native comparison checks pass against dbt Core 1.12.5 / dbt Databricks 1.12.7; the full 600-test suite includes isolated wheel/sdist packaging. Preparation/notebook boundary checks cover exact build binding, deployed view changes, state/artifact outages and unexpected failures. Artifact downloads are shared only within an attempt. [Recorded evidence](../validation/databricks-model-reuse.md#native-preparation-checkpoint) distinguishes local validation from platform acceptance. Runtime skipping remains disabled.
+**Validation:** 17 native comparison checks pass against dbt Core 1.12.5 / dbt Databricks 1.12.7; the full 600-test suite includes isolated wheel/sdist packaging. Preparation/notebook boundary checks cover exact build binding, deployed view changes, state/artifact outages and unexpected failures. Artifact downloads are shared only within an attempt. [Recorded evidence](../validation/databricks-model-reuse.md#verified-behavior) distinguishes local validation from platform acceptance. Runtime skipping remains disabled.
 
 **Exit:** The agreed selective-invalidation USP is present before enabling skipping. Context changes cannot hide behind unchanged SQL-only state results.
 
@@ -196,7 +196,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 - [x] Add an explicit force-run job parameter, `factory_force_rebuild`, defaulting to `false`. Propagate it through generated parent/child jobs and validate its value strictly at the runner. Force/full-refresh executes normally; fresh build-evidence publication follows in Task 7's runner implementation. Validate owning jobs and orchestrator use `max_concurrent_runs: 1`; refuse conflicting explicit concurrency settings.
 - [x] Verify: `hatch run pytest tests/test_dbt_factory.py tests/test_dbt_task.py tests/test_job_partition.py tests/test_job_spec.py tests/test_app.py tests/integration/test_bundle_schema.py tests/integration/test_split_by_tag_against_dbt.py -v`. Regenerate changed golden files through the CLI, never by hand. Commit: `feat: integrate model reuse preparation with Lakeflow jobs`.
 
-**Validation:** All 644 tests and `make lint` pass, including native dbt selection/state checks, bundle schemas and isolated wheel/sdist builds. Preparation is scoped before ownership claims. Real parsed fixtures cover extra-input gates, cycles, task-key collisions and 999/1,000-task boundaries; dbt itself rejects conflicting output aliases during capture. Existing golden specs are unchanged. Reuse notebooks remain outside the immutable project, with regressions for relative/absolute placement and missing-context output. [Recorded evidence](../validation/databricks-model-reuse.md#lakeflow-wiring-checkpoint). Runtime skipping and fresh build publication remain Task 7; no live deployment or savings claim is made here.
+**Validation:** All 644 tests and `make lint` pass, including native dbt selection/state checks, bundle schemas and isolated wheel/sdist builds. Preparation is scoped before ownership claims. Real parsed fixtures cover extra-input gates, cycles, task-key collisions and 999/1,000-task boundaries; dbt itself rejects conflicting output aliases during capture. Existing golden specs are unchanged. Reuse notebooks remain outside the immutable project, with regressions for relative/absolute placement and missing-context output. [Recorded evidence](../validation/databricks-model-reuse.md#verified-behavior). Runtime skipping and fresh build publication remain Task 7; no live deployment or savings claim is made here.
 
 **Exit:** Existing test gates, partition semantics, bundle schema, repair structure and task limits hold with preparation enabled. Opt-out jobs preserve existing behavior.
 
@@ -239,7 +239,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 **Runtime checkpoint:** The shipped notebook can avoid model execution without importing dbt under controlled SDK/Spark evidence. Fresh native parsing binds successful model evidence to the captured graph; captured vars reach the actual invocation. Only the exact generated model command with optional full-refresh is eligible; other options execute without publishing reusable evidence. Reuse decisions do not write builds, and tests remain separate tasks.
 
-**Release gate:** `reuse_runtime.REUSE_ENABLED` remains `False` until Tasks 8–9 establish lineage and repair/outage correctness. The import-guard test enables this internal gate only within the test. No live reuse deployment, overhead measurement or savings claim is made here. See [runtime evidence](../validation/databricks-model-reuse.md#runtime-runner-checkpoint).
+**Release gate:** `reuse_runtime.REUSE_ENABLED` remains `False` until Tasks 8–9 establish lineage and repair/outage correctness. The import-guard test enables this internal gate only within the test. No live reuse deployment, overhead measurement or savings claim is made here. See [runtime evidence](../validation/databricks-model-reuse.md#verified-behavior).
 
 **Exit:** A controlled second unchanged invocation avoids model execution without importing dbt. Model successes are retained independently of subsequent test results; production skipping remains gated.
 
@@ -252,7 +252,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 - [x] Unavailable optimization metadata disables reuse for affected models and reports the reason. Empty lineage does not establish completeness; model opt-in/declarations remain required. If a declared extra input is produced by this job, Task 6's explicit edge is mandatory.
 - [x] Verify: `hatch run pytest tests/test_reuse_runtime.py -v` and the live hidden-input scenario. Commit: `feat: disable model reuse for undeclared lineage inputs`.
 
-**Validation:** All **717 tests** and `make lint` pass. Serverless run `907310529658101` succeeded with the matching wheel; the harness removed its job and marked scratch schema. The live probe checks existing UC hidden-input observations and real Delta persistence, with the empty-event boundary controlled. Fresh-build lineage ingestion and complete Lakeflow skip acceptance remain in Task 10. See [lineage evidence](../validation/databricks-model-reuse.md#lineage-veto-checkpoint). Production reuse remains disabled.
+**Validation:** All **717 tests** and `make lint` pass. Serverless run `907310529658101` succeeded with the matching wheel; the harness removed its job and marked scratch schema. The live probe checks existing UC hidden-input observations and real Delta persistence, with the empty-event boundary controlled. Fresh-build lineage ingestion and complete Lakeflow skip acceptance remain in Task 10. See [lineage evidence](../validation/databricks-model-reuse.md#verified-behavior). Production reuse remains disabled.
 
 **Exit:** Additional lineage makes reuse more conservative and explainable, without becoming an alternate compiler or scheduler.
 
@@ -281,7 +281,7 @@ For definition-backed dependencies, store a separate definition digest and the r
 - [x] Run repair with and without rerunning preparation. Recheck current input/output evidence and exact successful-build reference in both cases. A changed baseline can conservatively execute if no matching comparison result exists; an old plan cannot authorize reuse.
 - [x] Verify: `make lint`, `make test`, `make integration`. Commit: `test: preserve dbt execution guarantees during reuse failures`.
 
-**Validation:** All **761 tests** and `make lint` pass. Final-wheel serverless run `225044578979337` succeeded with real dbt model/test execution through the shipped runner. The harness removed its job and marked scratch schema. Repaired attempts were simulated within one notebook; actual Lakeflow repair scheduling and downstream task gates remain Task 10. See [runtime evidence](../validation/databricks-model-reuse.md#profile-binding-and-repair-checkpoint). Production reuse remains disabled.
+**Validation:** All **761 tests** and `make lint` pass. Final-wheel serverless run `225044578979337` succeeded with real dbt model/test execution through the shipped runner. The harness removed its job and marked scratch schema. Repaired attempts were simulated within one notebook; actual Lakeflow repair scheduling and downstream task gates remain Task 10. See [runtime evidence](../validation/databricks-model-reuse.md#profile-binding-and-repair). Production reuse remains disabled.
 
 **Exit:** Missing optimization evidence cannot skip work, and reuse never bypasses a required test failure.
 

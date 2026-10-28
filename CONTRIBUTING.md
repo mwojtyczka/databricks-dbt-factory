@@ -243,7 +243,7 @@ one statically named profile with a static target and basic Databricks PAT field
 must be listed in `environment_inputs` and resolve to nonempty literal strings. Arbitrary Jinja,
 literal/default credentials and nested adapter options are refused. Private invocation profiles
 freeze captured routing values while leaving token references unresolved; profile edits after
-preparation fail before dbt imports. See the [profile binding validation](docs/superpowers/validation/databricks-model-reuse.md#profile-binding-and-repair-checkpoint)
+preparation fail before dbt imports. See the [profile binding validation](docs/superpowers/validation/databricks-model-reuse.md#profile-binding-and-repair)
 for the supported contract.
 
 Use a dedicated immutable deployment snapshot containing only project code/data and already

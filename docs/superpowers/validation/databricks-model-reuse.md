@@ -343,8 +343,8 @@ the live comparison and positive net savings remain unproven. Production `REUSE_
 **False**. Status polling permits one recovered request after an SDK connection timeout while
 retaining the run's original deadline.
 
-Local verification: all **811 tests** pass in a full run, including packaging with build-cache
-access and all 50 acceptance-focused tests. Ruff, mypy and pylint pass. The harness has passed spec
+Local verification: all **813 tests** pass in a full run, including packaging with build-cache
+access and all 52 acceptance-focused tests. Ruff, mypy and pylint pass. The harness has passed spec
 and code-quality review; these checks do not replace the pending platform acceptance.
 
 Reproduce the complete current scenario with a matching wheel and fresh schema/directory:

@@ -258,11 +258,11 @@ For definition-backed dependencies, store a separate definition digest and the r
 
 ## Task 9: Prove retries, repairs and optimization outages preserve execution
 
-- [ ] Establish immutable profile deployment/version binding between preparation and model tasks. The pre-import path cannot infer an out-of-band profile edit without dbt; keep production skipping disabled until this contract is enforced.
+- [x] Establish immutable profile deployment/version binding between preparation and model tasks. Verify the captured profile before importing dbt, so an out-of-band edit cannot authorize reuse.
 
 **Files:** Extend `tests/integration/test_notebook_reuse.py`, `tests/test_reuse_runtime.py`, `tests/databricks/reuse_acceptance.py`; change only production branches exposed by these checks.
 
-- [ ] Add scenario assertions before fixing failures:
+- [x] Add scenario assertions before fixing failures:
 
   | Scenario | Required behavior |
   | --- | --- |
@@ -277,9 +277,11 @@ For definition-backed dependencies, store a separate definition digest and the r
   | Force parameter/full-refresh | Execute dbt and rebuild evidence |
   | Upstream input changes during execution | Complete normal build, withhold eligibility |
 
-- [ ] Execute full notebook paths for read/write failures and stale pointers. Use real dbt fixture artifacts for graph/state behavior; use controlled SDK/SQL failures only at those external boundaries.
-- [ ] Run repair with and without rerunning preparation. Recheck current input/output evidence and exact successful-build reference in both cases. A changed baseline can conservatively execute if no matching comparison result exists; an old plan cannot authorize reuse.
-- [ ] Verify: `make lint`, `make test`, `make integration`. Commit: `test: preserve dbt execution guarantees during reuse failures`.
+- [x] Execute full notebook paths for read/write failures and stale pointers. Use real dbt fixture artifacts for graph/state behavior; use controlled SDK/SQL failures only at those external boundaries.
+- [x] Run repair with and without rerunning preparation. Recheck current input/output evidence and exact successful-build reference in both cases. A changed baseline can conservatively execute if no matching comparison result exists; an old plan cannot authorize reuse.
+- [x] Verify: `make lint`, `make test`, `make integration`. Commit: `test: preserve dbt execution guarantees during reuse failures`.
+
+**Validation:** All **761 tests** and `make lint` pass. Final-wheel serverless run `225044578979337` succeeded with real dbt model/test execution through the shipped runner. The harness removed its job and marked scratch schema. Repaired attempts were simulated within one notebook; actual Lakeflow repair scheduling and downstream task gates remain Task 10. See [runtime evidence](../validation/databricks-model-reuse.md#profile-binding-and-repair-checkpoint). Production reuse remains disabled.
 
 **Exit:** Missing optimization evidence cannot skip work, and reuse never bypasses a required test failure.
 

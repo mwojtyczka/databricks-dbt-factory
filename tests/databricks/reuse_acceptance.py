@@ -12,10 +12,10 @@ from pathlib import Path
 
 
 def prepare_bundle(directory, catalog, schema, volume, warehouse_id, *, scenario="metadata", factory_wheel=None):
-    if scenario not in {"metadata", "state"}:
+    if scenario not in {"metadata", "state", "runtime"}:
         raise ValueError("unsupported probe scenario")
-    if scenario == "state" and (factory_wheel is None or not Path(factory_wheel).is_file()):
-        raise ValueError("state probe requires a built matching Factory wheel")
+    if scenario in {"state", "runtime"} and (factory_wheel is None or not Path(factory_wheel).is_file()):
+        raise ValueError("state/runtime probe requires a built matching Factory wheel")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
     notebook = f"{scenario}_probe.py"
@@ -59,7 +59,7 @@ def prepare_bundle(directory, catalog, schema, volume, warehouse_id, *, scenario
             },
         },
     }
-    if scenario == "state":
+    if scenario in {"state", "runtime"}:
         job = config["resources"]["jobs"]["probe"]
         job["tasks"][0]["notebook_task"]["base_parameters"].update(job_id="{{job.id}}", run_id="{{job.run_id}}")
         job["environments"][0]["spec"]["dependencies"].append(
@@ -146,7 +146,7 @@ def run_probe(profile, catalog, warehouse_id, directory, *, scenario="metadata",
         client.volumes.create(
             catalog_name=catalog, schema_name=schema, name="artifacts", volume_type=VolumeType.MANAGED
         )
-        if scenario == "state":
+        if scenario in {"state", "runtime"}:
             report["wheel_sha256"] = publish_probe_wheel(
                 client, factory_wheel, f"/Volumes/{catalog}/{schema}/artifacts"
             )
@@ -191,8 +191,8 @@ if __name__ == "__main__":
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--warehouse-id", required=True)
     parser.add_argument("--directory", required=True, help="Fresh local directory for bundle and results")
-    parser.add_argument("--scenario", choices=["metadata", "state"], default="metadata")
-    parser.add_argument("--factory-wheel", help="Built matching wheel; required for --scenario state")
+    parser.add_argument("--scenario", choices=["metadata", "state", "runtime"], default="metadata")
+    parser.add_argument("--factory-wheel", help="Built matching wheel; required for --scenario state/runtime")
     args = parser.parse_args()
     run_probe(
         args.profile,

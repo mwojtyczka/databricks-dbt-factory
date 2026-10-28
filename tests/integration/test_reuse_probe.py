@@ -66,3 +66,23 @@ def test_state_probe_requires_a_built_wheel_before_creating_output(tmp_path):
     with pytest.raises(ValueError, match="wheel"):
         prepare_bundle(tmp_path / "output", "catalog", "scratch", "artifacts", "warehouse", scenario="state")
     assert not (tmp_path / "output").exists()
+
+
+def test_runtime_probe_requires_matching_wheel_and_serverless(tmp_path, bundle_validator):
+    wheel = tmp_path / "databricks_dbt_factory-0.4.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel fixture")
+    directory = tmp_path / "runtime"
+    prepare_bundle(
+        directory, "test_jg_catalog", "scratch", "artifacts", "warehouse", scenario="runtime", factory_wheel=wheel
+    )
+    config = json.loads((directory / "databricks.yml").read_text())
+    assert not list(bundle_validator.iter_errors(config))
+    job = config["resources"]["jobs"]["probe"]
+    assert job["tasks"][0]["notebook_task"]["notebook_path"] == "./runtime_probe.py"
+    assert job["tasks"][0]["notebook_task"]["base_parameters"]["job_id"] == "{{job.id}}"
+    assert job["environments"][0]["spec"]["dependencies"][-1].endswith(wheel.name)
+    assert not job.get("job_clusters")
+    assert not any("cluster" in key for key in job["tasks"][0])
+    with pytest.raises(ValueError, match="wheel"):
+        prepare_bundle(tmp_path / "missing", "test_jg_catalog", "scratch", "artifacts", "warehouse", scenario="runtime")
+    assert not (tmp_path / "missing").exists()

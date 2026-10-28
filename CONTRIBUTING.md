@@ -237,6 +237,15 @@ dbt parse in the calling Python environment. `identity` contains the trusted `pr
 `environment`, `workspace_id`, `metastore_id`, and execution `principal`. Runtime verification of
 that declaration remains required before any reuse decision.
 
+Provenance v2 also binds the canonical profile template; recapture older artifacts. Reuse supports
+one statically named profile with a static target and basic Databricks PAT fields. Use
+`token: "{{ env_var('DBT_ACCESS_TOKEN') }}"` for runtime reuse. Non-secret routing `env_var` references
+must be listed in `environment_inputs` and resolve to nonempty literal strings. Arbitrary Jinja,
+literal/default credentials and nested adapter options are refused. Private invocation profiles
+freeze captured routing values while leaving token references unresolved; profile edits after
+preparation fail before dbt imports. See the [profile binding validation](docs/superpowers/validation/databricks-model-reuse.md#profile-binding-and-repair-checkpoint)
+for the supported contract.
+
 Use a dedicated immutable deployment snapshot containing only project code/data and already
 installed, locked dbt packages. Keep credentials, profiles, generated artifacts, virtual
 environments and Git metadata outside it. Symlinks are refused; materialize local packages into

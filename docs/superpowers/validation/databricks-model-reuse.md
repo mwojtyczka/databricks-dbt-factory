@@ -187,13 +187,12 @@ private directories are cleaned on success and failure. Native parse and injecte
 are checked with dbt Core **1.12.5** / dbt Databricks **1.12.7**; warehouse model execution is controlled
 in these local tests.
 
-Profiles stay outside the content-verified project. The miss path detects profile graph drift;
-the pre-import path relies on preparation and model tasks sharing the deployed profile and declared
-non-secret version identifiers. It does not independently detect an out-of-band profile edit after
-preparation. Profile immutability/version binding remains an explicit release check for Tasks 8–9.
+Profiles stay outside the content-verified project. Provenance v2 binds the validated profile template
+and captured routing values before the runner can skip dbt. The runner consumes a private profile
+snapshot on execution; profile edits after preparation cannot authorize reuse.
 
-`reuse_runtime.REUSE_ENABLED` is **False**. Tasks 8–9 must establish lineage and repair/outage
-correctness before production skipping is enabled. No cloud resources were deployed for this
+`reuse_runtime.REUSE_ENABLED` is **False**. Task 10 must establish complete Lakeflow acceptance and positive measured savings before
+production skipping is enabled. No cloud resources were deployed for this
 checkpoint; complete-path serverless overhead, billing and savings still require Task 10.
 
 ## Lineage veto checkpoint
@@ -244,3 +243,63 @@ because fresh-event ingestion is asynchronous, with writes confined to the harne
 Its empty-event check controls only the system-table boundary and verifies persistence against
 real Delta storage. It does not establish a complete fresh-build-to-lineage-to-skip Lakeflow path;
 Task 10 retains that acceptance scenario and the full overhead/savings measurement.
+
+## Profile binding and repair checkpoint
+
+Provenance v2 includes the digest of a validated, canonical profile template. Capture,
+preparation and the model runner verify the same template. A profile edit after preparation,
+including a warehouse-only change invisible to dbt's graph, fails before importing dbt.
+Prior provenance must be recaptured; there is no compatibility fallback to an unbound profile.
+
+Reuse currently accepts one statically named profile, static target/output names and basic
+Databricks PAT fields (`type`, `host`, `http_path`, `catalog`, `schema`, `threads`, `token`).
+Literal credentials, default credentials, nested adapter options and arbitrary Jinja are rejected.
+Routing `env_var` references must be declared in captured non-secret environment inputs. Their
+values must be nonempty literals; nested Jinja cannot introduce another undeclared dependency.
+Capture, comparison and execution use private profile copies with those captured routing values,
+so subsequent source-file or process-environment edits cannot change the bound invocation.
+
+Token references remain unresolved in private profiles; resolved credentials are never hashed
+or persisted as evidence. Capture/comparison can accept versioned `DBT_ENV_SECRET_*` references.
+The runtime reuse path requires `DBT_ACCESS_TOKEN` and the same workspace host as the authenticated
+SDK client, so the verified execution identity also authenticates dbt. Other token references run
+normally without reusable evidence. This restriction applies only to the opt-in reuse path.
+
+Notebook repair tests cover unchanged, changed-input and changed-output attempts with and without
+new preparation. An old preparation binds an exact successful-build reference and cannot authorize
+reuse after that baseline changes. Controlled state/artifact read and build/decision write failures
+preserve normal model execution; failed/cancelled builds and unstable inputs retain the earlier
+successful evidence. Private directories and credentials are cleaned on success and failure.
+
+The runtime probe uses the shipped runner and real dbt model/test execution on serverless. It
+simulates repaired attempts inside one notebook task. Actual Lakeflow `jobs.repair_run`, downstream
+gating across tasks, fresh-lineage ingestion and measured net savings remain Task 10 acceptance
+checks. Production `REUSE_ENABLED` remains **False**.
+
+All **761 tests** and `make lint` pass, including native dbt Core **1.12.5** / dbt Databricks
+**1.12.7**, isolated package builds and bundle-schema checks. Spec and code-quality reviews pass.
+Final-wheel serverless job `661952856474187`, run `225044578979337`, task run `32239315245072`
+finished with `SUCCESS` using `fevm-test-jg` and `test_jg_catalog`. Python was **3.12.3**, Spark
+**4.2.0**, serverless environment version **4**. The harness removed its job and marked scratch
+schema `factory_reuse_probe_409164cd6a6e`; no classic compute was provisioned.
+[Structured runtime evidence](databricks-model-reuse-runtime.json) includes the matching wheel
+digest and cleanup confirmations.
+
+The probe executed four real model commands: initial build, changed-input rebuild, stale-baseline
+rebuild and a successful forced rebuild during a state-write outage. Three unchanged attempts
+reused without importing dbt. Four real test commands include two expected failures and their
+successful reruns, covering repaired model attempts with and without refreshed preparation.
+A profile edit fails before dbt import. These runner invocation counters exclude capture and
+preparation subprocesses. The scenario took **323.0 seconds** including task setup; this is a
+correctness probe duration, not an overhead or savings benchmark.
+
+Reproduce with the current matching wheel and a fresh output directory:
+
+```sh
+PYENV_VERSION=3.10.20 hatch build -t wheel
+.venv/bin/python tests/databricks/reuse_acceptance.py \
+  --profile fevm-test-jg --catalog test_jg_catalog \
+  --warehouse-id 7b8cc32a9eba1da3 \
+  --directory /tmp/factory-runtime-probe-unique \
+  --scenario runtime --factory-wheel dist/databricks_dbt_factory-0.4.0-py3-none-any.whl
+```

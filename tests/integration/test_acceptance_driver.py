@@ -93,6 +93,25 @@ def test_unchanged_requires_metrics_for_every_executed_model():
         check_stage(metrics()[:-1], orders_reused=True, expected_models=0)
 
 
+def test_failed_gate_counts_each_lakeflow_retry_without_accepting_duplicate_attempts():
+    report = metrics()[:-1]
+    report[0]["attempt"] = "1"
+    report[1].update(success=False, attempt="1")
+    report.append({**report[1], "attempt": "2"})
+    counts = check_stage(report, orders_reused=True, expected_models=0, expected_tests=2, failed_test=True)
+    assert counts == {"run": 0, "test": 2, "parse": 0}
+    report[-1]["attempt"] = "1"
+    with pytest.raises(AssertionError, match="duplicated"):
+        check_stage(report, expected_models=0, expected_tests=2, failed_test=True)
+
+
+def test_failed_gate_cannot_claim_an_unobserved_retry():
+    report = metrics()[:-1]
+    report[1]["success"] = False
+    with pytest.raises(AssertionError, match="missing"):
+        check_stage(report, expected_models=0, expected_tests=2, failed_test=True)
+
+
 def test_interruption_requires_the_exact_running_warehouse_query():
     statement = "CREATE OR REPLACE TABLE scratch.orders AS SELECT * FROM range(100)"
     marker = {"sha256": hashlib.sha256(statement.encode()).hexdigest()}

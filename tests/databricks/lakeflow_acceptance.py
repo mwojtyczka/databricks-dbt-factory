@@ -85,7 +85,10 @@ def prepare_acceptance_bundle(directory, catalog, schema, volume, warehouse, whe
 def check_stage(metrics, *, orders_reused=None, expected_models=None, expected_tests=1, failed_test=False):
     expected = {"orders_model", "required_gate_test"} | (set() if failed_test else {"report_model"})
     actual = [metric["task_key"] for metric in metrics]
-    assert set(actual) == expected and len(actual) == len(expected), "task metrics missing or duplicated"
+    attempts = {(metric["task_key"], metric.get("attempt")) for metric in metrics}
+    assert (
+        set(actual) == expected and len(actual) == len(expected) + expected_tests - 1 and len(attempts) == len(actual)
+    ), "task metrics missing or duplicated"
     failed = {metric["task_key"] for metric in metrics if not metric["success"]}
     assert failed == ({"required_gate_test"} if failed_test else set()), "unexpected task failure metrics"
     for metric in metrics:
@@ -373,7 +376,13 @@ def run_acceptance(
         if key == "acceptance" and any("dbt_task" in item for item in result["run"].get("tasks", [])):
             return result
         result["invocations"] = check_stage(
-            result["metrics"], orders_reused=reused, expected_models=models, failed_test=expected == "FAILED"
+            result["metrics"],
+            orders_reused=reused,
+            expected_models=models,
+            expected_tests=sum(task["task_key"] == "required_gate_test" for task in result["run"].get("tasks", []))
+            if expected == "FAILED"
+            else 1,
+            failed_test=expected == "FAILED",
         )
         save()
         return result

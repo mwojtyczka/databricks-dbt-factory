@@ -190,15 +190,45 @@ if __name__ == "__main__":
     parser.add_argument("--profile", required=True)
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--warehouse-id", required=True)
-    parser.add_argument("--directory", required=True, help="Fresh local directory for bundle and results")
-    parser.add_argument("--scenario", choices=["metadata", "state", "runtime"], default="metadata")
+    parser.add_argument(
+        "--directory",
+        "--bundle-dir",
+        dest="directory",
+        required=True,
+        help="Fresh local directory for bundle and results",
+    )
+    parser.add_argument("--schema", help="Required fresh scratch schema for acceptance/benchmark")
+    parser.add_argument("--volume", help="Required managed scratch Volume for acceptance/benchmark")
+    parser.add_argument("--target", help="Required bundle target for acceptance/benchmark")
+    parser.add_argument("--rows", type=int, default=100000000, help="Expensive benchmark input range")
+    parser.add_argument(
+        "--scenario", choices=["metadata", "state", "runtime", "acceptance", "benchmark"], default="metadata"
+    )
     parser.add_argument("--factory-wheel", help="Built matching wheel; required for --scenario state/runtime")
     args = parser.parse_args()
-    run_probe(
-        args.profile,
-        args.catalog,
-        args.warehouse_id,
-        args.directory,
-        scenario=args.scenario,
-        factory_wheel=args.factory_wheel,
-    )
+    if args.scenario in {"acceptance", "benchmark"}:
+        if not all((args.schema, args.volume, args.target, args.factory_wheel)):
+            parser.error("acceptance/benchmark require --schema, --volume, --target and --factory-wheel")
+        from lakeflow_acceptance import run_acceptance  # pylint: disable=import-error
+
+        run_acceptance(
+            args.profile,
+            args.catalog,
+            args.schema,
+            args.volume,
+            args.warehouse_id,
+            args.directory,
+            args.target,
+            args.factory_wheel,
+            scenario=args.scenario,
+            rows=args.rows,
+        )
+    else:
+        run_probe(
+            args.profile,
+            args.catalog,
+            args.warehouse_id,
+            args.directory,
+            scenario=args.scenario,
+            factory_wheel=args.factory_wheel,
+        )

@@ -39,6 +39,7 @@ for name in (
     dbutils.widgets.text(name, "")
 
 local_dir = None
+private_profiles = None
 model_run = None
 try:
     # Authenticate dbt with the notebook's own credentials via the Databricks SDK. The captured token
@@ -86,8 +87,18 @@ try:
             reuse_runtime.Attempt(
                 dbutils.widgets.get("factory_job_id"), dbutils.widgets.get("factory_run_id"),
                 dbutils.widgets.get("factory_task_key"), int(dbutils.widgets.get("factory_attempt_number")),
-            ), commands, project=Path.cwd(), forced=force_rebuild, secret_versions=secret_versions, variables=variables,
+            ), commands, project=Path.cwd(), profiles=Path(profiles_directory), forced=force_rebuild,
+            secret_versions=secret_versions, variables=variables,
         )
+
+        if model_run.profile_template is not None:
+            from databricks_dbt_factory.reuse_prepare import private_profiles_bytes
+
+            private_profiles = tempfile.TemporaryDirectory(prefix="dbt_profiles_")
+            (Path(private_profiles.name) / "profiles.yml").write_bytes(
+                private_profiles_bytes(model_run.profile_template, model_run.context)
+            )
+            profiles_directory = private_profiles.name
 
     if model_run is None or model_run.reason != "REUSED":
         from dbt.cli.main import dbtRunner
@@ -161,3 +172,5 @@ finally:
     # would otherwise accumulate under the system temp dir for the life of the cluster.
     if local_dir:
         shutil.rmtree(local_dir, ignore_errors=True)
+    if private_profiles is not None:
+        private_profiles.cleanup()

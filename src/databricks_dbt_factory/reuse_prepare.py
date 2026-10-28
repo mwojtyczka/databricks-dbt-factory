@@ -10,16 +10,155 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
+
+import yaml
 
 from databricks_dbt_factory.reuse import ExecutionContext, canonical_json, describe_models, digest_bytes
+
+
+_PROFILE_ENV_VAR = re.compile(r"\{\{\s*env_var\(\s*(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\)\s*\}\}")
 
 
 @dataclass(frozen=True)
 class Provenance:
     manifest_sha256: str
     snapshot_sha256: str
+    profiles_sha256: str
     deployment_ref: str
     context: ExecutionContext
+
+
+def _validate_profile_token(variable, payload):
+    if variable != "DBT_ACCESS_TOKEN" and not (
+        variable and variable.startswith("DBT_ENV_SECRET_") and variable in payload["secret_versions"]
+    ):
+        raise ValueError("reuse profiles: token requires SDK env_var or a versioned secret env_var")
+    if variable in payload["environment_inputs"]:
+        raise ValueError("reuse profiles: credentials cannot be captured as environment inputs")
+
+
+def _validate_literal_profile_value(value, message):
+    if not isinstance(value, str) or not value.strip() or any(marker in value for marker in ("{{", "{%", "{#")):
+        raise ValueError("reuse profiles: " + message)
+
+
+def _validate_profile_value(key, item, payload):
+    if key == "threads" and isinstance(item, int) and not isinstance(item, bool) and item > 0:
+        return
+    if not isinstance(item, str) or not item.strip():
+        raise ValueError("reuse profiles: expected nonempty scalar template values")
+    match = _PROFILE_ENV_VAR.fullmatch(item)
+    variable = match[2] if match else None
+    if key == "token":
+        _validate_profile_token(variable, payload)
+        return
+    if variable is None:
+        _validate_literal_profile_value(item, "only single env_var expressions without defaults are supported")
+    else:
+        if variable == "DBT_ACCESS_TOKEN" or variable.startswith("DBT_ENV_SECRET_"):
+            raise ValueError("reuse profiles: secret env_var is only supported for token")
+        if variable not in payload["environment_inputs"]:
+            raise ValueError("reuse profiles: every routing env_var must be declared in environment_inputs")
+        _validate_literal_profile_value(
+            payload["environment_inputs"][variable], "routing env_var values must be nonempty literal strings"
+        )
+    if key == "host":
+        hostname = payload["environment_inputs"].get(variable) if variable else item
+        if not isinstance(hostname, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", hostname):
+            raise ValueError("reuse profiles: host must be a bare hostname without credentials")
+
+
+def _validate_profile_output(output, payload):
+    fields = {"type", "host", "http_path", "catalog", "schema", "threads", "token"}
+    if (
+        not isinstance(output, dict)
+        or set(output) - fields
+        or not {"type", "host", "http_path", "schema", "token"} <= output.keys()
+        or output["type"] != "databricks"
+    ):
+        raise ValueError("reuse profiles: only basic Databricks PAT outputs are supported")
+    for key, item in output.items():
+        _validate_profile_value(key, item, payload)
+
+
+def profile_template(directory: Path, context: ExecutionContext) -> bytes:
+    """Accept basic Databricks PAT profiles; hash only validated, unresolved template values.
+
+    Credentials use the notebook SDK token or versioned DBT_ENV_SECRET_ references. Other
+    fields are literal or a single declared env_var without defaults. Nested adapter options
+    and other auth modes require a separately reviewed contract before reuse supports them.
+    """
+    payload = json.loads(context.canonical_json)
+    try:
+        value = yaml.safe_load((Path(directory) / "profiles.yml").read_bytes())
+    except yaml.YAMLError:
+        raise ValueError("reuse profiles: invalid YAML") from None
+    name_pattern = r"[A-Za-z_][A-Za-z0-9_-]*"
+    if (
+        not isinstance(value, dict)
+        or len(value) != 1
+        or not all(isinstance(name, str) and re.fullmatch(name_pattern, name) for name in value)
+    ):
+        raise ValueError("reuse profiles: expected one statically named profile")
+    profile = next(iter(value.values()))
+    if (
+        not isinstance(profile, dict)
+        or set(profile) != {"target", "outputs"}
+        or profile["target"] != payload["target"]
+        or not isinstance(profile["outputs"], dict)
+        or payload["target"] not in profile["outputs"]
+    ):
+        raise ValueError("reuse profiles: expected static target and outputs")
+    for name, output in profile["outputs"].items():
+        if not isinstance(name, str) or not re.fullmatch(name_pattern, name):
+            raise ValueError("reuse profiles: expected static output names")
+        _validate_profile_output(output, payload)
+    # YAML comments and discarded duplicate values never enter hashes or private snapshots.
+    return canonical_json(value).encode()
+
+
+def verify_profiles(provenance: Provenance, directory: Path) -> bytes:
+    """Return the exact validated template to use for subsequent dbt invocations."""
+    content = profile_template(directory, provenance.context)
+    if digest_bytes(content) != provenance.profiles_sha256:
+        raise ValueError("reuse profiles digest mismatch; deploy the captured profile template")
+    return content
+
+
+def private_profiles_bytes(template: bytes, context: ExecutionContext) -> bytes:
+    """Freeze declared routing values; leave credential env_var references unresolved."""
+    profile = json.loads(template)
+    environment = json.loads(context.canonical_json)["environment_inputs"]
+    settings = next(iter(profile.values()))
+    for output in settings["outputs"].values():
+        for key, value in output.items():
+            if key == "token" or not isinstance(value, str):
+                continue
+            variable = _PROFILE_ENV_VAR.fullmatch(value)
+            if variable:
+                output[key] = environment[variable[2]]
+    return canonical_json(profile).encode()
+
+
+def runtime_profile_reason(template: bytes, context: ExecutionContext, host: str) -> str | None:
+    """The supported notebook path must use the SDK token and its authenticated host."""
+    payload = json.loads(context.canonical_json)
+    profile = next(iter(json.loads(template).values()))
+    output = profile["outputs"][payload["target"]]
+    token = _PROFILE_ENV_VAR.fullmatch(output["token"])
+    if token is None or token[2] != "DBT_ACCESS_TOKEN":
+        return "PROFILE_UNSUPPORTED_AUTH"
+    configured_host = output["host"]
+    variable = _PROFILE_ENV_VAR.fullmatch(configured_host)
+    if variable:
+        configured_host = os.environ.get(variable[2])
+    parsed = urlparse(host if "://" in host else "//" + host)
+    if parsed.username is not None or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        return "CONTEXT_CHANGED"
+    if not configured_host or configured_host.lower() != parsed.netloc.lower():
+        return "CONTEXT_CHANGED"
+    return None
 
 
 def runtime_versions() -> dict[str, str]:
@@ -60,16 +199,24 @@ def read_provenance(content: bytes, manifest: bytes) -> Provenance:
         value = json.loads(content)
     except ValueError as error:
         raise ValueError("reuse provenance: expected JSON") from error
-    fields = {"format_version", "manifest_sha256", "snapshot_sha256", "deployment_ref", "context", "context_sha256"}
+    fields = {
+        "format_version",
+        "manifest_sha256",
+        "snapshot_sha256",
+        "profiles_sha256",
+        "deployment_ref",
+        "context",
+        "context_sha256",
+    }
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError(f"reuse provenance: expected fields {sorted(fields)}")
     if (
         not isinstance(value["format_version"], int)
         or isinstance(value["format_version"], bool)
-        or value["format_version"] != 1
+        or value["format_version"] != 2
     ):
-        raise ValueError("reuse provenance: format_version must be 1")
-    for key in ("manifest_sha256", "snapshot_sha256", "context_sha256"):
+        raise ValueError("reuse provenance: format_version must be 2")
+    for key in ("manifest_sha256", "snapshot_sha256", "profiles_sha256", "context_sha256"):
         if not isinstance(value[key], str) or not re.fullmatch(r"[0-9a-f]{64}", value[key]):
             raise ValueError(f"reuse provenance: invalid {key}")
     if not isinstance(value["deployment_ref"], str) or not value["deployment_ref"].strip():
@@ -79,7 +226,9 @@ def read_provenance(content: bytes, manifest: bytes) -> Provenance:
         raise ValueError("reuse provenance: context digest mismatch")
     if digest_bytes(manifest) != value["manifest_sha256"]:
         raise ValueError("reuse provenance: manifest digest mismatch; capture provenance with this parse")
-    return Provenance(value["manifest_sha256"], value["snapshot_sha256"], value["deployment_ref"], context)
+    return Provenance(
+        value["manifest_sha256"], value["snapshot_sha256"], value["profiles_sha256"], value["deployment_ref"], context
+    )
 
 
 def capture_parse(
@@ -96,9 +245,11 @@ def capture_parse(
     """Run in the pinned execution environment. Caller supplies non-secret vars/version identifiers.
 
     The project must be a clean, immutable deployment tree with its locked packages already
-    installed. This helper never infers provenance for an existing manifest, copies profiles,
-    resolves packages, or hashes credentials. Target/log output lives outside the snapshot.
+    installed. This helper never infers provenance for an existing manifest, resolves packages,
+    or hashes credentials. Only validated profile templates are copied;
+    target/log output lives outside the snapshot.
     """
+    # pylint: disable=too-many-locals
     project = Path(project_directory).resolve()
     profiles = Path(profiles_directory).resolve()
     if profiles == project or project in profiles.parents:
@@ -119,8 +270,12 @@ def capture_parse(
             "secret_versions": {} if secret_versions is None else secret_versions,
         }
     )
+    template = profile_template(profiles, context)
     before = snapshot_digest(project_directory)
     with tempfile.TemporaryDirectory(prefix="factory-reuse-parse-") as directory:
+        private_profiles = Path(directory) / "profiles"
+        private_profiles.mkdir()
+        (private_profiles / "profiles.yml").write_bytes(private_profiles_bytes(template, context))
         command = [
             sys.executable,
             "-c",
@@ -130,7 +285,7 @@ def capture_parse(
             "--project-dir",
             str(project),
             "--profiles-dir",
-            str(profiles),
+            str(private_profiles),
             "--target",
             target,
             "--vars",
@@ -149,7 +304,8 @@ def capture_parse(
     if json.loads(manifest)["metadata"]["dbt_version"] != json.loads(context.canonical_json)["versions"]["dbt-core"]:
         raise ValueError("reuse capture: parsed engine version differs from context")
     provenance = {
-        "format_version": 1,
+        "format_version": 2,
+        "profiles_sha256": digest_bytes(template),
         "manifest_sha256": digest_bytes(manifest),
         "snapshot_sha256": before,
         "deployment_ref": deployment_ref,
@@ -185,10 +341,13 @@ def verify_parsed_manifest(parsed: dict, manifest: bytes) -> None:
         raise ValueError("reuse preparation fresh parse differs from deployment; verify profiles, vars and environment")
 
 
-def _native_modified(project, profiles, context, baseline, environment, manifest):
+def _native_modified(project, template, context, baseline, environment, manifest):
     """Ask dbt itself; baseline artifacts and current output must never share a directory."""
     with tempfile.TemporaryDirectory(prefix="factory-reuse-state-") as directory:
         root = Path(directory)
+        profiles = root / "profiles"
+        profiles.mkdir()
+        (profiles / "profiles.yml").write_bytes(template)
         state = root / "baseline"
         state.mkdir()
         (state / "manifest.json").write_bytes(baseline)
@@ -283,7 +442,7 @@ def _baseline_groups(models, current, manifest, baselines):
             old_models = {model.unique_id: model for model in describe_models(old_manifest, previous.context)}
             parsed_baselines[artifact_key] = (previous, old_models, old_manifest["metadata"]["dbt_schema_version"])
         previous, old_models, old_schema = parsed_baselines[artifact_key]
-        if previous.context != current.context:
+        if previous.context != current.context or previous.profiles_sha256 != current.profiles_sha256:
             reasons[uid] = "CONTEXT_CHANGED"
             continue
         reason = _comparison_reason(models.get(uid), old_models.get(uid))
@@ -306,6 +465,7 @@ def compare_baselines(project, profiles, manifest: bytes, provenance: bytes, bas
     """
     current = read_provenance(provenance, manifest)
     verify_snapshot(current, project)
+    template = verify_profiles(current, profiles)
     context = json.loads(current.context.canonical_json)
     environment = os.environ.copy()
     models = {model.unique_id: model for model in describe_models(json.loads(manifest), current.context)}
@@ -316,7 +476,14 @@ def compare_baselines(project, profiles, manifest: bytes, provenance: bytes, bas
     reasons, groups = _baseline_groups(models, current, manifest, baselines)
     comparisons = []
     for (manifest_sha256, context_sha256), group in groups.items():
-        changed, diagnostics = _native_modified(project, profiles, context, group["manifest"], environment, manifest)
+        changed, diagnostics = _native_modified(
+            project,
+            private_profiles_bytes(template, current.context),
+            context,
+            group["manifest"],
+            environment,
+            manifest,
+        )
         comparisons.append(
             {"manifest_sha256": manifest_sha256, "context_sha256": context_sha256, "diagnostics": diagnostics}
         )

@@ -2,6 +2,8 @@
 
 import copy
 import json
+import os
+from unittest.mock import patch as patch_environment
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from databricks_dbt_factory.reuse import (
     lineage_reason,
 )
 from databricks_dbt_factory.reuse_prepare import capture_parse, read_provenance, verify_snapshot
-from tests.integration.dbt_helpers import PROFILES
+from tests.integration.dbt_helpers import REUSE_PROFILES as PROFILES
 
 
 IDENTITY = {
@@ -35,6 +37,11 @@ CONFIG = {
     "state_schema": "factory",
     "artifact_volume": {"catalog": "state", "schema": "factory", "volume": "artifacts"},
 }
+
+
+@pytest.fixture(autouse=True)
+def reuse_credentials(monkeypatch):
+    monkeypatch.setenv("DBT_ACCESS_TOKEN", "dummy-parse-only")
 
 
 @pytest.fixture(scope="module")
@@ -69,7 +76,10 @@ def captured(tmp_path_factory):
     (project / "models" / "sources.yml").write_text(
         "version: 2\nsources:\n  - name: raw\n    database: raw\n    schema: sales\n    tables:\n      - name: orders\n"
     )
-    manifest, provenance = capture_parse(project, profiles, identity=IDENTITY, target="dev", deployment_ref="release-1")
+    with patch_environment.dict(os.environ, {"DBT_ACCESS_TOKEN": "dummy-parse-only"}):
+        manifest, provenance = capture_parse(
+            project, profiles, identity=IDENTITY, target="dev", deployment_ref="release-1"
+        )
     return project, profiles, manifest, provenance
 
 
@@ -367,7 +377,6 @@ def test_definition_closure_uses_dbt_graph_and_rejects_unresolved_dependencies(c
 
 
 def test_dependency_fallback_reasons_are_stable_across_processes(captured, tmp_path):
-    import os  # pylint: disable=import-outside-toplevel
     import shutil  # pylint: disable=import-outside-toplevel
     import subprocess  # pylint: disable=import-outside-toplevel
     import sys  # pylint: disable=import-outside-toplevel

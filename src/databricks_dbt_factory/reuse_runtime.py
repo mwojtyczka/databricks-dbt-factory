@@ -23,9 +23,16 @@ from databricks_dbt_factory.reuse import (
     lineage_reason,
     reuse_reason,
 )
-from databricks_dbt_factory.reuse_prepare import compare_baselines, read_provenance, runtime_versions, verify_snapshot
+from databricks_dbt_factory.reuse_prepare import (
+    compare_baselines,
+    read_provenance,
+    runtime_versions,
+    runtime_profile_reason,
+    verify_profiles,
+    verify_snapshot,
+)
 
-# Enable only after lineage and repair/outage validation in Tasks 8–9.
+# Enable only after the serverless acceptance checks in Task 10.
 REUSE_ENABLED = False
 
 
@@ -793,6 +800,17 @@ def _prepare_model(spark, workspace_client, config, context, model, attempt, dep
         return {"reason": str(error), "baseline": None}, None
 
 
+def _runtime_profiles(provenance, directory, workspace_client):
+    try:
+        template = verify_profiles(provenance, directory)
+    except OSError as error:
+        raise EvidenceUnavailable("PROFILE_UNAVAILABLE") from error
+    reason = runtime_profile_reason(template, provenance.context, workspace_client.config.host)
+    if reason:
+        raise EvidenceUnavailable(reason)
+    return template
+
+
 def prepare_run(
     spark, workspace_client, config, deployment, project, profiles, attempt, *, secret_versions=None, model_ids=None
 ) -> dict:
@@ -816,7 +834,9 @@ def prepare_run(
         _descriptor, manifest, provenance = load_deployment(
             workspace_client, config, deployment, deployments=deployments
         )
-        context = read_provenance(provenance, manifest).context
+        parsed_provenance = read_provenance(provenance, manifest)
+        context = parsed_provenance.context
+        _runtime_profiles(parsed_provenance, profiles, workspace_client)
         verify_runtime_identity(spark, workspace_client, context)
     except EvidenceUnavailable as error:
         return result | {"reason": str(error)}
@@ -859,6 +879,7 @@ class ModelRun:
     context: ExecutionContext | None = None
     model: ModelDescriptor | None = None
     manifest: bytes | None = None
+    profile_template: bytes | None = None
     command_supported: bool = False
     ready: bool = False
     baseline: dict | None = None
@@ -963,19 +984,21 @@ def begin_model(
     commands,
     *,
     project: Path,
+    profiles: Path,
     forced=False,
     secret_versions=None,
     variables=None,
 ) -> ModelRun:
     # The notebook boundary supplies deployment, attempt, command and captured context together.
     # Keep the ordered fallback checks at the notebook's single evidence boundary.
-    # pylint: disable=too-many-try-statements,too-many-arguments,too-complex
+    # pylint: disable=too-many-try-statements,too-many-arguments,too-complex,too-many-locals
     """Revalidate code binding and live physical evidence without importing dbt."""
     run = ModelRun(config, deployment, model_id, attempt)
     try:
         run.manifest, provenance = load_deployment(workspace_client, config, deployment)[1:]
         parsed_provenance = read_provenance(provenance, run.manifest)
         verify_snapshot(parsed_provenance, project)
+        run.profile_template = _runtime_profiles(parsed_provenance, profiles, workspace_client)
         run.context = parsed_provenance.context
         run.model = next(
             (model for model in describe_models(json.loads(run.manifest), run.context) if model.unique_id == model_id),

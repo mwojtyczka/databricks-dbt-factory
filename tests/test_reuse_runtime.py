@@ -408,11 +408,12 @@ class StateSQL:
 
 
 @pytest.fixture
-def evidence(local_bundle, captured):
+def evidence(local_bundle, captured, monkeypatch):
+    monkeypatch.setenv("DBT_ACCESS_TOKEN", "dummy-parse-only")
     config = ReuseConfig.from_dict(CONFIG)
     context = read_provenance(captured[3], captured[2]).context
     files = Files()
-    client = SimpleNamespace(files=files)
+    client = SimpleNamespace(files=files, config=SimpleNamespace(host="https://example.databricks.com"))
     refs = publish_artifacts(client, local_bundle, "/Volumes/state/factory/artifacts")
     descriptor = next(ref for name, ref in refs.items() if name.startswith("descriptor_"))
     source = RelationSnapshot(Relation("raw", "sales", "orders"), "source-uc", "source-delta", 0)

@@ -361,7 +361,7 @@ def test_profile_change_cannot_publish_captured_graph(matching_preparation, mode
     try:
         path.write_text(original.replace("schema: default", "schema: other"), encoding="utf-8")
         assert path.read_text(encoding="utf-8") != original
-        with pytest.raises(ValueError, match="fresh parse differs"):
+        with pytest.raises(ValueError, match="profiles digest mismatch"):
             execute_notebook(values, store)
     finally:
         path.write_text(original, encoding="utf-8")

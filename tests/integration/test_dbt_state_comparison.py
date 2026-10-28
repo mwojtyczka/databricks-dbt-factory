@@ -1,14 +1,20 @@
 """Selective comparison against fresh artifacts from the installed dbt engine."""
 
 import json
+import os
+from unittest.mock import patch
 import shutil
 
 import pytest
 
 from databricks_dbt_factory import reuse_prepare
 from databricks_dbt_factory.reuse import ExecutionContext
+from tests import test_reuse
 from tests.test_reuse import IDENTITY
-from tests.integration.dbt_helpers import PROFILES
+
+from tests.integration.dbt_helpers import REUSE_PROFILES as PROFILES
+
+reuse_credentials = test_reuse.reuse_credentials
 
 
 @pytest.fixture(scope="module")
@@ -37,9 +43,10 @@ def baseline(tmp_path_factory):
     )
     for name, body in {"outer": "{{ inner() }}", "inner": "1", "unused": "1"}.items():
         (project / "macros" / f"{name}.sql").write_text("{% macro " + name + "() %}" + body + "{% endmacro %}")
-    manifest, provenance = reuse_prepare.capture_parse(
-        project, profiles, identity=IDENTITY, target="dev", deployment_ref="baseline"
-    )
+    with patch.dict(os.environ, {"DBT_ACCESS_TOKEN": "dummy-parse-only"}):
+        manifest, provenance = reuse_prepare.capture_parse(
+            project, profiles, identity=IDENTITY, target="dev", deployment_ref="baseline"
+        )
     return project, profiles, manifest, provenance
 
 
@@ -174,7 +181,7 @@ def test_changed_runtime_profile_cannot_compare_a_different_graph(baseline, tmp_
     profiles = tmp_path / "profiles"
     profiles.mkdir()
     (profiles / "profiles.yml").write_text(PROFILES.replace("schema: default", "schema: changed"))
-    with pytest.raises(ValueError, match="fresh parse differs from deployment"):
+    with pytest.raises(ValueError, match="profiles digest mismatch"):
         reuse_prepare.compare_baselines(
             baseline[0], profiles, baseline[2], baseline[3], {"model.probe.orders": (baseline[2], baseline[3])}
         )

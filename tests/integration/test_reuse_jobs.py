@@ -2,6 +2,8 @@
 
 import copy
 import json
+import os
+from unittest.mock import patch
 from dataclasses import replace
 
 import pytest
@@ -13,8 +15,11 @@ from databricks_dbt_factory.job_spec import render_job_spec, render_partitioned_
 from databricks_dbt_factory.reuse import ReuseDeployment
 from databricks_dbt_factory.reuse_prepare import capture_parse, read_provenance
 from databricks_dbt_factory.task_factory import DbtDependencyResolver, ModelTaskFactory, TestTaskFactory as DbtTests
-from tests.integration.dbt_helpers import PROFILES
+from tests.integration.dbt_helpers import REUSE_PROFILES as PROFILES
+from tests import test_reuse
 from tests.test_reuse import CONFIG, IDENTITY
+
+reuse_credentials = test_reuse.reuse_credentials
 
 
 @pytest.fixture(scope="module")
@@ -36,7 +41,8 @@ def reuse_graph(tmp_path_factory):
     }.items():
         (project / "models" / f"{name}.sql").write_text(sql)
     (project / "tests" / "producer_gate.sql").write_text("select * from {{ ref('producer') }} where id is null")
-    manifest, provenance = capture_parse(project, profiles, identity=IDENTITY, target="dev", deployment_ref="r1")
+    with patch.dict(os.environ, {"DBT_ACCESS_TOKEN": "dummy-parse-only"}):
+        manifest, provenance = capture_parse(project, profiles, identity=IDENTITY, target="dev", deployment_ref="r1")
     settings = ReuseDeployment(
         CONFIG,
         read_provenance(provenance, manifest).context,
@@ -177,7 +183,8 @@ def large_manifest(tmp_path_factory):
         (project / "models" / f"m{index:04}.sql").write_text(
             "{{ config(materialized='table', tags=['batch']" + policy + ") }} select 1 as id"
         )
-    manifest, _ = capture_parse(project, profiles, identity=IDENTITY, target="dev", deployment_ref="large")
+    with patch.dict(os.environ, {"DBT_ACCESS_TOKEN": "dummy-parse-only"}):
+        manifest, _ = capture_parse(project, profiles, identity=IDENTITY, target="dev", deployment_ref="large")
     return json.loads(manifest)
 
 

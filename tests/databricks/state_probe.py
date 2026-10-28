@@ -6,12 +6,14 @@
 import io
 import json
 import platform
+import os
 import tempfile
 import time
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.runtime import dbutils, spark
@@ -169,9 +171,9 @@ def run_checks():
                                 "type": "databricks",
                                 "catalog": catalog,
                                 "schema": schema,
-                                "host": w.config.host,
+                                "host": urlparse(w.config.host).netloc,
                                 "http_path": "/sql/1.0/warehouses/unused",
-                                "token": "unused-parse-only",
+                                "token": "{{ env_var('DBT_ACCESS_TOKEN') }}",
                                 "threads": 1,
                             }
                         },
@@ -179,6 +181,7 @@ def run_checks():
                 }
             )
         )
+        os.environ["DBT_ACCESS_TOKEN"] = w.config.authenticate()["Authorization"].removeprefix("Bearer ").strip()
         manifest, provenance = capture_parse(
             project, profiles, identity=identity, target="probe", deployment_ref=run_id
         )

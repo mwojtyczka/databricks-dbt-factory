@@ -328,15 +328,23 @@ stopped before its remaining scenarios, and its owned jobs/schema were removed.
 limits alongside run/query identifiers and task counters.
 
 The benchmark scenario generates ordinary jobs without preparation/reuse metadata and retains
-tests in both arms. It uses an owned temporary serverless warehouse for cold/warm SQL runs,
-without stopping the supplied shared warehouse. Billing corrections, effective list prices,
-query timings and raw warehouse usage are collected separately. Warehouse usage remains
-unallocated between individual runs, and serverless notebook coldness is not controlled;
-these limitations prevent a complete net-savings claim. Production `REUSE_ENABLED` stays **False**.
+tests in both arms. It creates four identical, exclusively owned serverless warehouses: reuse
+off/on for each short/expensive workload. Each arm starts with a stopped warehouse, repeats
+warm, then changes one and multiple inputs; short-workload arms also cover partial deployments
+and mixed successful baselines. Controls and telemetry use the supplied control warehouse.
+Each measured warehouse stops after its arm; collection bounds its usage to that warehouse's
+lifecycle and job/query evidence to the arm's actual runs. Creation/startup costs are retained.
+Owned warehouses are removed during cleanup, without stopping the supplied shared warehouse.
 
-Local verification: the full suite passed 791 tests; its packaging test then passed separately
-with build-cache access. All 34 acceptance-focused tests pass, including three additional
-regressions added after that full run. Ruff, mypy and pylint pass. The harness has passed spec
+Billing corrections, effective list prices, query timings and raw warehouse usage are collected
+separately. Warehouse usage remains unallocated between individual runs within an arm, and
+serverless notebook coldness is not controlled. Billing is provisional even when rows arrive;
+the live comparison and positive net savings remain unproven. Production `REUSE_ENABLED` stays
+**False**. Status polling permits one recovered request after an SDK connection timeout while
+retaining the run's original deadline.
+
+Local verification: all **811 tests** pass in a full run, including packaging with build-cache
+access and all 50 acceptance-focused tests. Ruff, mypy and pylint pass. The harness has passed spec
 and code-quality review; these checks do not replace the pending platform acceptance.
 
 Reproduce the complete current scenario with a matching wheel and fresh schema/directory:

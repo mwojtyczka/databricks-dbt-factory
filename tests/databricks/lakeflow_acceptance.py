@@ -118,6 +118,16 @@ def completed_repair(run, repair_id):
     return any(item.get("id") == repair_id and item.get("end_time") for item in run.get("repair_history", []))
 
 
+def read_run(client, run_id, *, deadline):
+    try:
+        return client.jobs.get_run(run_id, include_history=True)
+    except TimeoutError:
+        # The SDK already retries a request for five minutes. Allow one recovered connection.
+        if time.monotonic() >= deadline:
+            raise
+        return client.jobs.get_run(run_id, include_history=True)
+
+
 def run_acceptance(
     profile, catalog, schema, volume, warehouse_id, directory, target, wheel, *, scenario="acceptance", rows=100000000
 ):
@@ -130,6 +140,7 @@ def run_acceptance(
         from reuse_acceptance import publish_probe_wheel
 
     client = WorkspaceClient(profile=profile)
+    control_warehouse_id = warehouse_id
     warehouse = client.warehouses.get(warehouse_id)
     if not warehouse.enable_serverless_compute:
         raise ValueError("acceptance requires a serverless SQL warehouse")
@@ -164,7 +175,7 @@ def run_acceptance(
         },
     }
     created = deployed = False
-    benchmark_warehouse = None
+    benchmark_warehouses = {}
     active_run = None
     job_ids = {}
 
@@ -191,7 +202,7 @@ def run_acceptance(
 
         values = [StatementParameterListItem(name=key, value=str(value)) for key, value in (parameters or {}).items()]
         result = client.statement_execution.execute_statement(
-            statement, warehouse_id, parameters=values, wait_timeout="0s"
+            statement, control_warehouse_id, parameters=values, wait_timeout="0s"
         )
         report["statements"].append({"statement_id": result.statement_id, "kind": statement.split()[0]})
         deadline = time.monotonic() + 600
@@ -219,7 +230,7 @@ def run_acceptance(
         deadline = started + 2400
         last = None
         while True:
-            run = client.jobs.get_run(run_id, include_history=True)
+            run = read_run(client, run_id, deadline=deadline)
             state = run.state.life_cycle_state.value
             if state != last:
                 print(f"{stage}: run {run_id}: {state}", flush=True)
@@ -264,9 +275,9 @@ def run_acceptance(
     def capture(variant):
         version = "1.12.4" if variant == "engine_previous" else "1.12.5"
         dependencies = initial["resources"]["jobs"]["bootstrap"]["environments"][0]["spec"]["dependencies"]
-        if dependencies[0] != "dbt-core==" + version:
-            dependencies[0] = "dbt-core==" + version
-            current = json.loads((directory / "databricks.yml").read_text())
+        dependencies[0] = "dbt-core==" + version
+        current = json.loads((directory / "databricks.yml").read_text())
+        if current["resources"]["jobs"]["bootstrap"] != initial["resources"]["jobs"]["bootstrap"]:
             current["resources"]["jobs"]["bootstrap"] = initial["resources"]["jobs"]["bootstrap"]
             (directory / "databricks.yml").write_text(json.dumps(current, indent=2) + "\n")
             deploy()
@@ -479,33 +490,12 @@ def run_acceptance(
         bundle("validate", "--strict")
         client.schemas.create(name=schema, catalog_name=catalog, comment=marker)
         created = True
-        if scenario == "benchmark":
-            from databricks.sdk.service.sql import CreateWarehouseRequestWarehouseType
-
-            benchmark_warehouse = client.warehouses.create(
-                name=schema + "_" + marker.rsplit(":", 1)[1],
-                cluster_size="2X-Small",
-                min_num_clusters=1,
-                max_num_clusters=1,
-                auto_stop_mins=5,
-                enable_serverless_compute=True,
-                warehouse_type=CreateWarehouseRequestWarehouseType.PRO,
-            ).response.id
-            warehouse_id = benchmark_warehouse
-            initial["resources"]["jobs"]["bootstrap"]["tasks"][0]["notebook_task"]["base_parameters"][
-                "warehouse_id"
-            ] = warehouse_id
-            (directory / "databricks.yml").write_text(json.dumps(initial, indent=2) + "\n")
-            report["requested_warehouse_id"] = report["warehouse_id"]
-            report["warehouse_id"] = warehouse_id
-            report["benchmark_warehouse"] = {"id": warehouse_id, "shared": False, "cold_runs": []}
-            save()
         client.volumes.create(catalog_name=catalog, schema_name=schema, name=volume, volume_type=VolumeType.MANAGED)
         report["wheel_sha256"] = publish_probe_wheel(client, wheel, volume_root)
         deploy()
         bootstrap("setup")
-        capture("base")
         if scenario == "acceptance":
+            capture("base")
             run("initial", models=2, reused=False)
             run("unchanged", models=0, reused=True)
             sql(f"INSERT INTO {table('input_table')} VALUES (2)")
@@ -561,28 +551,61 @@ def run_acceptance(
             run("native_task")
             report["checks"]["generated_dag"] = True
         elif scenario == "benchmark":
+            from databricks.sdk.service.sql import CreateWarehouseRequestWarehouseType
+
+            report["benchmark_cohorts"] = []
             for variant in ("base", "expensive"):
-                capture(variant)
-                client.warehouses.stop(benchmark_warehouse).result()
-                report["benchmark_warehouse"]["cold_runs"].append(variant + "_off_first")
-                run(variant + "_off_first", key="baseline", models=2)
-                run(variant + "_off_repeat", key="baseline", models=2)
-                client.warehouses.stop(benchmark_warehouse).result()
-                report["benchmark_warehouse"]["cold_runs"].append(variant + "_on_first")
-                run(variant + "_on_first", models=2, reused=False)
-                run(variant + "_on_repeat", models=0, reused=True)
-                sql(f"INSERT INTO {table('input_table')} VALUES (42)")
-                run(variant + "_one_input_changed_off", key="baseline", models=2)
-                run(variant + "_one_input_changed", models=2, reused=False)
-                sql(f"INSERT INTO {table('input_table')} VALUES (43)")
-                sql(f"UPDATE {table('test_control')} SET fail = false")
-                run(variant + "_many_inputs_changed_off", key="baseline", models=2)
-                run(variant + "_many_inputs_changed", models=2, reused=False)
-                if variant == "base":
-                    capture("partial")
-                    run("benchmark_partial_deployment", models=1, reused=True)
-                    partial = run("benchmark_mixed_baselines", models=0, reused=True)
-                    assert partial["preparation"]["comparison_count"] == 2
+                for arm in ("off", "on"):
+                    cohort = {"variant": variant, "arm": arm, "stages": [], "created_ms": int(time.time() * 1000)}
+                    name = schema + "_" + variant + "_" + arm + "_" + marker.rsplit(":", 1)[1]
+                    warehouse_id = client.warehouses.create(
+                        name=name,
+                        cluster_size="2X-Small",
+                        min_num_clusters=1,
+                        max_num_clusters=1,
+                        auto_stop_mins=5,
+                        enable_serverless_compute=True,
+                        warehouse_type=CreateWarehouseRequestWarehouseType.PRO,
+                    ).response.id
+                    benchmark_warehouses[warehouse_id] = name
+                    cohort["warehouse_id"] = warehouse_id
+                    report["benchmark_cohorts"].append(cohort)
+                    save()
+                    client.warehouses.stop(warehouse_id).result()
+                    initial["resources"]["jobs"]["bootstrap"]["tasks"][0]["notebook_task"]["base_parameters"][
+                        "warehouse_id"
+                    ] = warehouse_id
+                    sql(f"TRUNCATE TABLE {table('input_table')}")
+                    sql(f"INSERT INTO {table('input_table')} VALUES (1)")
+                    sql(f"UPDATE {table('test_control')} SET fail = false")
+                    capture(variant)
+
+                    def measured_run(suffix, **expect):
+                        stage = variant + "_" + arm + "_" + suffix
+                        cohort["stages"].append(stage)
+                        return run(stage, key="baseline" if arm == "off" else "acceptance", **expect)
+
+                    measured_run("first", models=2, reused=False if arm == "on" else None)
+                    measured_run("repeat", models=0 if arm == "on" else 2, reused=True if arm == "on" else None)
+                    sql(f"INSERT INTO {table('input_table')} VALUES (42)")
+                    measured_run("one_input_changed", models=2, reused=False if arm == "on" else None)
+                    sql(f"INSERT INTO {table('input_table')} VALUES (43)")
+                    sql(f"UPDATE {table('test_control')} SET fail = false")
+                    measured_run("many_inputs_changed", models=2, reused=False if arm == "on" else None)
+                    client.warehouses.stop(warehouse_id).result()
+                    if variant == "base":
+                        capture("partial")
+                        measured_run(
+                            "partial_deployment", models=1 if arm == "on" else 2, reused=True if arm == "on" else None
+                        )
+                        partial = measured_run(
+                            "mixed_baselines", models=0 if arm == "on" else 2, reused=True if arm == "on" else None
+                        )
+                        if arm == "on":
+                            assert partial["preparation"]["comparison_count"] == 2
+                        client.warehouses.stop(warehouse_id).result()
+                    cohort["stopped_ms"] = int(time.time() * 1000)
+                    save()
             report["checks"]["benchmark_runs"] = True
         else:
             raise ValueError("unsupported acceptance scenario")
@@ -594,11 +617,23 @@ def run_acceptance(
         save()
         if active_run is not None:
             client.jobs.cancel_run(active_run).result()
+        for cohort in report.get("benchmark_cohorts", []):
+            if "stopped_ms" not in cohort:
+                client.warehouses.stop(cohort["warehouse_id"]).result()
+                cohort["stopped_ms"] = int(time.time() * 1000)
         try:
             from tests.databricks.acceptance_metrics import collect_measurements
         except ModuleNotFoundError:
             from acceptance_metrics import collect_measurements
-        report["measurements"] = collect_measurements(sql, report["runs"], warehouse_id)
+        report["measurements"] = collect_measurements(sql, report["runs"], control_warehouse_id)
+        for cohort in report.get("benchmark_cohorts", []):
+            selected = [item for item in report["runs"] if item["stage"] in cohort["stages"]]
+            cohort["measurements"] = collect_measurements(
+                sql,
+                selected,
+                cohort["warehouse_id"],
+                warehouse_window=(cohort["created_ms"], cohort["stopped_ms"]),
+            )
         save()
         if deployed:
             bundle("destroy", "--auto-approve")
@@ -608,11 +643,12 @@ def run_acceptance(
                 raise RuntimeError("scratch schema ownership changed")
             client.schemas.delete(catalog + "." + schema, force=True)
             report["schema_cleaned_up"] = True
-        if benchmark_warehouse is not None:
-            owned = client.warehouses.get(benchmark_warehouse)
-            if owned.name != schema + "_" + marker.rsplit(":", 1)[1]:
+        for owned_id, name in benchmark_warehouses.items():
+            owned = client.warehouses.get(owned_id)
+            if owned.name != name:
                 raise RuntimeError("benchmark warehouse ownership changed")
-            client.warehouses.delete(benchmark_warehouse)
-            report["benchmark_warehouse_cleaned_up"] = True
+            client.warehouses.delete(owned_id)
+        if benchmark_warehouses:
+            report["benchmark_warehouses_cleaned_up"] = True
         save()
     return report

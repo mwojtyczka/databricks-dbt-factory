@@ -175,3 +175,54 @@ def test_interrupted_query_without_metrics_is_bound_and_counted_in_coverage():
     assert history["missing_statement_ids"] == ["interrupted-id'"]
     assert history["captured_statement_ids_complete"] is False
     assert history["complete"] is False
+
+
+def test_warehouse_lifecycle_window_does_not_expand_query_or_job_scopes():
+    calls = []
+
+    def execute(statement, *, parameters):
+        calls.append((statement, parameters))
+        return []
+
+    evidence = collect_measurements(execute, runs(), "wh", warehouse_window=(500, 15000))
+    assert len(calls) == 3
+    for _statement, parameters in calls[:2]:
+        assert (parameters["start_ms"], parameters["end_ms"]) == (1000, 9000)
+    assert calls[2][1] == {"start_ms": 500, "end_ms": 15000, "warehouse_id": "wh"}
+    assert evidence["warehouse_usage"]["complete"] is False
+
+
+@pytest.mark.parametrize(
+    "window",
+    [
+        (),
+        (1,),
+        (1, 2, 3),
+        [1, 2],
+        (None, 2),
+        (True, 2),
+        (1.0, 2),
+        (1, float("inf")),
+        (float("nan"), 2),
+        (0, 2),
+        (-1, 2),
+        (2, 2),
+        (3, 2),
+        "1,2",
+    ],
+)
+def test_invalid_warehouse_window_leaves_other_bounded_telemetry_available(window):
+    calls = []
+
+    def execute(statement, *, parameters):
+        calls.append((statement, parameters))
+        return []
+
+    evidence = collect_measurements(execute, runs(), "wh", warehouse_window=window)
+    assert len(calls) == 2
+    assert all("warehouse_id =" not in statement for statement, _parameters in calls)
+    assert evidence["query_history"]["status"] == "incomplete"
+    assert evidence["job_billing"]["status"] == "incomplete"
+    assert evidence["warehouse_usage"]["status"] == "unavailable"
+    assert evidence["warehouse_usage"]["complete"] is False
+    assert "window" in evidence["warehouse_usage"]["reason"].lower()

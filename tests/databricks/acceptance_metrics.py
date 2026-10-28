@@ -30,9 +30,12 @@ BILLING_COLUMNS = (
 
 
 # This test driver keeps the three bounded evidence queries together.
-# pylint: disable=too-complex,too-many-locals
-def collect_measurements(execute_sql, runs, warehouse_id):
+# pylint: disable=too-complex,too-many-locals,too-many-statements
+def collect_measurements(execute_sql, runs, warehouse_id, *, warehouse_window=None):
     """Collect raw evidence from driver run dictionaries using named SQL parameters.
+
+    warehouse_window bounds only exclusive warehouse lifecycle usage; query and job
+    evidence retain their actual run bounds.
 
     Billing is provisional: system tables are delayed and subsequent corrections may
     change even populated results. List prices do not establish invoiced costs.
@@ -140,17 +143,27 @@ WHERE u.usage_start_time < timestamp_millis(CAST(:end_ms AS BIGINT))
         BILLING_COLUMNS,
         billing_parameters,
     )
-    warehouse_parameters = {
-        "start_ms": parameters["start_ms"],
-        "end_ms": parameters["end_ms"],
-        "warehouse_id": warehouse_id,
-    }
-    collect(
-        result["warehouse_usage"],
-        billing + "u.usage_metadata.warehouse_id = :warehouse_id",
-        BILLING_COLUMNS,
-        warehouse_parameters,
-    )
+    if warehouse_window is None:
+        warehouse_window = (parameters["start_ms"], parameters["end_ms"])
+    if (
+        isinstance(warehouse_window, tuple)
+        and len(warehouse_window) == 2
+        and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in warehouse_window)
+        and warehouse_window[0] < warehouse_window[1]
+    ):
+        warehouse_parameters = {
+            "start_ms": warehouse_window[0],
+            "end_ms": warehouse_window[1],
+            "warehouse_id": warehouse_id,
+        }
+        collect(
+            result["warehouse_usage"],
+            billing + "u.usage_metadata.warehouse_id = :warehouse_id",
+            BILLING_COLUMNS,
+            warehouse_parameters,
+        )
+    else:
+        result["warehouse_usage"]["reason"] = "Warehouse window must contain two ordered positive integer milliseconds"
     for key in ("job_billing", "warehouse_usage"):
         section = result[key]
         if section["status"] != "unavailable":

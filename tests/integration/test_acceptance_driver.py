@@ -103,3 +103,26 @@ def test_interruption_requires_the_exact_running_warehouse_query():
     query.status.value = "RUNNING"
     query.query_text += " -- another query"
     assert executing_query([query], marker) is None
+
+
+def test_status_read_recovers_once_without_extending_run_deadline(monkeypatch):
+    from tests.databricks.lakeflow_acceptance import read_run  # pylint: disable=import-outside-toplevel
+
+    calls = []
+    completed = SimpleNamespace(state="TERMINATED")
+
+    def get_run(run_id, *, include_history):
+        assert run_id == 42 and include_history
+        calls.append(run_id)
+        if len(calls) == 1:
+            raise TimeoutError("temporary workspace disconnect")
+        return completed
+
+    client = SimpleNamespace(jobs=SimpleNamespace(get_run=get_run))
+    monkeypatch.setattr("tests.databricks.lakeflow_acceptance.time.monotonic", lambda: 10)
+    assert read_run(client, 42, deadline=20) is completed
+    assert calls == [42, 42]
+    calls.clear()
+    with pytest.raises(TimeoutError, match="disconnect"):
+        read_run(client, 42, deadline=9)
+    assert calls == [42]

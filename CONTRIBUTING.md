@@ -183,6 +183,250 @@ databricks bundle run <job-resource-key>    # trigger a run (e.g. dbt_sql_job)
 databricks bundle destroy --target dev
 ```
 
+### Serverless model-reuse metadata probe
+
+Before implementing reuse storage, validate the platform primitives with an explicitly selected
+profile, managed scratch catalog, and serverless SQL warehouse. Install the current dbt v1
+development environment (`make dev`); its Databricks SDK is used by the live driver.
+
+```shell
+hatch run python -m tests.databricks.reuse_acceptance \
+  --profile fevm-test-jg \
+  --catalog test_jg_catalog \
+  --warehouse-id 7b8cc32a9eba1da3 \
+  --directory /tmp/factory-reuse-probe-unique
+```
+
+The local directory must not exist. The probe validates and deploys a unique serverless bundle,
+creates a uniquely named schema and managed Volume, then checks Delta identity/version reads,
+view definitions, state MERGE idempotency, immutable Volume uploads, lineage access, and the
+Spark/SDK/dbt execution principals. The notebook pins dbt Core 1.12.5 and dbt Databricks 1.12.7.
+Lineage unavailability is recorded separately; an empty result never proves complete lineage.
+
+This starts billable serverless compute. The driver saves `result.json` locally before destroying
+its job and deleting only its ownership-marked schema. It leaves the selected warehouse available.
+Keep the local bundle and result for recovery after a process interruption; inspect its recorded
+run before manually destroying the bundle or removing scratch data. This is a primitive probe,
+not an acceptance test of implemented model reuse or a net-savings benchmark.
+
+### Reuse configuration and parse provenance
+
+`--reuse-config <json>` validates reuse declarations; `--reuse-provenance <json>` binds them to
+a captured manifest. Eligible jobs receive a preparation task; model tasks still execute dbt
+normally while runtime skipping is pending. Reuse requires serverless notebook tasks. Missing/unreadable provenance,
+an unspecified runtime target, or task-local `dbt deps` gives `CONTEXT_UNKNOWN`; a known manifest,
+target, or project/environment mismatch fails before publishing output.
+
+The configuration is a strict JSON object:
+
+```json
+{
+  "format_version": 1,
+  "project_id": "sales",
+  "environment": "prod",
+  "owner_key": "sales-job",
+  "state_catalog": "test_jg_catalog",
+  "state_schema": "factory_state",
+  "artifact_volume": {"catalog": "test_jg_catalog", "schema": "factory_state", "volume": "artifacts"}
+}
+```
+
+The build pipeline can call `reuse_prepare.capture_parse(snapshot, profiles, identity=identity,
+target="prod", deployment_ref=release_id)`. It returns manifest and provenance bytes from a fresh
+dbt parse in the calling Python environment. `identity` contains the trusted `project_id`,
+`environment`, `workspace_id`, `metastore_id`, and execution `principal`. Runtime verification of
+that declaration remains required before any reuse decision.
+
+Provenance v2 also binds the canonical profile template; recapture older artifacts. Reuse supports
+one statically named profile with a static target and basic Databricks PAT fields. Use
+`token: "{{ env_var('DBT_ACCESS_TOKEN') }}"` for runtime reuse. Non-secret routing `env_var` references
+must be listed in `environment_inputs` and resolve to nonempty literal strings. Arbitrary Jinja,
+literal/default credentials and nested adapter options are refused. Private invocation profiles
+freeze captured routing values while leaving token references unresolved; profile edits after
+preparation fail before dbt imports.
+
+Use a dedicated immutable deployment snapshot containing only project code/data and already
+installed, locked dbt packages. Keep credentials, profiles, generated artifacts, virtual
+environments and Git metadata outside it. Symlinks are refused; materialize local packages into
+the snapshot. Write the returned artifacts outside the snapshot. `verify_snapshot` checks its
+contents against provenance once during preparation; it is not intended for every model task.
+
+Optional `variables`, `environment_inputs` (an allowlist of environment variable names), and
+`secret_versions` must describe all result-affecting context. Vars and allowlisted values are
+caller-declared non-secret inputs. Never pass credentials or raw/hashed secrets in these fields.
+`DBT_ENV_SECRET_*` values are refused; use trustworthy non-secret version identifiers for
+result-affecting secrets. Undeclared context prevents safe reuse and remains the author's
+responsibility under the explicit model opt-in contract.
+
+Python and installed library versions belong to the context digest. Manifest/deployment digests
+are separate, allowing native per-model code comparison without invalidating every model for an
+unrelated source edit. SQL table models can be candidates; hooks, Python/custom/incremental
+outputs, and unverified view/ephemeral dependencies execute normally. Physical Delta identity,
+version and complete-input checks still have to pass at runtime.
+
+### Immutable reuse artifacts and runtime wheel
+
+With valid provenance, an explicit `--target`, and task-local dependency resolution disabled,
+generation writes `reuse_artifacts/` beside the output job spec. It contains the exact manifest,
+provenance, and a canonical descriptor, each named with its full SHA-256 digest. The descriptor
+binds model declarations, reuse configuration and the generating Factory version. Existing files
+must match; dry-run writes nothing. Keep this directory outside the captured project snapshot.
+Missing context produces ordinary tasks without a reusable deployment bundle.
+
+For eligible jobs, generation publishes `prepare_dbt_reuse_FULL_SHA256.py` and the immutable runner
+beside the output job spec, outside the captured project. Explicit `--project-directory` and
+`--profiles-directory` are required. Relative project paths resolve from these notebooks' directory;
+a caller-managed runner requires an absolute project path and WORKSPACE source. Profiles must stay
+outside the project. Missing context and jobs with no eligible models preserve ordinary task output.
+
+Declared extra inputs produced by the project add scheduling edges before test gates and tag
+partitioning. They do not change the captured dbt manifest or selectors. Each eligible child job
+gets one preparation task scoped to its own model IDs. Model tasks depend on its success and retain
+their upstream test gates. Preparation counts toward the 1,000-task limit.
+
+Generated jobs expose `factory_force_rebuild` with string default `false`; runners accept exactly
+`true` or `false`. Split orchestrators forward it to children. Owning jobs and orchestrators use
+`max_concurrent_runs: 1`. Conflicting template concurrency and job parameters named `factory_*`,
+`dbt_commands`, `project_directory`, or `profiles_directory` are refused, including during dry-run.
+Model skipping and fresh build-evidence publication remain pending; force and full-refresh both
+follow normal dbt execution at this checkpoint.
+
+Install the **same Factory wheel used for generation** in each reuse-enabled serverless notebook
+environment, alongside the existing exact dbt/adapter pins. Build it with `hatch build -t wheel`
+and upload it under a unique immutable release path. Add its Volume path to the chosen environment's
+`spec.dependencies`, for example:
+
+```yaml
+environments:
+  - environment_key: Default
+    spec:
+      environment_version: '5'
+      dependencies:
+        - /Volumes/test_jg_catalog/factory_state/artifacts/wheels/RELEASE/databricks_dbt_factory-0.4.0-py3-none-any.whl
+        - dbt-databricks==1.12.7
+        - dbt-core==1.12.5
+```
+
+These are the tested dbt v1 versions; retain your other pinned driver dependencies. For a workspace
+base environment, add the wheel there instead. The CLI does not modify environments or require dbt
+or the SDK as installation dependencies. `read_descriptor` rejects a different Factory runtime
+version or unsupported descriptor format before the future reuse path can use it.
+
+Publish the three deployment artifacts **before bundle validation/deployment**, using the exact
+descriptor path printed by generation (a directory may retain multiple deployments):
+
+```python
+from pathlib import Path
+from databricks.sdk import WorkspaceClient
+from databricks_dbt_factory.reuse_runtime import publish_artifacts, read_descriptor
+
+descriptor_path = Path("resources/reuse_artifacts/descriptor_FULL_SHA256.json")
+descriptor = read_descriptor(descriptor_path.read_bytes())
+local_bundle = tuple(descriptor_path.parent / name for name in (
+    descriptor["manifest"], descriptor["provenance"], descriptor_path.name,
+))
+client = WorkspaceClient(profile="fevm-test-jg")
+volume_path = "/Volumes/test_jg_catalog/factory_state/artifacts"
+# Provision the configured Volume and directory explicitly during deployment setup.
+client.files.create_directory(volume_path)
+references = publish_artifacts(client, local_bundle, volume_path)
+```
+
+Use the catalog/schema/volume in your validated config, with an explicitly selected profile.
+Publication validates all local bytes and references, uploads without overwrite, reads every object
+back, and verifies its digest. It uploads the descriptor last and returns references only after
+the whole batch succeeds. A failed batch may leave immutable orphan files; it returns no usable
+deployment references. Persist/pass `references` only after the call returns, then run
+`databricks bundle validate -t TARGET --profile fevm-test-jg` and deploy the bundle.
+`download_artifact(client, path, sha256)` rechecks downloaded bytes before comparison use.
+No cross-file transaction or artifact garbage collection is assumed. Retain referenced artifacts.
+
+### Delta state storage checkpoint
+
+On serverless notebook compute, call `reuse_runtime.initialize_state(spark, config)` once in
+the configured, existing UC schema. It creates `factory_reuse_owners`, `factory_reuse_builds`
+and `factory_reuse_decisions`; model tasks never initialize tables. The setup identity needs
+`USE CATALOG`, `USE SCHEMA` and `CREATE TABLE`. The job identity needs the corresponding table
+read/write privileges and artifact Volume access.
+
+`claim_owner` binds a physical output name to the project/environment, workspace/metastore,
+logical owner and deployed job. All participating jobs must use the same registry. This is
+a conflict detector for serialized owning jobs, not a lock against concurrent or unregistered
+writers. Keep `max_concurrent_runs: 1`; ownership reassignment requires draining the old job.
+
+`snapshot_relation` brackets a Delta version read with UC/Delta identity checks. It returns
+separate relation-name components, UC ID, Delta ID and version. Missing/unreadable metadata,
+non-Delta relations and mixed recreation observations raise `EvidenceUnavailable` with a reason.
+
+`record_build` accepts a `BuildEvidence` record and an explicit successful-execution result.
+It verifies published artifacts, context, declared inputs and output mapping, and records only
+stable pre/post input evidence. Failed attempts, missing evidence and changing inputs cannot
+supply a reusable baseline. Builds retain their original completion time; decision events have
+their own observation times. Identical attempt publication is idempotent; different content
+for an existing attempt fails instead of overwriting it. SQL values use bound parameters.
+
+`read_build` selects by logical scope/model and current output identity/version, then verifies
+the stored record, attempt key and downloaded artifacts. Its returned `key` and `sha256` identify
+the exact baseline for preparation. Context comparison remains separate: a valid older context
+can be inspected, but cannot authorize reuse under a changed execution context.
+Missing state/artifacts raise `EvidenceUnavailable`; known artifact mismatches and ownership
+conflicts fail explicitly. After model success, state-write outages return a fallback reason
+from `record_build`/`record_decision`. Callers must report that reason in task output; durable
+decision logging is not guaranteed during an outage.
+
+To test the actual storage APIs in a disposable serverless job using the matching built wheel:
+
+```sh
+hatch build -t wheel
+hatch run python -m tests.databricks.reuse_acceptance \
+  --profile fevm-test-jg --catalog test_jg_catalog \
+  --warehouse-id 7b8cc32a9eba1da3 --scenario state \
+  --factory-wheel dist/databricks_dbt_factory-0.4.0-py3-none-any.whl \
+  --directory /tmp/factory-state-probe-unique
+```
+
+The harness verifies the uploaded wheel bytes, validates/deploys its serverless bundle, saves
+the result, and removes its job and ownership-marked scratch schema. The fixture tables are
+built with Spark SQL; a real dbt parse supplies their model/source mappings. This tests storage,
+not the unimplemented dbt runner integration or measured net savings.
+
+### Native state preparation (integration pending)
+
+`reuse_prepare.compare_baselines(project, profiles, manifest_bytes, provenance_bytes, baselines)`
+uses the installed engine's `dbt ls --select state:modified --resource-type model` with isolated
+baseline/current directories. `baselines` maps model IDs to their own successful manifest/provenance
+bytes, or `None`. One invocation serves each distinct valid manifest/context group; partial prior
+failures do not replace an unchanged model's successful baseline with the latest deployment.
+Command diagnostics are retained. Configuration/graph/parse mismatches fail; unavailable comparison
+output falls back to ordinary execution. Context/version changes invalidate without cross-engine
+comparison, and Factory checks reuse policy and relation/dependency mappings separately.
+
+dbt-managed SQL view/ephemeral dependencies are traversed through the manifest graph to physical
+leaves. Changed definitions invalidate their consumers. View outputs themselves remain unsupported
+reuse outputs. `BuildEvidence.views_before`/`views_after` must contain matching `ViewSnapshot` records
+for every declared view, including its UC identity and deployed-definition digest. Missing, changed
+or unsupported definitions cannot supply reusable evidence; physical leaves still require live Delta
+snapshots. Factory does not parse view SQL to infer dependencies.
+
+`reuse_runtime.prepare_run(spark, client, config, deployment_reference, project, profiles, attempt)`
+verifies the authenticated workspace/metastore/principal and SQL principal, checks the captured
+snapshot once, and obtains exact successful-build keys/digests. Artifacts are verified once per
+deployment within that preparation attempt; caches are not shared across tasks. Pass explicit
+non-secret `secret_versions` when captured context declares them. Generated tasks carry the captured
+version identifiers; deployments must update them when result-affecting secrets change. The returned code decisions are
+**not permission to skip**: model tasks still need fresh data/output evidence and lineage checks.
+
+The packaged notebook accepts JSON widgets `factory_reuse_config`, `factory_reuse_deployment`
+(`path`/`sha256`), `factory_secret_versions`, `factory_reuse_models` (a JSON array of model IDs),
+explicit `project_directory`/`profiles_directory`,
+and `factory_job_id`, `factory_run_id`, `factory_task_key`, `factory_attempt_number`. Profiles must
+remain outside the immutable project tree. It publishes an immutable preparation artifact bound to
+the deployment and attempt, with per-model reasons and exact baseline references. The
+`factory_reuse_preparation` task value contains only its path/digest; an unavailable publication
+produces `{}` and a visible fallback. Expected metadata/state outages disable reuse; unexpected
+task failures propagate. The API's optional `model_ids` scope rejects unknown or duplicate declarations
+before claiming output ownership. Generated jobs always supply that scope. Runtime skipping remains disabled.
+
 ## Troubleshooting
 
 If you encounter any package dependency errors after `git pull`, run `make clean`

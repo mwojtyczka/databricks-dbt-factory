@@ -1,0 +1,1092 @@
+"""Immutable reuse artifacts. SDK objects are supplied by the caller, never imported offline."""
+
+import io
+import json
+import os
+import re
+import shlex
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
+
+from databricks_dbt_factory.__version__ import __version__
+from databricks_dbt_factory.file_io import atomic_write_bytes
+from databricks_dbt_factory.dbt_factory import DbtFactory
+from databricks_dbt_factory.reuse import (
+    ExecutionContext,
+    ModelDescriptor,
+    Relation,
+    RelationSnapshot,
+    ViewSnapshot,
+    ReuseConfig,
+    canonical_json,
+    describe_models,
+    digest_bytes,
+    lineage_reason,
+    reuse_reason,
+)
+from databricks_dbt_factory.reuse_prepare import (
+    compare_baselines,
+    read_provenance,
+    runtime_versions,
+    runtime_profile_reason,
+    verify_profiles,
+    verify_snapshot,
+)
+
+# Enable only after the serverless acceptance checks in Task 10.
+REUSE_ENABLED = False
+
+
+def _artifact_digest(name: str, kind: str = "manifest|provenance|descriptor") -> str:
+    match = re.fullmatch(rf"(?:{kind})_([0-9a-f]{{64}})\.json", name)
+    if match is None:
+        raise ValueError(f"reuse artifact: invalid content-addressed filename {name!r}")
+    return match[1]
+
+
+def prepare_bundle(manifest: bytes, provenance: bytes, config: dict) -> dict[str, bytes]:
+    """Prepare exact parse artifacts and a canonical descriptor without writing files."""
+    settings = ReuseConfig.from_dict(config)
+    parsed = read_provenance(provenance, manifest)
+    context = json.loads(parsed.context.canonical_json)
+    if (settings.project_id, settings.environment) != (context["project_id"], context["environment"]):
+        raise ValueError("reuse descriptor: provenance project/environment mismatch")
+    manifest_name = f"manifest_{digest_bytes(manifest)}.json"
+    provenance_name = f"provenance_{digest_bytes(provenance)}.json"
+    descriptor = canonical_json(
+        {
+            "format_version": 1,
+            "factory_version": __version__,
+            "manifest": manifest_name,
+            "provenance": provenance_name,
+            "config": config,
+            "models": [asdict(model) for model in describe_models(json.loads(manifest), parsed.context)],
+        }
+    ).encode()
+    return {
+        manifest_name: manifest,
+        provenance_name: provenance,
+        f"descriptor_{digest_bytes(descriptor)}.json": descriptor,
+    }
+
+
+def read_descriptor(content: bytes) -> dict:
+    """Reject a descriptor from an incompatible format or Factory runtime."""
+    value = json.loads(content)
+    fields = {"format_version", "factory_version", "manifest", "provenance", "config", "models"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("reuse descriptor: invalid fields")
+    if (
+        not isinstance(value["format_version"], int)
+        or isinstance(value["format_version"], bool)
+        or value["format_version"] != 1
+    ):
+        raise ValueError("reuse descriptor: unsupported format_version")
+    if value["factory_version"] != __version__:
+        raise ValueError(f"reuse descriptor: install matching Factory wheel {value['factory_version']!r}")
+    ReuseConfig.from_dict(value["config"])
+    for kind in ("manifest", "provenance"):
+        if not isinstance(value[kind], str):
+            raise ValueError(f"reuse descriptor: invalid {kind} reference")
+        _artifact_digest(value[kind], kind)
+    if not isinstance(value["models"], list):
+        raise ValueError("reuse descriptor: models must be a list")
+    return value
+
+
+def _validate_bundle(bundle: dict[str, bytes]) -> None:
+    for name, content in bundle.items():
+        if digest_bytes(content) != _artifact_digest(name):
+            raise ValueError(f"reuse artifact digest mismatch: {name}")
+    descriptors = [name for name in bundle if name.startswith("descriptor_")]
+    if len(descriptors) != 1:
+        raise ValueError("reuse bundle: exactly one descriptor is required")
+    descriptor = read_descriptor(bundle[descriptors[0]])
+    if set(bundle) != {descriptors[0], descriptor["manifest"], descriptor["provenance"]}:
+        raise ValueError("reuse bundle: missing or unexpected artifact")
+    expected = prepare_bundle(bundle[descriptor["manifest"]], bundle[descriptor["provenance"]], descriptor["config"])
+    if bundle != expected:
+        raise ValueError("reuse descriptor: does not match captured manifest/provenance")
+
+
+def write_bundle(bundle: dict[str, bytes], directory: Path) -> tuple[Path, ...]:
+    """Publish local immutable files. An incomplete bundle never yields a reference."""
+    _validate_bundle(bundle)
+    if directory.is_symlink():
+        raise ValueError(f"immutable artifact directory must not be a symlink: {directory}")
+    paths = tuple(directory / name for name in bundle)
+    for path in paths:
+        if path.is_symlink() or (path.exists() and (not path.is_file() or path.read_bytes() != bundle[path.name])):
+            raise ValueError(f"immutable artifact conflicts with existing content: {path}")
+    for path in paths:
+        if not path.exists():
+            atomic_write_bytes(path, bundle[path.name], 0o644)
+    return paths
+
+
+def download_artifact(workspace_client, path: str, sha256: str) -> bytes:
+    """Verify the downloaded bytes immediately before using comparison/evidence artifacts."""
+    with workspace_client.files.download(path).contents as stream:
+        content = stream.read()
+    if digest_bytes(content) != sha256:
+        raise ValueError(f"reuse artifact digest mismatch: {path}")
+    return content
+
+
+def publish_artifacts(workspace_client, local_bundle: tuple[Path, ...], volume_path: str) -> dict[str, dict[str, str]]:
+    """Upload immutable inputs first and descriptor last; return only after all readbacks pass.
+
+    Failed batches may leave unreferenced immutable files. No cross-object transaction is assumed.
+    """
+    from databricks.sdk.errors import AlreadyExists  # pylint: disable=import-outside-toplevel
+
+    root = PurePosixPath(volume_path)
+    if (
+        len(root.parts) < 5
+        or root.parts[:2] != ("/", "Volumes")
+        or ".." in root.parts
+        or str(root) != volume_path.rstrip("/")
+    ):
+        raise ValueError("reuse artifacts require an absolute /Volumes/catalog/schema/volume path")
+    if len(local_bundle) != 3 or any(path.is_symlink() for path in local_bundle):
+        raise ValueError("reuse bundle: expected three regular non-symlink artifacts")
+    bundle = {path.name: path.read_bytes() for path in local_bundle}
+    _validate_bundle(bundle)
+    descriptor = read_descriptor(next(content for name, content in bundle.items() if name.startswith("descriptor_")))
+    settings = ReuseConfig.from_dict(descriptor["config"])
+    if root.parts[2:5] != settings.artifact_volume:
+        raise ValueError("reuse artifacts: publication volume differs from descriptor config")
+    references = {}
+    for name in sorted(bundle, key=lambda name: (name.startswith("descriptor_"), name)):
+        path = str(root / name)
+        try:
+            workspace_client.files.upload(path, io.BytesIO(bundle[name]), overwrite=False)
+        except AlreadyExists:
+            pass  # Existing content is accepted only after a fresh verified download.
+        sha256 = _artifact_digest(name)
+        download_artifact(workspace_client, path, sha256)
+        references[name] = {"path": path, "sha256": sha256}
+    return references
+
+
+class EvidenceUnavailable(Exception):
+    """Expected optimization failure. The runner reports the reason and executes dbt."""
+
+
+def snapshot_view(workspace_client, relation: Relation) -> ViewSnapshot:
+    """Only dbt-declared views reach this path; do not infer dependencies from their SQL."""
+    name = ".".join((relation.catalog, relation.schema, relation.identifier))
+    try:
+        before = workspace_client.tables.get(name)
+        after = workspace_client.tables.get(name)
+    except Exception as error:
+        raise EvidenceUnavailable("METADATA_UNAVAILABLE") from error
+    expected = (relation.catalog.lower(), relation.schema.lower(), relation.identifier.lower())
+    observations = []
+    for table in (before, after):
+        if (
+            tuple((getattr(table, key, None) or "").lower() for key in ("catalog_name", "schema_name", "name"))
+            != expected
+            or getattr(getattr(table, "table_type", None), "value", None) != "VIEW"
+            or not isinstance(table.view_definition, str)
+            or not table.view_definition.strip()
+        ):
+            raise EvidenceUnavailable("DEFINITION_UNKNOWN")
+        try:
+            observations.append(ViewSnapshot(relation, table.table_id, digest_bytes(table.view_definition.encode())))
+        except ValueError as error:
+            raise EvidenceUnavailable("DEFINITION_UNKNOWN") from error
+    if observations[0] != observations[1]:
+        raise EvidenceUnavailable("DEFINITION_CHANGED")
+    return observations[0]
+
+
+def verify_runtime_identity(spark, workspace_client, context: ExecutionContext) -> None:
+    """Authenticate the execution identity instead of trusting notebook parameters."""
+    expected = json.loads(context.canonical_json)
+    try:
+        observed = {
+            "workspace_id": str(workspace_client.get_workspace_id()),
+            "metastore_id": workspace_client.metastores.summary().metastore_id,
+            "principal": workspace_client.current_user.me().user_name,
+        }
+        sql_principal = spark.sql("SELECT current_user()").first()[0]
+    except Exception as error:
+        raise EvidenceUnavailable("CONTEXT_UNKNOWN") from error
+    if any(value != expected[key] for key, value in observed.items()) or sql_principal != expected["principal"]:
+        raise EvidenceUnavailable("CONTEXT_CHANGED")
+
+
+def publish_preparation(workspace_client, config: ReuseConfig, result: dict) -> dict[str, str]:
+    """Immutable run evidence; only this small verified pointer is placed in a task value."""
+    from databricks.sdk.errors import AlreadyExists  # pylint: disable=import-outside-toplevel
+
+    if result.get("format_version") != 1:
+        raise ValueError("preparation requires format_version 1")
+    Attempt(**result["attempt"])
+    content = canonical_json(result).encode()
+    digest = digest_bytes(content)
+    path = "/Volumes/" + "/".join(config.artifact_volume) + f"/preparation_{digest}.json"
+    try:
+        workspace_client.files.upload(path, io.BytesIO(content), overwrite=False)
+    except AlreadyExists:
+        pass
+    except OSError as error:
+        raise EvidenceUnavailable("ARTIFACT_UNAVAILABLE") from error
+    try:
+        download_artifact(workspace_client, path, digest)
+    except OSError as error:
+        raise EvidenceUnavailable("ARTIFACT_UNAVAILABLE") from error
+    return {"path": path, "sha256": digest}
+
+
+@dataclass(frozen=True)
+class Attempt:
+    job_id: str
+    run_id: str
+    task_key: str
+    attempt_number: int
+
+    def __post_init__(self):
+        if any(not isinstance(value, str) or not value.strip() for value in (self.job_id, self.run_id, self.task_key)):
+            raise ValueError("attempt requires job/run/task identity")
+        if not isinstance(self.attempt_number, int) or isinstance(self.attempt_number, bool) or self.attempt_number < 0:
+            raise ValueError("attempt_number must be a nonnegative integer")
+
+
+@dataclass(frozen=True)
+class BuildEvidence:
+    model_id: str
+    attempt: Attempt
+    completed_at: str
+    descriptor: dict[str, str]
+    context_sha256: str
+    inputs_before: tuple[RelationSnapshot, ...]
+    inputs_after: tuple[RelationSnapshot, ...]
+    output: RelationSnapshot | None
+    views_before: tuple[ViewSnapshot, ...] = ()
+    views_after: tuple[ViewSnapshot, ...] = ()
+
+    def __post_init__(self):
+        if not isinstance(self.model_id, str) or not self.model_id.strip():
+            raise ValueError("build evidence requires a model_id")
+        _timestamp(self.completed_at)
+        if not isinstance(self.context_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", self.context_sha256):
+            raise ValueError("build evidence requires a context digest")
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(
+            **(
+                value
+                | {
+                    "attempt": Attempt(**value["attempt"]),
+                    "inputs_before": tuple(RelationSnapshot.from_dict(item) for item in value["inputs_before"]),
+                    "inputs_after": tuple(RelationSnapshot.from_dict(item) for item in value["inputs_after"]),
+                    "output": RelationSnapshot.from_dict(value["output"]) if value["output"] is not None else None,
+                    "views_before": tuple(ViewSnapshot.from_dict(item) for item in value.get("views_before", [])),
+                    "views_after": tuple(ViewSnapshot.from_dict(item) for item in value.get("views_after", [])),
+                }
+            )
+        )
+
+
+def quote_relation(relation: Relation) -> str:
+    return ".".join(
+        "`" + part.replace("`", "``") + "`" for part in (relation.catalog, relation.schema, relation.identifier)
+    )
+
+
+def snapshot_relation(spark, workspace_client, relation: Relation) -> RelationSnapshot:
+    """Bracket the version read with UC and Delta identities; never inspect Delta log files."""
+    name = ".".join((relation.catalog, relation.schema, relation.identifier))
+    quoted = quote_relation(relation)
+    try:
+        uc_before = workspace_client.tables.get(name)
+        before = spark.sql(f"DESCRIBE DETAIL {quoted}").first().asDict()
+        history = spark.sql(f"DESCRIBE HISTORY {quoted} LIMIT 1").first().asDict()
+        after = spark.sql(f"DESCRIBE DETAIL {quoted}").first().asDict()
+        uc_after = workspace_client.tables.get(name)
+    except Exception as error:  # External metadata reads may fail without preventing ordinary dbt execution.
+        raise EvidenceUnavailable("METADATA_UNAVAILABLE") from error
+    if before.get("format") != "delta" or after.get("format") != "delta":
+        raise EvidenceUnavailable("NON_DELTA")
+    expected = tuple(part.lower() for part in (relation.catalog, relation.schema, relation.identifier))
+    names = []
+    for table in (uc_before, uc_after):
+        names.append(
+            tuple((getattr(table, key, None) or "").lower() for key in ("catalog_name", "schema_name", "name"))
+        )
+    if (
+        any(name != expected for name in names)
+        or uc_before.table_id != uc_after.table_id
+        or before.get("id") != after.get("id")
+    ):
+        raise EvidenceUnavailable("RELATION_CHANGED")
+    try:
+        return RelationSnapshot(relation, uc_before.table_id, before.get("id"), history.get("version"))
+    except ValueError as error:
+        raise EvidenceUnavailable("RELATION_UNKNOWN") from error
+
+
+def _state_table(config: ReuseConfig, name: str) -> str:
+    return quote_relation(Relation(config.state_catalog, config.state_schema, f"factory_reuse_{name}"))
+
+
+def initialize_state(spark, config: ReuseConfig) -> None:
+    """Explicit setup in an existing UC schema. Runtime model tasks never create state tables."""
+    for name in ("owners", "builds", "decisions"):
+        columns = "key STRING NOT NULL, evidence STRING NOT NULL"
+        if name == "builds":
+            columns += ", scope STRING NOT NULL, model_id STRING NOT NULL, output_sha256 STRING NOT NULL, completed_at TIMESTAMP NOT NULL"
+        spark.sql(f"CREATE TABLE IF NOT EXISTS {_state_table(config, name)} ({columns}) USING DELTA").collect()
+
+
+def _state_rows(spark, statement: str, values: dict) -> list[dict]:
+    try:
+        return [row.asDict() for row in spark.sql(statement, args=values).collect()]
+    except Exception as error:  # Restrict the fallback to the Spark storage boundary.
+        raise EvidenceUnavailable("STATE_UNAVAILABLE") from error
+
+
+def _insert_immutable(spark, table: str, key: str, evidence: dict, **projections) -> None:
+    # ponytail: serialized owning jobs; concurrent claims require a separate locking design.
+    payload = canonical_json(evidence)
+    values = {"key": key, "evidence": payload} | projections
+    columns = ", ".join(f":{column} AS {column}" for column in values)
+    _state_rows(
+        spark,
+        f"MERGE INTO {table} AS target USING (SELECT {columns}) AS source "
+        "ON target.key = source.key WHEN NOT MATCHED THEN INSERT *",
+        values,
+    )
+    rows = _state_rows(spark, f"SELECT evidence FROM {table} WHERE key = :key LIMIT 2", {"key": key})
+    if not rows:
+        raise EvidenceUnavailable("STATE_UNAVAILABLE")
+    if len(rows) != 1 or rows[0]["evidence"] != payload:
+        raise ValueError(f"conflicting owner or attempt evidence at {table}; never overwrite an existing record")
+
+
+def _scope(config: ReuseConfig, context: ExecutionContext, job_id: str) -> dict:
+    value = json.loads(context.canonical_json)
+    if (config.project_id, config.environment) != (value["project_id"], value["environment"]):
+        raise ValueError("reuse context project/environment differs from config")
+    if not isinstance(job_id, str) or not job_id.strip():
+        raise ValueError("reuse scope requires a job_id")
+    return {
+        "project_id": config.project_id,
+        "environment": config.environment,
+        "owner_key": config.owner_key,
+        "workspace_id": value["workspace_id"],
+        "metastore_id": value["metastore_id"],
+        "job_id": job_id,
+    }
+
+
+def _digest(value) -> str:
+    return digest_bytes(canonical_json(value).encode())
+
+
+def _owner_key(output: Relation) -> str:
+    return _digest([part.lower() for part in (output.catalog, output.schema, output.identifier)])
+
+
+def claim_owner(spark, config: ReuseConfig, context: ExecutionContext, output: Relation, *, job_id: str) -> None:
+    """One logical owner and deployed job per physical name. This registry is not a lock."""
+    _insert_immutable(
+        spark,
+        _state_table(config, "owners"),
+        _owner_key(output),
+        {
+            "format_version": 1,
+            "scope": _scope(config, context, job_id),
+            "output": {key: value.lower() for key, value in asdict(output).items()},
+        },
+    )
+
+
+def _assert_owner(spark, config, scope, output):
+    rows = _state_rows(
+        spark,
+        f"SELECT evidence FROM {_state_table(config, 'owners')} WHERE key = :key LIMIT 2",
+        {"key": _owner_key(output)},
+    )
+    if not rows:
+        raise EvidenceUnavailable("OWNER_UNKNOWN")
+    expected = canonical_json(
+        {"format_version": 1, "scope": scope, "output": {key: value.lower() for key, value in asdict(output).items()}}
+    )
+    if len(rows) != 1 or rows[0]["evidence"] != expected:
+        raise ValueError(f"conflicting declared owner for {quote_relation(output)}")
+
+
+def _timestamp(value: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("reuse evidence timestamp must be a string")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("reuse evidence timestamp requires a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _descriptor_path(config, reference):
+    if (
+        not isinstance(reference, dict)
+        or set(reference) != {"path", "sha256"}
+        or not isinstance(reference["sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", reference["sha256"])
+    ):
+        raise ValueError("reuse descriptor requires a path and SHA-256")
+    path = PurePosixPath(reference["path"])
+    if path.parts[:5] != ("/", "Volumes", *config.artifact_volume) or ".." in path.parts:
+        raise ValueError("reuse descriptor volume differs from config")
+    if _artifact_digest(path.name, "descriptor") != reference["sha256"]:
+        raise ValueError("reuse descriptor filename/digest mismatch")
+    return path
+
+
+def load_deployment(workspace_client, config, reference, *, deployments=None) -> tuple[dict, bytes, bytes]:
+    """Read immutable artifacts; only preparation shares a verified, attempt-local cache."""
+    path = _descriptor_path(config, reference)
+    key = (config, str(path), reference["sha256"])
+    if deployments is not None and key in deployments:
+        return deployments[key]
+
+    def download(path, sha256):
+        try:
+            return download_artifact(workspace_client, str(path), sha256)
+        except ValueError:
+            raise  # A known digest mismatch is a deployment error, never missing evidence.
+        except Exception as error:
+            raise EvidenceUnavailable("ARTIFACT_UNAVAILABLE") from error
+
+    descriptor = read_descriptor(download(path, reference["sha256"]))
+    if ReuseConfig.from_dict(descriptor["config"]) != config:
+        raise ValueError("reuse descriptor config mismatch")
+    bundle = {path.name: canonical_json(descriptor).encode()}
+    for kind in ("manifest", "provenance"):
+        name = descriptor[kind]
+        bundle[name] = download(path.parent / name, _artifact_digest(name, kind))
+    _validate_bundle(bundle)
+    result = descriptor, bundle[descriptor["manifest"]], bundle[descriptor["provenance"]]
+    if deployments is not None:
+        deployments[key] = result
+    return result
+
+
+def _verified_descriptor(workspace_client, config, reference, deployments=None):
+    descriptor, manifest, provenance = load_deployment(workspace_client, config, reference, deployments=deployments)
+    return descriptor, read_provenance(provenance, manifest)
+
+
+def _build_reason(build: BuildEvidence, descriptor: dict) -> str | None:
+    model = next((model for model in descriptor["models"] if model["unique_id"] == build.model_id), None)
+    if model is None or model["reason"] is not None:
+        return "MODEL_INELIGIBLE"
+    if build.output is None:
+        return "OUTPUT_UNKNOWN"
+    if asdict(build.output.relation) != model["output"]:
+        raise ValueError("build output differs from deployment descriptor")
+    expected = {canonical_json(value) for value in model["inputs"]}
+    for snapshots in (build.inputs_before, build.inputs_after):
+        actual = [canonical_json(asdict(snapshot.relation)) for snapshot in snapshots]
+        if len(set(actual)) != len(actual) or set(actual) != expected:
+            return "INPUT_UNKNOWN"
+    expected_views = {canonical_json(value) for value in model["views"]}
+    for view_snapshots in (build.views_before, build.views_after):
+        actual = [canonical_json(asdict(snapshot.relation)) for snapshot in view_snapshots]
+        if len(set(actual)) != len(actual) or set(actual) != expected_views:
+            return "DEFINITION_UNKNOWN"
+    if sorted(build.views_before, key=lambda item: item.relation) != sorted(
+        build.views_after, key=lambda item: item.relation
+    ):
+        return "DEFINITION_CHANGED_DURING_BUILD"
+    if sorted(build.inputs_before, key=lambda item: item.relation) != sorted(
+        build.inputs_after, key=lambda item: item.relation
+    ):
+        return "INPUT_CHANGED_DURING_BUILD"
+    return None
+
+
+def record_build(
+    spark, workspace_client, config: ReuseConfig, context: ExecutionContext, build: BuildEvidence, *, successful: bool
+) -> str:
+    """Only a successful, stable build with published artifacts supplies reusable evidence."""
+    # One fallback surrounds publication so no state outage can fail an already successful model.
+    # pylint: disable=too-many-try-statements
+    if successful is not True:
+        return "BUILD_FAILED"
+    if build.output is None:
+        return "OUTPUT_UNKNOWN"
+    if sorted(build.inputs_before, key=lambda item: item.relation) != sorted(
+        build.inputs_after, key=lambda item: item.relation
+    ):
+        return "INPUT_CHANGED_DURING_BUILD"
+    try:
+        descriptor, provenance = _verified_descriptor(workspace_client, config, build.descriptor)
+        reason = _build_reason(build, descriptor)
+        if reason:
+            return reason
+        if build.context_sha256 != context.digest or provenance.context != context:
+            return "CONTEXT_CHANGED"
+        scope = _scope(config, context, build.attempt.job_id)
+        _assert_owner(spark, config, scope, build.output.relation)
+        payload = {"format_version": 1, "scope": scope, "build": asdict(build)}
+        key = _digest([scope, build.model_id, asdict(build.attempt)])
+        _insert_immutable(
+            spark,
+            _state_table(config, "builds"),
+            key,
+            payload,
+            scope=_digest(scope),
+            model_id=build.model_id,
+            output_sha256=_digest(asdict(build.output)),
+            completed_at=_timestamp(build.completed_at),
+        )
+    except EvidenceUnavailable as error:
+        return str(error)
+    return "RECORDED"
+
+
+def read_build(
+    spark,
+    workspace_client,
+    config: ReuseConfig,
+    context: ExecutionContext,
+    model_id: str,
+    output: RelationSnapshot,
+    *,
+    job_id: str,
+    deployments=None,
+) -> dict | None:
+    """Select by live output evidence, then verify the complete record and immutable artifacts."""
+    scope = _scope(config, context, job_id)
+    _assert_owner(spark, config, scope, output.relation)
+    rows = _state_rows(
+        spark,
+        f"SELECT key, evidence FROM {_state_table(config, 'builds')} "
+        "WHERE scope = :scope AND model_id = :model_id AND output_sha256 = :output_sha256 "
+        "ORDER BY completed_at DESC, key DESC LIMIT 1",
+        {"scope": _digest(scope), "model_id": model_id, "output_sha256": _digest(asdict(output))},
+    )
+    if not rows:
+        return None
+    try:
+        record = json.loads(rows[0]["evidence"])
+        if (
+            set(record) != {"format_version", "scope", "build"}
+            or not isinstance(record["format_version"], int)
+            or isinstance(record["format_version"], bool)
+            or record["format_version"] != 1
+        ):
+            raise ValueError("invalid build record")
+        build = BuildEvidence.from_dict(record["build"])
+        key = _digest([scope, build.model_id, asdict(build.attempt)])
+        if (
+            record["scope"] != scope
+            or build.model_id != model_id
+            or build.output != output
+            or build.attempt.job_id != job_id
+            or rows[0]["key"] != key
+        ):
+            raise ValueError("build record scope/output mismatch")
+    except (KeyError, TypeError, ValueError) as error:
+        raise EvidenceUnavailable("BUILD_INVALID") from error
+    descriptor, provenance = _verified_descriptor(workspace_client, config, build.descriptor, deployments)
+    if (
+        _scope(config, provenance.context, job_id) != scope
+        or build.context_sha256 != provenance.context.digest
+        or _build_reason(build, descriptor)
+    ):
+        raise EvidenceUnavailable("BUILD_INVALID")
+    return record | {"key": key, "sha256": _digest(record)}
+
+
+def record_decision(
+    spark,
+    config: ReuseConfig,
+    context: ExecutionContext,
+    model_id: str,
+    attempt: Attempt,
+    *,
+    reason: str,
+    observed_at: str,
+    evidence: dict,
+    durations: dict,
+) -> str:
+    """Decision history never writes successful-build evidence or changes its completion time."""
+    if not all(isinstance(value, str) and value.strip() for value in (model_id, reason)):
+        raise ValueError("decision requires a model and reason")
+    _timestamp(observed_at)
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0 for value in durations.values()):
+        raise ValueError("decision durations must be nonnegative seconds")
+    scope = _scope(config, context, attempt.job_id)
+    payload = {
+        "format_version": 1,
+        "scope": scope,
+        "model_id": model_id,
+        "attempt": asdict(attempt),
+        "reason": reason,
+        "observed_at": observed_at,
+        "evidence": evidence,
+        "durations": durations,
+    }
+    key = _digest([scope, model_id, asdict(attempt), observed_at])
+    try:
+        _insert_immutable(spark, _state_table(config, "decisions"), key, payload)
+    except EvidenceUnavailable as error:
+        return str(error)
+    return "RECORDED"
+
+
+def _lineage_input(value):
+    if not isinstance(value, dict) or set(value) != {"catalog", "schema", "identifier", "path"}:
+        raise EvidenceUnavailable("LINEAGE_INCOMPLETE")
+    components = [value[key] for key in ("catalog", "schema", "identifier")]
+    if all(isinstance(part, str) and part.strip() for part in components):
+        return {key: value[key].lower() for key in ("catalog", "schema", "identifier")} | {"path": None}
+    if components == [None, None, None] and isinstance(value["path"], str) and value["path"].strip():
+        return value
+    raise EvidenceUnavailable("LINEAGE_INCOMPLETE")
+
+
+def _lineage_history(spark, config, context, model, job_id):
+    scope = _scope(config, context, job_id)
+    binding = {
+        "format_version": 1,
+        "kind": "lineage_blocker",
+        "scope": scope,
+        "output": {key: value.lower() for key, value in asdict(model.output).items()},
+    }
+    binding = binding | {"lineage_key": _digest(binding)}
+    # ponytail: JSON routing in the existing decisions table; project columns if measured history size warrants it.
+    rows = _state_rows(
+        spark,
+        f"SELECT key, evidence FROM {_state_table(config, 'decisions')} "
+        "WHERE get_json_object(evidence, '$.lineage_key') = :lineage_key",
+        {"lineage_key": binding["lineage_key"]},
+    )
+    inputs = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["evidence"])
+            observation = _lineage_input(payload["input"])
+            if payload != binding | {"input": observation} or row["key"] != _digest(payload):
+                raise ValueError("invalid lineage evidence binding")
+        except (KeyError, TypeError, ValueError) as error:
+            raise EvidenceUnavailable("LINEAGE_STATE_INCOMPLETE") from error
+        inputs[canonical_json(observation)] = observation
+    return binding, inputs
+
+
+def _declared_lineage(model, observation):
+    return (
+        observation["path"] is None
+        and lineage_reason(model, (Relation(observation["catalog"], observation["schema"], observation["identifier"]),))
+        is None
+    )
+
+
+def _lineage_blockers(model, inputs):
+    return [value for _, value in sorted(inputs.items()) if not _declared_lineage(model, value)]
+
+
+def _observed_lineage(spark, targets):
+    for target in targets:
+        try:
+            rows = spark.sql(
+                "SELECT DISTINCT source_table_catalog AS catalog, source_table_schema AS schema, "
+                "source_table_name AS identifier, source_path AS path FROM `system`.`access`.`table_lineage` "
+                "WHERE event_date >= date_sub(current_date(), 365) "
+                "AND lower(target_table_catalog) = :catalog AND lower(target_table_schema) = :schema "
+                "AND lower(target_table_name) = :identifier "
+                "AND (source_table_full_name IS NOT NULL OR source_path IS NOT NULL)",
+                args={key: value.lower() for key, value in asdict(target).items()},
+            ).collect()
+        except Exception as error:
+            raise EvidenceUnavailable("LINEAGE_UNAVAILABLE") from error
+        for row in rows:
+            yield _lineage_input(row.asDict())
+
+
+def prepare_lineage(spark, config, context, model, *, job_id):
+    """Lineage only vetoes reuse; retained blockers require explicit dependency declarations."""
+    inputs, reason = {}, None
+    try:
+        binding, inputs = _lineage_history(spark, config, context, model, job_id)
+        for observation in _observed_lineage(spark, (model.output, *model.views)):
+            if _declared_lineage(model, observation) or canonical_json(observation) in inputs:
+                continue
+            payload = binding | {"input": observation}
+            _insert_immutable(spark, _state_table(config, "decisions"), _digest(payload), payload)
+            inputs[canonical_json(observation)] = observation
+    except EvidenceUnavailable as error:
+        reason = str(error)
+    blockers = _lineage_blockers(model, inputs)
+    return {"reason": reason or ("UNDECLARED_INPUT" if blockers else None), "blockers": blockers}
+
+
+def _prepare_model(spark, workspace_client, config, context, model, attempt, deployments):
+    # Keep expected metadata/state outages within this model's fallback boundary.
+    # pylint: disable=too-many-try-statements
+    if model.reason:
+        return {"reason": model.reason, "baseline": None}, None
+    try:
+        claim_owner(spark, config, context, model.output, job_id=attempt.job_id)
+        lineage = prepare_lineage(spark, config, context, model, job_id=attempt.job_id)
+        if lineage["reason"]:
+            return {"reason": lineage["reason"], "baseline": None, "lineage": lineage}, None
+        output = snapshot_relation(spark, workspace_client, model.output)
+        build = read_build(
+            spark,
+            workspace_client,
+            config,
+            context,
+            model.unique_id,
+            output,
+            job_id=attempt.job_id,
+            deployments=deployments,
+        )
+        if build is None:
+            return {"reason": "NO_BASELINE", "baseline": None}, None
+        decision = {"reason": None, "baseline": {"key": build["key"], "sha256": build["sha256"]}}
+        views = [asdict(snapshot_view(workspace_client, relation)) for relation in model.views]
+        if sorted(views, key=canonical_json) != sorted(build["build"].get("views_after", []), key=canonical_json):
+            return decision | {"reason": "DEFINITION_CHANGED"}, None
+        _descriptor, manifest, provenance = load_deployment(
+            workspace_client, config, build["build"]["descriptor"], deployments=deployments
+        )
+        return decision, (manifest, provenance)
+    except EvidenceUnavailable as error:
+        return {"reason": str(error), "baseline": None}, None
+
+
+def _runtime_profiles(provenance, directory, workspace_client):
+    try:
+        template = verify_profiles(provenance, directory)
+    except OSError as error:
+        raise EvidenceUnavailable("PROFILE_UNAVAILABLE") from error
+    reason = runtime_profile_reason(template, provenance.context, workspace_client.config.host)
+    if reason:
+        raise EvidenceUnavailable(reason)
+    return template
+
+
+def prepare_run(
+    spark, workspace_client, config, deployment, project, profiles, attempt, *, secret_versions=None, model_ids=None
+) -> dict:
+    # pylint: disable=too-many-locals
+    """Collect exact successful baselines and publish code evidence, never permission to skip.
+
+    Expected evidence outages yield visible normal-execution reasons. Programming/configuration
+    errors propagate to the preparation task and retain Lakeflow's normal failure behavior.
+    """
+    result = {
+        "format_version": 1,
+        "deployment": deployment,
+        "attempt": asdict(attempt),
+        "reason": None,
+        "models": {},
+        "comparisons": [],
+    }
+    # Cache only within this preparation attempt. Model tasks always perform fresh verification.
+    deployments: dict = {}
+    try:
+        _descriptor, manifest, provenance = load_deployment(
+            workspace_client, config, deployment, deployments=deployments
+        )
+        parsed_provenance = read_provenance(provenance, manifest)
+        context = parsed_provenance.context
+        _runtime_profiles(parsed_provenance, profiles, workspace_client)
+        verify_runtime_identity(spark, workspace_client, context)
+    except EvidenceUnavailable as error:
+        return result | {"reason": str(error)}
+    models = describe_models(json.loads(manifest), context)
+    if model_ids is not None:
+        if (
+            not isinstance(model_ids, list)
+            or not all(isinstance(uid, str) for uid in model_ids)
+            or len(set(model_ids)) != len(model_ids)
+            or set(model_ids) - {model.unique_id for model in models}
+        ):
+            raise ValueError("preparation model scope must contain unique declared model ids")
+        models = tuple(model for model in models if model.unique_id in model_ids)
+        result["model_ids"] = sorted(model_ids)
+    if json.loads(context.canonical_json)["secret_versions"] != (secret_versions or {}):
+        return result | {"reason": "CONTEXT_CHANGED"}
+    decisions, baselines = {}, {}
+    for model in models:
+        decisions[model.unique_id], baseline = _prepare_model(
+            spark, workspace_client, config, context, model, attempt, deployments
+        )
+        if baseline is not None:
+            baselines[model.unique_id] = baseline
+    compared = compare_baselines(project, profiles, manifest, provenance, baselines)
+    for uid, decision in decisions.items():
+        if decision["reason"] is None:
+            decision["reason"] = compared["models"][uid]
+    return result | {"context_sha256": context.digest, "models": decisions, "comparisons": compared["comparisons"]}
+
+
+@dataclass
+class ModelRun:
+    """Evidence collected for one model attempt; absence never authorizes reuse."""
+
+    config: ReuseConfig
+    deployment: dict
+    model_id: str
+    attempt: Attempt
+    reason: str = "NO_BASELINE"
+    context: ExecutionContext | None = None
+    model: ModelDescriptor | None = None
+    manifest: bytes | None = None
+    profile_template: bytes | None = None
+    command_supported: bool = False
+    ready: bool = False
+    baseline: dict | None = None
+    inputs_before: tuple[RelationSnapshot, ...] | None = None
+    views_before: tuple[ViewSnapshot, ...] | None = None
+    publication: str | None = None
+
+
+def _supported_model_command(commands, target, manifest, model_id):
+    # ponytail: generated run/target plus full-refresh only; admit more flags with context tests.
+    if not isinstance(commands, list) or len(commands) != 1 or not isinstance(commands[0], str):
+        return False
+    tokens = shlex.split(commands[0])
+    if tokens[:1] == ["dbt"]:
+        tokens = tokens[1:]
+    # Reuse the generator's exact selector contract; a different selection must execute normally.
+    peers = manifest.get("nodes", {}) | manifest.get("sources", {}) | manifest.get("unit_tests", {})
+    select = DbtFactory._node_select(peers[model_id], peers=peers)  # pylint: disable=protected-access
+    return (
+        len(tokens) >= 5
+        and tokens[2] == select
+        and tokens[:2] == ["run", "--select"]
+        and tokens[3:5] == ["--target", target]
+        and all(token in {"--full-refresh", "-f"} for token in tokens[5:])
+    )
+
+
+def _context_matches(context, secret_versions):
+    payload = json.loads(context.canonical_json)
+    return (
+        runtime_versions() == payload["versions"]
+        and payload["secret_versions"] == (secret_versions or {})
+        and all(os.environ.get(name) == value for name, value in payload["environment_inputs"].items())
+    )
+
+
+def _read_preparation(workspace_client, config, pointer):
+    if (
+        not isinstance(pointer, dict)
+        or set(pointer) != {"path", "sha256"}
+        or not isinstance(pointer["sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", pointer["sha256"])
+        or pointer["path"]
+        != "/Volumes/" + "/".join(config.artifact_volume) + "/preparation_" + pointer["sha256"] + ".json"
+    ):
+        raise ValueError("reuse preparation requires a content-addressed pointer in its configured Volume")
+    try:
+        prepared = json.loads(download_artifact(workspace_client, **pointer))
+    except ValueError:
+        raise
+    except Exception as error:
+        raise EvidenceUnavailable("PREPARATION_UNAVAILABLE") from error
+    if not isinstance(prepared, dict):
+        raise ValueError("reuse preparation requires an object")
+    return prepared
+
+
+def _preparation_reason(workspace_client, run, pointer):
+    if not pointer:
+        return "PREPARATION_UNAVAILABLE"
+    prepared = _read_preparation(workspace_client, run.config, pointer)
+    for field, kind in (("attempt", dict), ("model_ids", list), ("models", dict)):
+        if not isinstance(prepared.get(field), kind):
+            raise ValueError(f"reuse preparation: invalid {field}")
+    assert run.context is not None and run.baseline is not None
+    attempt = prepared["attempt"]
+    binding = (prepared.get("format_version"), prepared.get("deployment"), attempt.get("job_id"), attempt.get("run_id"))
+    if binding != (1, run.deployment, run.attempt.job_id, run.attempt.run_id):
+        return "PREPARATION_STALE"
+    if run.model_id not in prepared.get("model_ids", []):
+        return "PREPARATION_STALE"
+    if prepared.get("reason"):
+        return "PREPARATION_UNAVAILABLE"
+    if prepared.get("context_sha256") != run.context.digest:
+        return "CONTEXT_CHANGED"
+    decision = prepared["models"].get(run.model_id, {})
+    if not isinstance(decision, dict):
+        raise ValueError("reuse preparation: invalid model decision")
+    if decision.get("baseline") != {key: run.baseline[key] for key in ("key", "sha256")}:
+        return "PREPARATION_STALE"
+    # Preparation supplies code evidence only. Physical evidence authorizes REUSED below.
+    return None if decision.get("reason") == "CODE_UNCHANGED" else "CODE_UNKNOWN"
+
+
+def _observed_data(inputs, views, output):
+    return {
+        "complete": True,
+        "inputs": [asdict(item) for item in inputs],
+        "views": [asdict(item) for item in views],
+        "output": asdict(output),
+    }
+
+
+def begin_model(
+    spark,
+    workspace_client,
+    config,
+    deployment,
+    model_id,
+    preparation,
+    attempt,
+    commands,
+    *,
+    project: Path,
+    profiles: Path,
+    forced=False,
+    secret_versions=None,
+    variables=None,
+) -> ModelRun:
+    # The notebook boundary supplies deployment, attempt, command and captured context together.
+    # Keep the ordered fallback checks at the notebook's single evidence boundary.
+    # pylint: disable=too-many-try-statements,too-many-arguments,too-complex,too-many-locals
+    """Revalidate code binding and live physical evidence without importing dbt."""
+    run = ModelRun(config, deployment, model_id, attempt)
+    try:
+        run.manifest, provenance = load_deployment(workspace_client, config, deployment)[1:]
+        parsed_provenance = read_provenance(provenance, run.manifest)
+        verify_snapshot(parsed_provenance, project)
+        run.profile_template = _runtime_profiles(parsed_provenance, profiles, workspace_client)
+        run.context = parsed_provenance.context
+        run.model = next(
+            (model for model in describe_models(json.loads(run.manifest), run.context) if model.unique_id == model_id),
+            None,
+        )
+        if run.model is None:
+            raise ValueError(f"reuse model {model_id!r} is absent from the captured deployment")
+        run.command_supported = _supported_model_command(
+            commands, json.loads(run.context.canonical_json)["target"], json.loads(run.manifest), model_id
+        )
+        if run.model.reason or not run.command_supported:
+            run.reason = run.model.reason or "UNSUPPORTED_COMMAND"
+            return run
+        verify_runtime_identity(spark, workspace_client, run.context)
+        if json.loads(run.context.canonical_json)["vars"] != (variables or {}) or not _context_matches(
+            run.context, secret_versions
+        ):
+            run.reason = "CONTEXT_CHANGED"
+            return run
+        if _lineage_blockers(run.model, _lineage_history(spark, config, run.context, run.model, attempt.job_id)[1]):
+            run.reason = "UNDECLARED_INPUT"
+            return run
+        claim_owner(spark, config, run.context, run.model.output, job_id=attempt.job_id)
+        run.ready = True
+        if forced or any(flag in shlex.split(commands[0]) for flag in ("--full-refresh", "-f")):
+            run.reason = "FORCED"
+            return run
+        output = snapshot_relation(spark, workspace_client, run.model.output)
+        run.baseline = read_build(spark, workspace_client, config, run.context, model_id, output, job_id=attempt.job_id)
+        if run.baseline is None:
+            return run
+        run.reason = _preparation_reason(workspace_client, run, preparation)
+        if run.reason is not None:
+            return run
+        old = BuildEvidence.from_dict(run.baseline["build"])
+        current = _observed_data(
+            (snapshot_relation(spark, workspace_client, relation) for relation in run.model.inputs),
+            (snapshot_view(workspace_client, relation) for relation in run.model.views),
+            output,
+        )
+        run.reason = reuse_reason(
+            _observed_data(old.inputs_before, old.views_before, old.output),
+            current,
+            True,
+            old.context_sha256 == run.context.digest,
+            False,
+        )
+        if run.reason == "REUSED" and not REUSE_ENABLED:
+            run.reason = "OPTIMIZATION_DISABLED"
+    except EvidenceUnavailable as error:
+        run.reason = str(error)
+    return run
+
+
+def before_model(spark, workspace_client, run: ModelRun) -> None:
+    """Observe immediately before the model invocation, after dbt parsing/initialization."""
+    if not run.ready:
+        return
+    assert run.model is not None
+    try:
+        run.inputs_before = tuple(snapshot_relation(spark, workspace_client, relation) for relation in run.model.inputs)
+        run.views_before = tuple(snapshot_view(workspace_client, relation) for relation in run.model.views)
+    except EvidenceUnavailable as error:
+        run.reason, run.ready = str(error), False
+
+
+def after_model(spark, workspace_client, run: ModelRun, directory: Path, *, secret_versions=None) -> None:
+    # pylint: disable=too-many-try-statements
+    """Publish a real successful model build only after stable input observations."""
+    if not run.ready or run.inputs_before is None or run.views_before is None:
+        return
+    assert run.model is not None and run.context is not None
+    results = directory / "run_results.json"
+    if not results.is_file():
+        run.reason = "BUILD_RESULT_UNKNOWN"
+        return
+    selected = json.loads(results.read_bytes()).get("results", [])
+    if len(selected) != 1 or selected[0].get("unique_id") != run.model_id or selected[0].get("status") != "success":
+        raise ValueError("reuse model execution results differ from the declared successful model")
+    try:
+        inputs = tuple(snapshot_relation(spark, workspace_client, relation) for relation in run.model.inputs)
+        views = tuple(snapshot_view(workspace_client, relation) for relation in run.model.views)
+        output = snapshot_relation(spark, workspace_client, run.model.output)
+        if not _context_matches(run.context, secret_versions):
+            run.reason = "CONTEXT_CHANGED"
+            return
+        build = BuildEvidence(
+            run.model_id,
+            run.attempt,
+            datetime.now(timezone.utc).isoformat(),
+            run.deployment,
+            run.context.digest,
+            run.inputs_before,
+            inputs,
+            output,
+            run.views_before,
+            views,
+        )
+        run.publication = record_build(spark, workspace_client, run.config, run.context, build, successful=True)
+        if run.publication != "RECORDED":
+            run.reason = run.publication
+    except EvidenceUnavailable as error:
+        run.reason = str(error)
+
+
+def record_model_decision(spark, run: ModelRun) -> None:
+    """Decision history is separate from successful builds, including on reuse."""
+    print(
+        "[dbt-factory] model reuse: "
+        + canonical_json({"model_id": run.model_id, "reason": run.reason, "publication": run.publication})
+    )
+    if run.context is not None:
+        status = record_decision(
+            spark,
+            run.config,
+            run.context,
+            run.model_id,
+            run.attempt,
+            reason=run.reason,
+            observed_at=datetime.now(timezone.utc).isoformat(),
+            evidence={
+                "deployment": run.deployment,
+                "publication": run.publication,
+                "baseline": ({key: run.baseline[key] for key in ("key", "sha256")} if run.baseline else None),
+            },
+            durations={},
+        )
+        if status != "RECORDED":
+            print("[dbt-factory] decision publication: " + status)

@@ -1,13 +1,15 @@
 import heapq
+import json
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import cast
 
-from databricks_dbt_factory.dbt_task import DbtTask
+from databricks_dbt_factory.dbt_task import DbtTask, validate_notebook_parameters
 from databricks_dbt_factory.job_partition import JobPartition, TaskPlacement, partition_tasks
+from databricks_dbt_factory.reuse import ReuseConfig, ReuseDeployment, canonical_json, describe_models
 from databricks_dbt_factory.task_factory import TaskFactory, TestTaskFactory
-from databricks_dbt_factory.utils import DYNAMIC_VALUE_REFERENCE, MAX_JOB_TASKS, build_task_key_maps
+from databricks_dbt_factory.utils import DYNAMIC_VALUE_REFERENCE, MAX_JOB_TASKS, build_task_key_maps, reserve_task_key
 
 # The `unique_id` prefixes of resources a test can be attached to.
 _DBT_TEST_TARGET_PREFIXES = ("model.", "seed.", "snapshot.", "source.")
@@ -79,6 +81,7 @@ class DbtFactory:
         self,
         task_factories: dict[str, TaskFactory],
         bundle_tests: bool = False,
+        reuse: ReuseDeployment | None = None,
     ):
         """
         Initializes the dbt factory.
@@ -94,6 +97,7 @@ class DbtFactory:
         """
         self.task_factories = task_factories
         self.bundle_tests = bundle_tests
+        self.reuse = reuse if reuse and reuse.context is not None else None
 
     def create_tasks(self, dbt_manifest: dict) -> list[dict]:
         """
@@ -110,16 +114,110 @@ class DbtFactory:
             ValueError: If the generated job would exceed Databricks' 1,000-task limit.
         """
         tasks, _ = self._create_tasks(dbt_manifest)
-        if len(tasks) > MAX_JOB_TASKS:
+        generated = self._prepare_reuse([task.to_dict() for task in tasks], tasks, dbt_manifest)
+        if len(generated) > MAX_JOB_TASKS:
             raise ValueError(
-                f"Databricks jobs support at most {MAX_JOB_TASKS:,} tasks; this manifest generates {len(tasks):,}. "
+                f"Databricks jobs support at most {MAX_JOB_TASKS:,} tasks; this manifest generates {len(generated):,}. "
                 f"Reduce the generated resources, enable test bundling, or split the job by tag."
             )
-        return [task.to_dict() for task in tasks]
+        return generated
 
     def create_partitions(self, dbt_manifest: dict, split_by_tags: Sequence[str]) -> list[JobPartition]:
         """Generates the tasks split into one job per dbt tag matching `split_by_tags`; see `partition_tasks`."""
-        return partition_tasks(*self._create_tasks(dbt_manifest), split_by_tags)
+        tasks, placements = self._create_tasks(dbt_manifest)
+        partitions = partition_tasks(tasks, placements, split_by_tags)
+        result = []
+        for partition in partitions:
+            generated = self._prepare_reuse(partition.tasks, tasks, dbt_manifest)
+            if len(generated) > MAX_JOB_TASKS:
+                raise ValueError(
+                    f"Databricks jobs support at most {MAX_JOB_TASKS:,} tasks; "
+                    f"the {partition.name!r} job generates {len(generated):,} including preparation."
+                )
+            result.append(replace(partition, tasks=generated))
+        return result
+
+    def _prepare_reuse(self, generated: list[dict], tasks: list[DbtTask], manifest: dict) -> list[dict]:
+        """Add one preparation task after partitioning, bound to this job's stable model ids."""
+        if self.reuse is None:
+            return generated
+        assert self.reuse.context is not None
+        ReuseConfig.from_dict(self.reuse.config)
+        eligible = {model.unique_id for model in describe_models(manifest, self.reuse.context) if model.reason is None}
+        if eligible:
+            self._apply_reuse_variables(generated, json.loads(self.reuse.context.canonical_json)["vars"])
+        bindings = {task.task_key: task.model_id for task in tasks if task.model_id in eligible}
+        scoped = {task["task_key"]: bindings[task["task_key"]] for task in generated if task["task_key"] in bindings}
+        if not scoped:
+            return generated
+        key = reserve_task_key("factory_reuse_prepare_model", {task["task_key"] for task in generated})
+        sample = next(task for task in generated if task["task_key"] in scoped)
+        if "notebook_task" not in sample or "job_cluster_key" in sample:
+            raise ValueError("reuse requires serverless notebook tasks")
+        paths = {
+            name: sample["notebook_task"]["base_parameters"].get(name, "")
+            for name in ("project_directory", "profiles_directory")
+        }
+        if not all(paths.values()):
+            raise ValueError("reuse preparation requires explicit project_directory and profiles_directory")
+        shared = {
+            "factory_reuse_config": canonical_json(self.reuse.config),
+            "factory_reuse_deployment": canonical_json(self.reuse.descriptor),
+            "factory_secret_versions": canonical_json(json.loads(self.reuse.context.canonical_json)["secret_versions"]),
+            **paths,
+        }
+        if DYNAMIC_VALUE_REFERENCE.search(canonical_json(shared)):
+            raise ValueError("reuse parameters must be static; Databricks dynamic value reference found")
+        identity = {
+            "factory_job_id": "{{job.id}}",
+            "factory_run_id": "{{job.run_id}}",
+            "factory_task_key": "{{task.name}}",
+            "factory_attempt_number": "{{task.execution_count}}",
+        }
+        for task in generated:
+            if task["task_key"] not in scoped:
+                continue
+            parameters = task["notebook_task"]["base_parameters"]
+            parameters.update(
+                shared
+                | identity
+                | {
+                    "factory_reuse_model": scoped[task["task_key"]],
+                    "factory_reuse_preparation": "{{tasks." + key + ".values.factory_reuse_preparation}}",
+                }
+            )
+            validate_notebook_parameters(task["task_key"], parameters)
+            task["depends_on"].append({"task_key": key})
+        parameters = shared | identity | {"factory_reuse_models": canonical_json(sorted(scoped.values()))}
+        validate_notebook_parameters(key, parameters)
+        return [
+            {
+                "task_key": key,
+                "depends_on": [],
+                "environment_key": sample["environment_key"],
+                "notebook_task": {
+                    "notebook_path": self.reuse.notebook_path,
+                    "source": "WORKSPACE",
+                    "base_parameters": parameters,
+                },
+            },
+            *generated,
+        ]
+
+    @staticmethod
+    def _apply_reuse_variables(generated: list[dict], variables: dict) -> None:
+        """Execution context survives metadata outages and applies to separate test tasks too."""
+        if not variables:
+            return
+        encoded = canonical_json(variables)
+        if DYNAMIC_VALUE_REFERENCE.search(encoded):
+            raise ValueError("reuse vars must be static; Databricks dynamic value reference found")
+        for task in generated:
+            if "notebook_task" not in task or "job_cluster_key" in task:
+                raise ValueError("reuse requires serverless notebook tasks")
+            parameters = task["notebook_task"]["base_parameters"]
+            parameters["factory_dbt_vars"] = encoded
+            validate_notebook_parameters(task["task_key"], parameters)
 
     _GATEABLE_TYPES = frozenset({"model", "seed", "snapshot"})
     _DBT_TEST_TARGET_PREFIXES = _DBT_TEST_TARGET_PREFIXES
@@ -702,6 +800,8 @@ class DbtFactory:
         # checks, including sources even though no emitted command builds a source directly.
         peers = _SelectorIndex({**dbt_nodes, **dbt_unit_tests, **dbt_sources})
 
+        self._add_declared_inputs(dbt_nodes, dbt_manifest)
+
         bundle = "test" in self.task_factories and self.bundle_tests
         bundled_tests: dict[str, list[tuple[str, dict]]] = {}
         standalone_tests: list[tuple[str, dict]] = []
@@ -759,6 +859,16 @@ class DbtFactory:
             tasks.extend(self._build_unit_test_tasks(dbt_unit_tests, task_keys, peers))
 
         return tasks, self._placements(peers, task_keys, bundled_test_keys)
+
+    def _add_declared_inputs(self, nodes: dict, manifest: dict) -> None:
+        """Copy scheduling edges without changing the original dbt selector/parse graph."""
+        if self.reuse is not None:
+            for model in describe_models(manifest, self.reuse.context):
+                if model.unique_id in nodes:
+                    node = nodes[model.unique_id]
+                    nodes[model.unique_id] = node | {
+                        "depends_on": node.get("depends_on", {}) | {"nodes": list(model.dependencies)}
+                    }
 
     @staticmethod
     def _placements(
@@ -1108,6 +1218,8 @@ class DbtFactory:
 
             if resource_type in self._GATEABLE_TYPES and not bundle:
                 task = self._gate_task(task, node_full_name, gating)
+            if resource_type == "model":
+                task = replace(task, model_id=node_full_name)
             tasks.append(task)
         return tasks
 

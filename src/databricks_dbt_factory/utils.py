@@ -117,7 +117,7 @@ def build_task_key_maps(
     several nodes claim the same key; each claimant of a contested key then gets a
     disambiguated key with dbt's test hash (or the package name, when there is no hash) folded
     in, falling back to the sanitized `unique_id`. Every assigned key is passed through
-    `_reserve`, which enforces both uniqueness and the `MAX_TASK_KEY_LENGTH` limit, so the
+    `reserve_task_key`, which enforces both uniqueness and the `MAX_TASK_KEY_LENGTH` limit, so the
     returned keys are always unique and within length — a valid dbt project cannot fail
     deployment with a duplicate or over-long task key.
 
@@ -132,7 +132,7 @@ def build_task_key_maps(
     task_keys: dict[str, str] = {}
     bundled_test_keys: dict[str, str] = {}
     taken: set[str] = set()
-    # Both passes walk their claims in sorted order rather than manifest order. `_reserve`'s
+    # Both passes walk their claims in sorted order rather than manifest order. `reserve_task_key`'s
     # numeric suffix is handed out first-come, so iterating in manifest order would let the
     # *arrangement* of the manifest decide which of two colliding nodes keeps the readable key —
     # adding or renaming an unrelated model could then silently swap two task keys, repointing
@@ -143,17 +143,17 @@ def build_task_key_maps(
     for key, claimants in ordered_claims:
         if len(claimants) == 1:
             uid, is_bundled = claimants[0]
-            (bundled_test_keys if is_bundled else task_keys)[uid] = _reserve(key, taken)
+            (bundled_test_keys if is_bundled else task_keys)[uid] = reserve_task_key(key, taken)
     for key, claimants in ordered_claims:
         if len(claimants) == 1:
             continue
         for uid, is_bundled in claimants:
             candidate = _disambiguated_bundled_test_key(uid) if is_bundled else _disambiguated_task_key(uid)
-            (bundled_test_keys if is_bundled else task_keys)[uid] = _reserve(candidate, taken)
+            (bundled_test_keys if is_bundled else task_keys)[uid] = reserve_task_key(candidate, taken)
     return task_keys, bundled_test_keys
 
 
-def _reserve(candidate: str, taken: set[str]) -> str:
+def reserve_task_key(candidate: str, taken: set[str]) -> str:
     """
     Returns a unique task key at most `MAX_TASK_KEY_LENGTH` characters long, records it in
     `taken`, and never returns the same key twice.

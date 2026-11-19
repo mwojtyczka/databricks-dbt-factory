@@ -718,7 +718,7 @@ def prepare_lineage(spark, config, context, model):
     return {"reason": reason or ("UNDECLARED_INPUT" if blockers else None), "blockers": blockers}
 
 
-def _prepare_model(spark, workspace_client, config, context, model, attempt, deployments):
+def _prepare_model(spark, workspace_client, config, context, model, deployments):
     # Keep expected metadata/state outages within this model's fallback boundary.
     # pylint: disable=too-many-try-statements
     if model.reason:
@@ -808,7 +808,7 @@ def prepare_run(
     decisions, baselines = {}, {}
     for model in models:
         decisions[model.unique_id], baseline = _prepare_model(
-            spark, workspace_client, config, context, model, attempt, deployments
+            spark, workspace_client, config, context, model, deployments
         )
         if baseline is not None:
             baselines[model.unique_id] = baseline

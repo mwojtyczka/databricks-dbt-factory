@@ -16,15 +16,15 @@ def test_plan_alternates_arm_order_and_runs_each_scenario_per_arm():
     steps = bench.plan(reps=2)
     runs = [(s.rep, s.arm, s.scenario) for s in steps if s.kind == "run"]
     assert runs == [
-        (1, "off", "cold"), (1, "off", "rerun"), (1, "off", "append"), (1, "off", "whitespace"),
-        (1, "on", "cold"), (1, "on", "rerun"), (1, "on", "append"), (1, "on", "whitespace"),
-        (2, "on", "cold"), (2, "on", "rerun"), (2, "on", "append"), (2, "on", "whitespace"),
-        (2, "off", "cold"), (2, "off", "rerun"), (2, "off", "append"), (2, "off", "whitespace"),
+        (1, "off", "cold"), (1, "off", "rerun"), (1, "off", "append"), (1, "off", "edit"),
+        (1, "on", "cold"), (1, "on", "rerun"), (1, "on", "append"), (1, "on", "edit"),
+        (2, "on", "cold"), (2, "on", "rerun"), (2, "on", "append"), (2, "on", "edit"),
+        (2, "off", "cold"), (2, "off", "rerun"), (2, "off", "append"), (2, "off", "edit"),
     ]  # fmt: skip
     narrow = [(s.arm, s.scenario) for s in bench.plan(1, ("on",), ("cold", "rerun")) if s.kind == "run"]
     assert narrow == [("on", "cold"), ("on", "rerun")]
-    # Each arm starts from the base project and ends on the whitespace variant.
-    assert [s.variant for s in steps if s.kind == "variant"][:2] == ["base", "ws"]
+    # Each arm starts from the base project and ends on the edit variant.
+    assert [s.variant for s in steps if s.kind == "variant"][:2] == ["base", "edit"]
     first_run = next(i for i, s in enumerate(steps) if s.kind == "run")
     assert [s.kind for s in steps[:first_run]] == ["variant", "reset"]
 

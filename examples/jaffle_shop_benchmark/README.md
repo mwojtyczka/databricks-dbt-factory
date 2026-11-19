@@ -28,11 +28,12 @@ What one run does:
 1. Deploys the warehouse, then the control job (`bundle/control.yml`) and the project.
 2. Captures reuse provenance inside a serverless job (`capture_parse`). The context fingerprints the runtime
    packages, so capture must run there, not on the laptop. Two variants are captured: `base` (the pinned
-   project) and `ws` (a whitespace-only edit to `stg_supplies.sql`).
+   project) and `edit` (`stg_supplies.sql` gains `where supply_id is not null`: its compiled SQL and view
+   definition change, its rows do not, so `supplies`, `order_items`, `orders` and `customers` rebuild).
 3. Generates the arm jobs with the Factory CLI, one with `--reuse-config`/`--reuse-provenance` for the on arm,
    and publishes the immutable reuse artifacts to the `jaffle_bench_on.artifacts` volume.
 4. Runs the plan from `bench.py plan()`: for each arm, reset the raw data and arm schema, then `cold`,
-   `rerun`, append ~1% of orders and items, `append`, switch to the `ws` variant, and `whitespace`. Each
+   `rerun`, append ~1% of orders and items, `append`, switch to the `edit` variant, and `edit`. Each
    rep alternates arm order.
 
 Schemas: `jaffle_bench_raw` (sources), `jaffle_bench_off` and `jaffle_bench_on` (one per arm; reuse state and
@@ -43,9 +44,10 @@ the artifact volume live in `on`), `jaffle_bench_results` (persistent). Targets 
 
 Each job task becomes one row in `test_jg_catalog.jaffle_bench_results.reuse_benchmark_runs`. Control steps
 (reset, append) are rows with `step_kind` `reset` or `append`. The table records the factory and jaffle-shop
-SHAs, scale factor, task seconds, run seconds, dbt run and test invocations, the reuse reason, query time
-from `system.query.history` (when available at run end), and DBUs. DBUs stay NULL until billing backfills.
-`bundle/benchmark_results.py` summarizes off vs on per scenario, overhead, and history. `RESULTS.md` holds
+SHAs, scale factor, task seconds, run seconds, dbt run and test invocations and the reuse reason.
+`bundle/benchmark_results.py` summarizes off vs on per scenario, overhead and history, and attributes
+warehouse time (`system.query.history`) and serverless job DBUs (`system.billing.usage`) to each arm job run
+when it runs. Query history lags minutes and billing hours, so rerun the notebook later for complete rows. `RESULTS.md` holds
 the latest headline numbers.
 
 ## Notes

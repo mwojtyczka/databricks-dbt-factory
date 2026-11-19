@@ -3,7 +3,8 @@
 # MAGIC %md
 # MAGIC # jaffle-shop model reuse benchmark
 # MAGIC Off vs on per scenario. Run wall time is per job run; overhead is the control steps (reset, append)
-# MAGIC plus the reuse preparation task. DBUs stay NULL until `bench.py backfill` (billing lags hours).
+# MAGIC plus the reuse preparation task. Warehouse time and job DBUs are read from system tables when this
+# MAGIC notebook runs; query history lags minutes and billing lags hours, so rerun it later for complete rows.
 
 # COMMAND ----------
 
@@ -46,4 +47,34 @@ GROUP BY ALL ORDER BY benchmark_run_id, rep, arm, scenario
 spark.sql(f"""
 SELECT benchmark_run_id, arm, scenario, MIN(recorded_at) AS recorded_at, MAX(run_seconds) AS run_seconds, SUM(dbus) AS dbus
 FROM {RESULTS} WHERE step_kind = 'run' GROUP BY ALL ORDER BY recorded_at
+""").display()
+
+# COMMAND ----------
+
+# Warehouse work and serverless job DBUs per arm job run. The benchmark owns its warehouse and runs one job at a
+# time, so every warehouse query inside a job run's window belongs to that run.
+spark.sql(f"""
+WITH runs AS (
+  SELECT DISTINCT benchmark_run_id, arm, scenario, CAST(job_run_id AS STRING) AS job_run_id
+  FROM {RESULTS} WHERE step_kind = 'run'
+),
+windows AS (
+  SELECT CAST(run_id AS STRING) AS run_id, MIN(period_start_time) AS s, MAX(period_end_time) AS e
+  FROM system.lakeflow.job_run_timeline WHERE CAST(run_id AS STRING) IN (SELECT job_run_id FROM runs) GROUP BY ALL
+),
+warehouses AS (SELECT DISTINCT warehouse_id FROM system.compute.warehouses WHERE warehouse_name LIKE '%jaffle-bench%'),
+queries AS (
+  SELECT w.run_id, SUM(h.total_duration_ms) / 1000 AS warehouse_seconds, COUNT(*) AS queries
+  FROM windows w JOIN system.query.history h
+    ON h.compute.warehouse_id IN (SELECT warehouse_id FROM warehouses) AND h.start_time BETWEEN w.s AND w.e
+  GROUP BY ALL
+),
+dbus AS (
+  SELECT CAST(usage_metadata.job_run_id AS STRING) AS run_id, SUM(usage_quantity) AS job_dbus
+  FROM system.billing.usage WHERE CAST(usage_metadata.job_run_id AS STRING) IN (SELECT job_run_id FROM runs) GROUP BY ALL
+)
+SELECT r.benchmark_run_id, r.scenario, r.arm, ROUND(q.warehouse_seconds, 1) AS warehouse_seconds, q.queries,
+       ROUND(d.job_dbus, 3) AS job_dbus
+FROM runs r LEFT JOIN queries q ON q.run_id = r.job_run_id LEFT JOIN dbus d ON d.run_id = r.job_run_id
+ORDER BY r.benchmark_run_id, r.scenario, r.arm
 """).display()

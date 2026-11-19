@@ -4,7 +4,7 @@
 
 `run` fetches jaffle-shop at a pinned SHA, deploys a bundle with a serverless SQL warehouse, captures
 reuse provenance inside serverless, generates the off and on arm jobs with the Factory CLI, and runs the
-scenarios (cold, rerun, append, whitespace) for both arms. Results are appended to
+scenarios (cold, rerun, append, edit) for both arms. Results are appended to
 `<catalog>.jaffle_bench_results.reuse_benchmark_runs`.
 """
 
@@ -43,8 +43,9 @@ ARTIFACTS = "artifacts"
 RESULTS_TABLE = f"{CATALOG}.{RESULTS}.reuse_benchmark_runs"
 ARM_TARGET = {"off": "arm_off", "on": "arm_on"}
 ARM_SCHEMA = {"off": OFF, "on": ON}
-SCENARIOS = ("cold", "rerun", "append", "whitespace")
-WHITESPACE_EDIT = "\n"  # appended to stg_supplies.sql: changes the file bytes, not the query
+SCENARIOS = ("cold", "rerun", "append", "edit")
+# Changes stg_supplies' compiled SQL (and so its view definition) without changing its rows.
+CODE_EDIT = ("select * from renamed", "select * from renamed where supply_id is not null")
 VOLUME_ROOT = f"/Volumes/{CATALOG}/{ON}/{ARTIFACTS}"
 RESULT_COLUMNS = (
     "benchmark_run_id, recorded_at, rep, arm, scenario, variant, step_kind, job_run_id, task_key, task_state, "
@@ -71,9 +72,9 @@ class Step:
 def plan(reps: int, arms: tuple[str, ...] = ("off", "on"), scenarios: tuple[str, ...] = SCENARIOS) -> list[Step]:
     """Each rep runs both arms through every scenario; arm order alternates between reps.
 
-    Every arm starts from an empty arm schema and the base project, then ends with the whitespace variant,
+    Every arm starts from an empty arm schema and the base project, then ends with the edit variant,
     so the base variant is redeployed at the start of the next arm. Scenarios can be narrowed for smoke runs;
-    the append and whitespace setup steps are only emitted when their scenario is selected.
+    the append and edit setup steps are only emitted when their scenario is selected.
     """
     steps: list[Step] = []
     for rep in range(1, reps + 1):
@@ -85,8 +86,8 @@ def plan(reps: int, arms: tuple[str, ...] = ("off", "on"), scenarios: tuple[str,
                 steps.append(Step("run", arm, "rerun", rep=rep))
             if "append" in scenarios:
                 steps += [Step("append", arm, rep=rep), Step("run", arm, "append", rep=rep)]
-            if "whitespace" in scenarios:
-                steps += [Step("variant", arm, variant="ws", rep=rep), Step("run", arm, "whitespace", rep=rep)]
+            if "edit" in scenarios:
+                steps += [Step("variant", arm, variant="edit", rep=rep), Step("run", arm, "edit", rep=rep)]
     return steps
 
 
@@ -216,17 +217,18 @@ def prune_snapshot(project: Path) -> None:
 
 
 def make_variants() -> None:
-    """Base: the pinned project. ws: base plus a whitespace-only change to stg_supplies."""
+    """Base: the pinned project. edit: base plus a one-line SQL change to stg_supplies (see CODE_EDIT)."""
     base = VARIANTS / "base" / "project"
     fetch_jaffle_shop(base)
     dbt_deps(base)
     prune_snapshot(base)
-    ws = VARIANTS / "ws" / "project"
-    if ws.exists():
-        shutil.rmtree(ws)
-    shutil.copytree(base, ws)
-    edited = ws / "models" / "staging" / "stg_supplies.sql"
-    edited.write_text(edited.read_text() + WHITESPACE_EDIT)
+    edit = VARIANTS / "edit" / "project"
+    if edit.exists():
+        shutil.rmtree(edit)
+    shutil.copytree(base, edit)
+    edited = edit / "models" / "staging" / "stg_supplies.sql"
+    assert CODE_EDIT[0] in edited.read_text(), "pinned stg_supplies.sql no longer contains the edited line"
+    edited.write_text(edited.read_text().replace(*CODE_EDIT))
 
 
 def build_partial_parse(variant: str) -> None:
@@ -519,13 +521,13 @@ class Benchmark:
         self.ws.file_path = summary["workspace"]["file_path"]
         self.ws.warehouse_id = summary["resources"]["sql_warehouses"]["bench"]["id"]
         self.control_job = int(summary["resources"]["jobs"]["bench_control"]["id"])
-        for variant in ("base", "ws"):
+        for variant in ("base", "edit"):
             write_profiles(VARIANTS / variant / "profiles", self.ws.warehouse_id)
             build_partial_parse(variant)
-        for variant in ("base", "ws"):
+        for variant in ("base", "edit"):
             self.capture_variant(variant)
         self.generate_variant("base")
-        self.generate_variant("ws")
+        self.generate_variant("edit")
         self.materialize_and_deploy("base", all_jobs=True)
         self.job_ids = {arm: int(bundle_summary()["resources"]["jobs"][f"bench_{arm}"]["id"]) for arm in ARM_TARGET}
 

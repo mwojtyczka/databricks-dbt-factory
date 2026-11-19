@@ -1,0 +1,40 @@
+# Declarative Automation Bundle for the jaffle-shop reuse benchmark.
+# bench.py writes the `include` list it needs for each deployment phase and fills the generated job files.
+bundle:
+  name: jaffle_bench
+
+variables:
+  catalog:
+    default: test_jg_catalog
+  raw_schema:
+    default: jaffle_bench_raw
+  on_schema:
+    default: jaffle_bench_on
+  off_schema:
+    default: jaffle_bench_off
+  wheel_path:
+    default: ""
+
+# The repo .gitignore ignores build/, which holds this bundle; sync.include keeps those files.
+sync:
+  include:
+    - "*.py"
+    - "*.yml"
+    - "*.json"
+    - "project/**"
+    - "profiles/**"
+    - "reuse_artifacts/**"
+    - "prepare_dbt_reuse_*.py"
+
+include:
+  - warehouse.yml
+  - control.yml
+  - off.yml
+  - on.yml
+
+targets:
+  fevm-test-jg:
+    mode: development
+    default: true
+    workspace:
+      host: https://fevm-test-jg.cloud.databricks.com

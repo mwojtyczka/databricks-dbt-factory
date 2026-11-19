@@ -46,7 +46,11 @@ def reuse_credentials(monkeypatch):
 
 @pytest.fixture(scope="module")
 def captured(tmp_path_factory):
-    root = tmp_path_factory.mktemp("reuse-project")
+    return capture_project(tmp_path_factory.mktemp("reuse-project"))
+
+
+def capture_project(root, prebuilt_orders_suffix=None):
+    """Real dbt capture; a suffix first parses orders+suffix into the snapshot's `target/partial_parse.msgpack`."""
     project, profiles = root / "project", root / "profiles"
     (project / "models").mkdir(parents=True)
     profiles.mkdir()
@@ -77,6 +81,15 @@ def captured(tmp_path_factory):
         "version: 2\nsources:\n  - name: raw\n    database: raw\n    schema: sales\n    tables:\n      - name: orders\n"
     )
     with patch_environment.dict(os.environ, {"DBT_ACCESS_TOKEN": "dummy-parse-only"}):
+        if prebuilt_orders_suffix is not None:
+            from dbt.cli.main import dbtRunner  # pylint: disable=import-outside-toplevel
+
+            orders = project / "models" / "orders.sql"
+            original = orders.read_text()
+            orders.write_text(original + prebuilt_orders_suffix)
+            directories = ["--project-dir", str(project), "--profiles-dir", str(profiles)]
+            assert dbtRunner().invoke(["parse", "--target", "dev", *directories]).success
+            orders.write_text(original)
         manifest, provenance = capture_parse(
             project, profiles, identity=IDENTITY, target="dev", deployment_ref="release-1"
         )

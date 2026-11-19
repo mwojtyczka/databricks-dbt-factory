@@ -282,6 +282,11 @@ environments and Git metadata outside it. Symlinks are refused; materialize loca
 the snapshot. Write the returned artifacts outside the snapshot. `verify_snapshot` checks its
 contents against provenance once during preparation; it is not intended for every model task.
 
+The one generated file worth shipping inside the snapshot is `target/partial_parse.msgpack` (see the
+README's pre-built msgpack section), built with the same dbt pins and parse context before capture.
+Opted-in model tasks then load it and compare its graph in memory with the captured manifest instead
+of running `dbt parse`; a missing, unreadable or differing msgpack falls back to a fresh parse.
+
 Optional `variables`, `environment_inputs` (an allowlist of environment variable names), and
 `secret_versions` must describe all result-affecting context. Vars and allowlisted values are
 caller-declared non-secret inputs. Never pass credentials or raw/hashed secrets in these fields.

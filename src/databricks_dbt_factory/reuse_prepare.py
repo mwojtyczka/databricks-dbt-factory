@@ -316,6 +316,18 @@ def capture_parse(
     return manifest, canonical_json(provenance).encode()
 
 
+_GRAPH_SECTIONS = (
+    "nodes",
+    "sources",
+    "macros",
+    "unit_tests",
+    "semantic_models",
+    "saved_queries",
+    "metrics",
+    "exposures",
+)
+
+
 def _parse_graph(manifest):
     """Ignore only dbt's parse timestamps when checking the deployed fresh parse."""
     return {
@@ -323,16 +335,7 @@ def _parse_graph(manifest):
             uid: {key: value for key, value in node.items() if key != "created_at"}
             for uid, node in manifest.get(section, {}).items()
         }
-        for section in (
-            "nodes",
-            "sources",
-            "macros",
-            "unit_tests",
-            "semantic_models",
-            "saved_queries",
-            "metrics",
-            "exposures",
-        )
+        for section in _GRAPH_SECTIONS
     }
 
 
@@ -340,6 +343,20 @@ def verify_parsed_manifest(parsed: dict, manifest: bytes) -> None:
     """Bind a fresh native parse to the captured deployment graph."""
     if _parse_graph(parsed) != _parse_graph(json.loads(manifest)):
         raise ValueError("reuse preparation fresh parse differs from deployment; verify profiles, vars and environment")
+
+
+def verify_loaded_manifest(loaded, manifest: bytes) -> None:
+    """Bind a manifest loaded from `partial_parse.msgpack` to the captured deployment graph without parsing."""
+    # Serialize as dbt writes `manifest.json` artifacts: the msgpack also keeps parse-internal fields.
+    sections = {
+        section: {
+            uid: node.to_resource().to_dict(omit_none=False, context={"artifact": True})
+            for uid, node in getattr(loaded, section).items()
+        }
+        for section in _GRAPH_SECTIONS
+    }
+    if _parse_graph(sections) != _parse_graph(json.loads(manifest)):
+        raise ValueError("pre-built manifest differs from deployment")
 
 
 def _native_modified(project, template, context, baseline, environment, manifest):

@@ -30,6 +30,27 @@ if not dbt_commands:
 
 # COMMAND ----------
 
+
+def load_prebuilt_manifest():
+    """Load `target/partial_parse.msgpack` so dbt skips parsing; `None` means parse normally."""
+    path = os.path.join("target", "partial_parse.msgpack")
+    if not os.path.exists(path):
+        return None
+    try:
+        from dbt.contracts.graph.manifest import Manifest
+        from dbt.parser.manifest import extended_mashumuro_decoder
+
+        with open(path, "rb") as f:
+            loaded = Manifest.from_msgpack(f.read(), decoder=extended_mashumuro_decoder)
+        loaded.build_flat_graph()
+        return loaded
+    except Exception as e:
+        print(f"[dbt-factory] manifest injection unavailable, falling back to dbt parse: {e}")
+        return None
+
+
+# COMMAND ----------
+
 # Reuse metadata is optional; ordinary tasks keep their existing runner path.
 for name in (
     "factory_reuse_config", "factory_reuse_deployment", "factory_reuse_model",
@@ -107,8 +128,16 @@ try:
         os.environ["DBT_TARGET_PATH"] = local_dir
         os.environ["DBT_LOG_PATH"] = local_dir
 
-        manifest = None
-        if model_run is not None and model_run.ready:
+        manifest = load_prebuilt_manifest()
+        if model_run is not None and model_run.ready and manifest is not None:
+            from databricks_dbt_factory.reuse_prepare import verify_loaded_manifest
+
+            try:
+                verify_loaded_manifest(manifest, model_run.manifest)
+            except ValueError as e:
+                print(f"[dbt-factory] reuse: {e}; falling back to dbt parse")
+                manifest = None
+        if model_run is not None and model_run.ready and manifest is None:
             from databricks_dbt_factory.reuse import canonical_json
             from databricks_dbt_factory.reuse_prepare import verify_parsed_manifest
 
@@ -122,20 +151,8 @@ try:
                 raise RuntimeError(f"dbt parse failed: {parsed.exception or parsed.result}")
             verify_parsed_manifest(json.loads((Path(local_dir) / "manifest.json").read_bytes()), model_run.manifest)
             manifest = parsed.result
-        else:
-            prebuilt_manifest_path = os.path.join("target", "partial_parse.msgpack")
-            if os.path.exists(prebuilt_manifest_path):
-                try:
-                    from dbt.contracts.graph.manifest import Manifest
-                    from dbt.parser.manifest import extended_mashumuro_decoder
-
-                    with open(prebuilt_manifest_path, "rb") as f:
-                        manifest = Manifest.from_msgpack(f.read(), decoder=extended_mashumuro_decoder)
-                    manifest.build_flat_graph()
-                    print(f"[dbt-factory] injecting pre-built manifest from {prebuilt_manifest_path} (skipping dbt parse)")
-                except Exception as e:
-                    print(f"[dbt-factory] manifest injection unavailable, falling back to dbt parse: {e}")
-                    manifest = None
+        elif manifest is not None:
+            print("[dbt-factory] injecting pre-built manifest from target/partial_parse.msgpack (skipping dbt parse)")
 
         runner = dbtRunner(manifest=manifest)
 

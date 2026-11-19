@@ -276,7 +276,9 @@ caller-declared non-secret inputs. Never pass credentials or raw/hashed secrets 
 result-affecting secrets. Undeclared context prevents safe reuse and remains the author's
 responsibility under the explicit model opt-in contract.
 
-Python and installed library versions belong to the context digest. Manifest/deployment digests
+dbt distribution (`dbt-*`) and Factory versions belong to the context digest; other installed
+packages and the Python version do not, so a CI generator and serverless runtime only need matching
+dbt pins. Manifest/deployment digests
 are separate, allowing native per-model code comparison without invalidating every model for an
 unrelated source edit. SQL table models can be candidates; hooks, Python/custom/incremental
 outputs, and unverified view/ephemeral dependencies execute normally. Physical Delta identity,

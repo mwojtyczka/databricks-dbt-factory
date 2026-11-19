@@ -124,7 +124,7 @@ class ExecutionContext:
         for key in mappings:
             if not isinstance(value[key], dict) or not all(isinstance(name, str) for name in value[key]):
                 raise ValueError(f"reuse context.{key}: expected an object with string keys")
-        required_versions = {"python", "dbt-core", "dbt-databricks", "databricks-sql-connector", "databricks-sdk"}
+        required_versions = {"dbt-core", "dbt-databricks"}
         if not required_versions <= value["versions"].keys():
             raise ValueError("reuse context.versions: missing runtime versions")
         for name, version in value["versions"].items():

@@ -101,7 +101,7 @@ def test_context_changes_and_missing_baselines_do_not_invoke_dbt(baseline, monke
     monkeypatch.setattr(reuse_prepare.subprocess, "run", unexpected)
     for field, value in (
         ("versions", {"dbt-core": "0.0.0"}),
-        ("versions", {"databricks-sql-connector": "0.0.0"}),
+        ("versions", {"dbt-databricks": "0.0.0"}),
         ("vars", {"date": "tomorrow"}),
         ("environment_inputs", {"REGION": "other"}),
     ):

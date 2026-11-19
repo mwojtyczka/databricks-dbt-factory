@@ -3,7 +3,6 @@
 import importlib.metadata
 import json
 import os
-import platform
 import re
 import subprocess
 import sys
@@ -17,6 +16,7 @@ import yaml
 from databricks_dbt_factory.reuse import ExecutionContext, canonical_json, describe_models, digest_bytes
 
 
+FACTORY = "databricks-dbt-factory"
 _PROFILE_ENV_VAR = re.compile(r"\{\{\s*env_var\(\s*(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\)\s*\}\}")
 
 
@@ -162,11 +162,12 @@ def runtime_profile_reason(template: bytes, context: ExecutionContext, host: str
 
 
 def runtime_versions() -> dict[str, str]:
-    """Dependency upgrades invalidate broadly; compare only pinned execution environments."""
-    return {"python": platform.python_version()} | {
+    """dbt engine/adapter and Factory versions; other packages differ between CI and serverless harmlessly."""
+    versions = {
         distribution.metadata["Name"].lower().replace("_", "-"): distribution.version
         for distribution in importlib.metadata.distributions()
     }
+    return {name: version for name, version in versions.items() if name.startswith("dbt-") or name == FACTORY}
 
 
 def snapshot_digest(directory: Path) -> str:

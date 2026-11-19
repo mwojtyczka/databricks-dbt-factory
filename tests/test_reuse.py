@@ -134,6 +134,19 @@ def test_real_models_have_conservative_eligibility(captured):
     assert lineage_reason(extra, ()) is None  # Empty lineage supplies no additional evidence.
 
 
+def test_runtime_versions_track_only_dbt_and_factory_distributions():
+    from databricks_dbt_factory import reuse_prepare  # pylint: disable=import-outside-toplevel
+
+    versions = reuse_prepare.runtime_versions()
+    assert {"dbt-core", "dbt-databricks", "dbt-adapters"} <= versions.keys()
+    assert all(name.startswith("dbt-") or name == "databricks-dbt-factory" for name in versions)
+    assert "pytest" not in versions and "python" not in versions  # CI and serverless differ here harmlessly.
+    ExecutionContext.from_dict(
+        {key: "x" for key in ("project_id", "environment", "workspace_id", "metastore_id", "principal", "target")}
+        | {"versions": versions, "vars": {}, "environment_inputs": {}, "secret_versions": {}}
+    )
+
+
 def test_project_level_opt_in_is_inherited_and_folder_opt_out_wins(tmp_path):
     from tests.integration.dbt_helpers import invoke_dbt  # pylint: disable=import-outside-toplevel
 

@@ -256,11 +256,12 @@ the project has run hooks, unless its policy acknowledges this with `run_hooks: 
 names the hook operations it found. Model `pre-hook`/`post-hook` always prevent reuse.
 
 With `--reuse-config`, `--extra-dbt-command-options` may contain only options that cannot change a
-model's output: `--[no-]write-json`, `--[no-]populate-cache`, `--[no-]partial-parse`, `--threads`,
+model's output: `--write-json`, `--[no-]populate-cache`, `--[no-]partial-parse`, `--threads`,
 `--log-level[-file]`, `--log-format[-file]`, `-q`/`--[no-]quiet`, `--[no-]use-colors`,
 `-x`/`--[no-]fail-fast`, `--warn-error` and `--warn-error-options`. Generation refuses any other
 option, naming it; a model task whose command carries one at run time executes normally with
-`UNSUPPORTED_COMMAND`.
+`UNSUPPORTED_COMMAND`. `--no-write-json` is refused because build evidence is read from the
+`run_results.json` it suppresses.
 
 The build pipeline can call `reuse_prepare.capture_parse(snapshot, profiles, identity=identity,
 target="prod", deployment_ref=release_id)`. It returns manifest and provenance bytes from a fresh

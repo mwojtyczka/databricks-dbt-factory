@@ -330,7 +330,7 @@ def test_unusable_preparation_executes_normally(matching_preparation, model_invo
 @pytest.mark.parametrize(
     "options",
     [
-        " --no-write-json --no-populate-cache",
+        " --write-json --no-populate-cache",
         " --threads 8 --log-level=warn --log-format json -q --no-use-colors -x",
         ' --warn-error-options \'{"error": "all"}\' --no-partial-parse',
     ],

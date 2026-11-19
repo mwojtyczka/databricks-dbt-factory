@@ -11,10 +11,11 @@ from databricks_dbt_factory.utils import DYNAMIC_VALUE_REFERENCE
 # Acknowledges that project on-run-start/end hooks (including installed packages') do not run on reuse.
 SKIP_RUN_HOOKS = "skip_on_reuse"
 # `dbt run` options that cannot change a model's output. An allowlist: unknown options execute normally.
+# `--no-write-json` is absent: it suppresses the run_results.json that build evidence is read from.
 _NEUTRAL_FLAGS = frozenset(
     {"--full-refresh", "-f", "--warn-error", "-q", "--quiet", "--no-quiet", "-x", "--fail-fast", "--no-fail-fast"}
-    | {f"--{prefix}{name}" for prefix in ("", "no-") for name in ("write-json", "populate-cache", "partial-parse")}
-    | {"--use-colors", "--no-use-colors"}
+    | {f"--{prefix}{name}" for prefix in ("", "no-") for name in ("populate-cache", "partial-parse")}
+    | {"--write-json", "--use-colors", "--no-use-colors"}
 )
 _NEUTRAL_VALUE_OPTIONS = frozenset(
     {"--threads", "--log-level", "--log-level-file", "--log-format", "--log-format-file", "--warn-error-options"}
@@ -23,12 +24,14 @@ _NEUTRAL_VALUE_OPTIONS = frozenset(
 
 def unsupported_reuse_options(tokens) -> list[str]:
     """Return the `dbt run` options, after the generated selector and target, that reuse cannot accept."""
-    unsupported, pending = [], iter(tokens)
-    for token in pending:
+    unsupported, tokens, index = [], list(tokens), 0
+    while index < len(tokens):
+        token, index = tokens[index], index + 1
         name, inline_value = token.split("=", 1)[0], "=" in token
         if token in _NEUTRAL_FLAGS or (inline_value and name in _NEUTRAL_VALUE_OPTIONS):
             continue
-        if token in _NEUTRAL_VALUE_OPTIONS and not next(pending, "-").startswith("-"):  # Its value follows.
+        if token in _NEUTRAL_VALUE_OPTIONS and index < len(tokens) and not tokens[index].startswith("-"):
+            index += 1  # Skip the option's value.
             continue
         unsupported.append(token)
     return unsupported

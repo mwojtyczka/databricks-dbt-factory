@@ -188,10 +188,12 @@ def test_project_level_opt_in_is_inherited_and_folder_opt_out_wins(tmp_path):
 @pytest.mark.parametrize(
     "options, unsupported",
     [
-        ("--no-write-json --no-populate-cache --threads 4 --log-format=json -q", []),
+        ("--write-json --no-populate-cache --threads 4 --log-format=json -q", []),
+        # Model evidence is read from run_results.json, which --no-write-json suppresses.
+        ("--no-write-json", ["--no-write-json"]),
         ('--warn-error-options \'{"error": "all"}\' -x --full-refresh', []),
         ("--empty --threads", ["--empty", "--threads"]),
-        ("--threads --no-write-json", ["--threads"]),
+        ("--threads --no-write-json", ["--threads", "--no-write-json"]),
         ("--defer --state prod", ["--defer", "--state", "prod"]),
     ],
 )
@@ -212,7 +214,7 @@ def test_cli_refuses_reuse_with_unsupported_extra_options(monkeypatch, tmp_path)
         ["main.py", "--dbt-manifest-path", str(Path(__file__).parent / "test_data" / "manifest.json")]
         + ["--input-job-spec-path", str(Path(__file__).parent / "test_data" / "job_definition_template.yaml")]
         + ["--target-job-spec-path", str(tmp_path / "out.yml"), "--reuse-config", str(tmp_path / "reuse.json")]
-        + ["--extra-dbt-command-options=--no-write-json --empty"],
+        + ["--extra-dbt-command-options=--no-populate-cache --empty"],
     )
     with pytest.raises(SystemExit, match="reuse does not support --extra-dbt-command-options --empty;"):
         main()

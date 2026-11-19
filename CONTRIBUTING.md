@@ -231,6 +231,24 @@ The configuration is a strict JSON object:
 }
 ```
 
+Models opt in through `meta.dbt_factory.reuse`. Enable a whole project or folder once in
+`dbt_project.yml`; dbt's config inheritance carries it to every model below, and a nearer folder
+or model setting wins:
+
+```yaml
+models:
+  my_project:
+    +meta:
+      dbt_factory:
+        reuse: {enabled: true}
+    staging:
+      +meta: {dbt_factory: {reuse: {enabled: false}}}
+```
+
+dbt merges `meta` one key deep: a model that sets its own `dbt_factory` replaces the inherited
+object, so it must restate `enabled` (for example `{reuse: {enabled: true, extra_inputs: [...]}}`).
+A `reuse` object without `enabled` fails generation, naming the model.
+
 The build pipeline can call `reuse_prepare.capture_parse(snapshot, profiles, identity=identity,
 target="prod", deployment_ref=release_id)`. It returns manifest and provenance bytes from a fresh
 dbt parse in the calling Python environment. `identity` contains the trusted `project_id`,

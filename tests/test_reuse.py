@@ -134,6 +134,31 @@ def test_real_models_have_conservative_eligibility(captured):
     assert lineage_reason(extra, ()) is None  # Empty lineage supplies no additional evidence.
 
 
+def test_project_level_opt_in_is_inherited_and_folder_opt_out_wins(tmp_path):
+    from tests.integration.dbt_helpers import invoke_dbt  # pylint: disable=import-outside-toplevel
+
+    (tmp_path / "models" / "staging").mkdir(parents=True)
+    (tmp_path / "profiles.yml").write_text(PROFILES)
+    (tmp_path / "dbt_project.yml").write_text(
+        'name: probe\nversion: "1.0"\nconfig-version: 2\nprofile: probe\n'
+        "models:\n  probe:\n    +materialized: table\n"
+        "    +meta: {dbt_factory: {reuse: {enabled: true}}}\n"
+        "    staging:\n      +meta: {dbt_factory: {reuse: {enabled: false}}}\n"
+    )
+    (tmp_path / "models" / "orders.sql").write_text("select 1 as id")
+    (tmp_path / "models" / "staging" / "stg_orders.sql").write_text("select 1 as id")
+    # dbt replaces, not deep-merges, a model's own `dbt_factory` meta: restating the policy is required.
+    (tmp_path / "models" / "partial.sql").write_text(
+        "{{ config(meta={'dbt_factory': {'reuse': {'extra_inputs': []}}}) }} select 1 as id"
+    )
+    assert invoke_dbt(tmp_path, "parse").success
+    manifest = json.loads((tmp_path / "target" / "manifest.json").read_text())
+    assert eligibility_reason(manifest["nodes"]["model.probe.orders"], None) == "CONTEXT_UNKNOWN"
+    assert eligibility_reason(manifest["nodes"]["model.probe.stg_orders"], None) == "NOT_OPTED_IN"
+    with pytest.raises(ValueError, match="model.probe.partial.*enabled"):
+        eligibility_reason(manifest["nodes"]["model.probe.partial"], None)
+
+
 @pytest.mark.parametrize(
     "reuse", [True, {"enabled": "yes"}, {"enabld": True}, {"enabled": True, "extra_inputs": ["raw.sales.orders"]}]
 )

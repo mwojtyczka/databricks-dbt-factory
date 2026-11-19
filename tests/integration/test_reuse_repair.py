@@ -70,7 +70,7 @@ def test_repair_binds_new_successful_baseline(
     monkeypatch.setattr(reuse_runtime, "REUSE_ENABLED", True)
     values["factory_force_rebuild"] = "true"
     assert execute_notebook(values, store)["model_run"].publication == "RECORDED"
-    successful = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output, job_id="job")
+    successful = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output)
     values.update(factory_force_rebuild="false", factory_attempt_number="1")
     if rerun_preparation:
         prepare_again(matching_preparation, captured, monkeypatch)
@@ -78,10 +78,7 @@ def test_repair_binds_new_successful_baseline(
     assert repaired.reason == ("REUSED" if rerun_preparation else "PREPARATION_STALE")
     assert len(model_invocations) == (1 if rerun_preparation else 2)
     if rerun_preparation:
-        assert (
-            reuse_runtime.read_build(store, client, config, context, build.model_id, build.output, job_id="job")
-            == successful
-        )
+        assert reuse_runtime.read_build(store, client, config, context, build.model_id, build.output) == successful
 
 
 @pytest.fixture
@@ -144,7 +141,7 @@ def test_evidence_outage_preserves_model_execution(
     monkeypatch.setattr(store, "sql", original_sql)
     if saved_artifact:
         client.files.objects[build.descriptor["path"]] = saved_artifact
-    baseline = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output, job_id="job")
+    baseline = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output)
     assert baseline["build"]["attempt"]["run_id"] == ("next" if outage == "decision-write" else "run")
     assert "DBT_ACCESS_TOKEN" not in os.environ
     assert "DBT_HOST" not in os.environ

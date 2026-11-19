@@ -369,10 +369,12 @@ and `factory_reuse_decisions`; model tasks never initialize tables. The setup id
 `USE CATALOG`, `USE SCHEMA` and `CREATE TABLE`. The job identity needs the corresponding table
 read/write privileges and artifact Volume access.
 
-`claim_owner` binds a physical output name to the project/environment, workspace/metastore,
-logical owner and deployed job. All participating jobs must use the same registry. This is
-a conflict detector for serialized owning jobs, not a lock against concurrent or unregistered
-writers. Keep `max_concurrent_runs: 1`; ownership reassignment requires draining the old job.
+`claim_owner` binds a physical output name to the project/environment, workspace/metastore and
+logical owner. Jobs are not part of ownership: a model moved to another job of the same deployment
+(for example by a tag change under `--split-by-tag`) keeps its owner, baseline and lineage vetoes.
+All participating jobs must use the same registry. This is a conflict detector for serialized
+owning jobs, not a lock against concurrent or unregistered writers. Keep `max_concurrent_runs: 1`;
+drain the old job before a moved model's new job runs.
 
 `snapshot_relation` brackets a Delta version read with UC/Delta identity checks. It returns
 separate relation-name components, UC ID, Delta ID and version. Missing/unreadable metadata,

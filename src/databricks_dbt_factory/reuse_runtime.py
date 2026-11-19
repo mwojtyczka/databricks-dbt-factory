@@ -368,19 +368,17 @@ def _insert_immutable(spark, table: str, key: str, evidence: dict, **projections
         raise ValueError(f"conflicting owner or attempt evidence at {table}; never overwrite an existing record")
 
 
-def _scope(config: ReuseConfig, context: ExecutionContext, job_id: str) -> dict:
+def _scope(config: ReuseConfig, context: ExecutionContext) -> dict:
+    # Jobs are deliberately absent: `--split-by-tag` moves a model between jobs of one deployment.
     value = json.loads(context.canonical_json)
     if (config.project_id, config.environment) != (value["project_id"], value["environment"]):
         raise ValueError("reuse context project/environment differs from config")
-    if not isinstance(job_id, str) or not job_id.strip():
-        raise ValueError("reuse scope requires a job_id")
     return {
         "project_id": config.project_id,
         "environment": config.environment,
         "owner_key": config.owner_key,
         "workspace_id": value["workspace_id"],
         "metastore_id": value["metastore_id"],
-        "job_id": job_id,
     }
 
 
@@ -392,15 +390,15 @@ def _owner_key(output: Relation) -> str:
     return _digest([part.lower() for part in (output.catalog, output.schema, output.identifier)])
 
 
-def claim_owner(spark, config: ReuseConfig, context: ExecutionContext, output: Relation, *, job_id: str) -> None:
-    """One logical owner and deployed job per physical name. This registry is not a lock."""
+def claim_owner(spark, config: ReuseConfig, context: ExecutionContext, output: Relation) -> None:
+    """One logical owner per physical name, across the jobs of its deployment. This registry is not a lock."""
     _insert_immutable(
         spark,
         _state_table(config, "owners"),
         _owner_key(output),
         {
-            "format_version": 1,
-            "scope": _scope(config, context, job_id),
+            "format_version": 2,
+            "scope": _scope(config, context),
             "output": {key: value.lower() for key, value in asdict(output).items()},
         },
     )
@@ -415,7 +413,7 @@ def _assert_owner(spark, config, scope, output):
     if not rows:
         raise EvidenceUnavailable("OWNER_UNKNOWN")
     expected = canonical_json(
-        {"format_version": 1, "scope": scope, "output": {key: value.lower() for key, value in asdict(output).items()}}
+        {"format_version": 2, "scope": scope, "output": {key: value.lower() for key, value in asdict(output).items()}}
     )
     if len(rows) != 1 or rows[0]["evidence"] != expected:
         raise ValueError(f"conflicting declared owner for {quote_relation(output)}")
@@ -530,7 +528,7 @@ def record_build(
             return reason
         if build.context_sha256 != context.digest or provenance.context != context:
             return "CONTEXT_CHANGED"
-        scope = _scope(config, context, build.attempt.job_id)
+        scope = _scope(config, context)
         _assert_owner(spark, config, scope, build.output.relation)
         payload = {"format_version": 1, "scope": scope, "build": asdict(build)}
         key = _digest([scope, build.model_id, asdict(build.attempt)])
@@ -557,11 +555,10 @@ def read_build(
     model_id: str,
     output: RelationSnapshot,
     *,
-    job_id: str,
     deployments=None,
 ) -> dict | None:
     """Select by live output evidence, then verify the complete record and immutable artifacts."""
-    scope = _scope(config, context, job_id)
+    scope = _scope(config, context)
     _assert_owner(spark, config, scope, output.relation)
     rows = _state_rows(
         spark,
@@ -583,19 +580,13 @@ def read_build(
             raise ValueError("invalid build record")
         build = BuildEvidence.from_dict(record["build"])
         key = _digest([scope, build.model_id, asdict(build.attempt)])
-        if (
-            record["scope"] != scope
-            or build.model_id != model_id
-            or build.output != output
-            or build.attempt.job_id != job_id
-            or rows[0]["key"] != key
-        ):
+        if record["scope"] != scope or build.model_id != model_id or build.output != output or rows[0]["key"] != key:
             raise ValueError("build record scope/output mismatch")
     except (KeyError, TypeError, ValueError) as error:
         raise EvidenceUnavailable("BUILD_INVALID") from error
     descriptor, provenance = _verified_descriptor(workspace_client, config, build.descriptor, deployments)
     if (
-        _scope(config, provenance.context, job_id) != scope
+        _scope(config, provenance.context) != scope
         or build.context_sha256 != provenance.context.digest
         or _build_reason(build, descriptor)
     ):
@@ -621,7 +612,7 @@ def record_decision(
     _timestamp(observed_at)
     if any(not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0 for value in durations.values()):
         raise ValueError("decision durations must be nonnegative seconds")
-    scope = _scope(config, context, attempt.job_id)
+    scope = _scope(config, context)
     payload = {
         "format_version": 1,
         "scope": scope,
@@ -651,8 +642,8 @@ def _lineage_input(value):
     raise EvidenceUnavailable("LINEAGE_INCOMPLETE")
 
 
-def _lineage_history(spark, config, context, model, job_id):
-    scope = _scope(config, context, job_id)
+def _lineage_history(spark, config, context, model):
+    scope = _scope(config, context)
     binding = {
         "format_version": 1,
         "kind": "lineage_blocker",
@@ -710,11 +701,11 @@ def _observed_lineage(spark, targets):
             yield _lineage_input(row.asDict())
 
 
-def prepare_lineage(spark, config, context, model, *, job_id):
+def prepare_lineage(spark, config, context, model):
     """Lineage only vetoes reuse; retained blockers require explicit dependency declarations."""
     inputs, reason = {}, None
     try:
-        binding, inputs = _lineage_history(spark, config, context, model, job_id)
+        binding, inputs = _lineage_history(spark, config, context, model)
         for observation in _observed_lineage(spark, (model.output, *model.views)):
             if _declared_lineage(model, observation) or canonical_json(observation) in inputs:
                 continue
@@ -733,8 +724,8 @@ def _prepare_model(spark, workspace_client, config, context, model, attempt, dep
     if model.reason:
         return {"reason": model.reason, "baseline": None}, None
     try:
-        claim_owner(spark, config, context, model.output, job_id=attempt.job_id)
-        lineage = prepare_lineage(spark, config, context, model, job_id=attempt.job_id)
+        claim_owner(spark, config, context, model.output)
+        lineage = prepare_lineage(spark, config, context, model)
         if lineage["reason"]:
             return {"reason": lineage["reason"], "baseline": None, "lineage": lineage}, None
         output = snapshot_relation(spark, workspace_client, model.output)
@@ -745,7 +736,6 @@ def _prepare_model(spark, workspace_client, config, context, model, attempt, dep
             context,
             model.unique_id,
             output,
-            job_id=attempt.job_id,
             deployments=deployments,
         )
         if build is None:
@@ -980,16 +970,16 @@ def begin_model(
         ):
             run.reason = "CONTEXT_CHANGED"
             return run
-        if _lineage_blockers(run.model, _lineage_history(spark, config, run.context, run.model, attempt.job_id)[1]):
+        if _lineage_blockers(run.model, _lineage_history(spark, config, run.context, run.model)[1]):
             run.reason = "UNDECLARED_INPUT"
             return run
-        claim_owner(spark, config, run.context, run.model.output, job_id=attempt.job_id)
+        claim_owner(spark, config, run.context, run.model.output)
         run.ready = True
         if forced or any(flag in shlex.split(commands[0]) for flag in ("--full-refresh", "-f")):
             run.reason = "FORCED"
             return run
         output = snapshot_relation(spark, workspace_client, run.model.output)
-        run.baseline = read_build(spark, workspace_client, config, run.context, model_id, output, job_id=attempt.job_id)
+        run.baseline = read_build(spark, workspace_client, config, run.context, model_id, output)
         if run.baseline is None:
             return run
         run.reason = _preparation_reason(workspace_client, run, preparation)

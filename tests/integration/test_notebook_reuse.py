@@ -139,7 +139,7 @@ def notebook_runtime(evidence, captured, monkeypatch):
 @pytest.fixture
 def matching_preparation(notebook_runtime, captured):
     store, client, config, context, build, _snapshots, values = notebook_runtime
-    reuse_runtime.claim_owner(store, config, context, build.output.relation, job_id="job")
+    reuse_runtime.claim_owner(store, config, context, build.output.relation)
     assert reuse_runtime.record_build(store, client, config, context, build, successful=True) == "RECORDED"
     prepared = reuse_runtime.prepare_run(
         store,
@@ -177,7 +177,7 @@ def test_matching_preparation_finishes_without_importing_dbt(matching_preparatio
     assert result["model_run"].reason == "REUSED"
     assert "REUSED" in capsys.readouterr().out
     assert result["local_dir"] is None
-    baseline = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output, job_id="job")
+    baseline = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output)
     assert baseline["build"]["attempt"]["run_id"] == "run"
     assert "DBT_ACCESS_TOKEN" not in os.environ
     assert "DBT_HOST" not in os.environ
@@ -241,7 +241,7 @@ def test_model_execution_publishes_fresh_evidence(matching_preparation, model_in
     )
     assert run.publication == "RECORDED"
     assert len(model_invocations) == 1
-    fresh = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output, job_id="job")
+    fresh = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output)
     assert fresh["build"]["attempt"]["run_id"] == "next"
     assert fresh["build"]["inputs_before"][0]["version"] == snapshots[build.inputs_before[0].relation].version
     assert "DBT_ACCESS_TOKEN" not in os.environ
@@ -281,7 +281,7 @@ def test_unstable_or_unsuccessful_execution_cannot_publish(
             {"failed": RuntimeError, "cancelled": KeyboardInterrupt, "wrong-model": ValueError}[failure]
         ):
             execute_notebook(values, store)
-    baseline = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output, job_id="job")
+    baseline = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output)
     assert baseline["build"]["attempt"]["run_id"] == "run"
     assert "DBT_ACCESS_TOKEN" not in os.environ
     assert "DBT_TARGET_PATH" not in os.environ
@@ -483,7 +483,7 @@ def test_failed_data_test_retains_successful_model_evidence(notebook_runtime, mo
     model = execute_notebook(values, store)
     assert model["model_run"].publication == "RECORDED"
     assert len(model_invocations) == 1
-    successful = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output, job_id="job")
+    successful = reuse_runtime.read_build(store, client, config, context, build.model_id, build.output)
     values["factory_reuse_config"] = ""
     values["dbt_commands"] = json.dumps(["dbt test --select orders --target dev"])
 
@@ -494,10 +494,7 @@ def test_failed_data_test_retains_successful_model_evidence(notebook_runtime, mo
     monkeypatch.setattr(dbtRunner, "invoke", failing_test)
     with pytest.raises(RuntimeError, match="data test failed"):
         execute_notebook(values, store)
-    assert (
-        reuse_runtime.read_build(store, client, config, context, build.model_id, build.output, job_id="job")
-        == successful
-    )
+    assert reuse_runtime.read_build(store, client, config, context, build.model_id, build.output) == successful
     assert "DBT_ACCESS_TOKEN" not in os.environ
 
 
@@ -519,7 +516,7 @@ def test_retained_lineage_blocks_stale_preparation_and_new_build_evidence(matchi
         return original(statement, args=args)
 
     monkeypatch.setattr(store, "sql", observed)
-    assert reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")["reason"] == "UNDECLARED_INPUT"
+    assert reuse_runtime.prepare_lineage(store, config, context, model)["reason"] == "UNDECLARED_INPUT"
     monkeypatch.setattr(store, "sql", original)
     values["factory_force_rebuild"] = "true" if forced else "false"
     calls = []

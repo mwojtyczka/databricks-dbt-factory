@@ -67,7 +67,7 @@ def test_preparation_binds_exact_builds_and_publishes_only_a_small_pointer(evide
     from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
 
     store, client, config, context, build = evidence
-    claim_owner(store, config, context, build.output.relation, job_id="job")
+    claim_owner(store, config, context, build.output.relation)
     assert record_build(store, client, config, context, build, successful=True) == "RECORDED"
     payload = json.loads(context.canonical_json)
     client.get_workspace_id = lambda: payload["workspace_id"]
@@ -92,7 +92,7 @@ def test_preparation_binds_exact_builds_and_publishes_only_a_small_pointer(evide
     attempt = Attempt("job", "next-run", "prepare", 0)
     result = reuse_runtime.prepare_run(store, client, config, build.descriptor, captured[0], captured[1], attempt)
     assert len(downloads) == 3  # One verified download per deployment artifact during preparation.
-    baseline = read_build(store, client, config, context, build.model_id, build.output, job_id="job")
+    baseline = read_build(store, client, config, context, build.model_id, build.output)
     decision = result["models"][build.model_id]
     assert decision["reason"] == "CODE_UNCHANGED"
     assert decision["baseline"] == {"key": baseline["key"], "sha256": baseline["sha256"]}
@@ -186,7 +186,7 @@ def test_deployed_views_require_stable_definition_evidence(evidence, captured, m
         inputs_after=(),
         output=replace(build.output, relation=Relation("hive_metastore", "default", "consumer")),
     )
-    claim_owner(store, config, context, consumer.output.relation, job_id=consumer.attempt.job_id)
+    claim_owner(store, config, context, consumer.output.relation)
     assert record_build(store, client, config, context, consumer, successful=True) == "DEFINITION_UNKNOWN"
     consumer = replace(consumer, views_before=(view,), views_after=(view,))
     assert record_build(store, client, config, context, consumer, successful=True) == "RECORDED"
@@ -442,11 +442,11 @@ def test_state_is_explicit_and_builds_are_attempt_idempotent(evidence):
     spark, client, config, context, build = evidence
     initialize_state(spark, config)
     assert len(spark.tables) == 3
-    claim_owner(spark, config, context, build.output.relation, job_id="job")
-    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    claim_owner(spark, config, context, build.output.relation)
+    claim_owner(spark, config, context, build.output.relation)
     for _ in range(2):
         assert record_build(spark, client, config, context, build, successful=True) == "RECORDED"
-    actual = read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+    actual = read_build(spark, client, config, context, build.model_id, build.output)
     assert actual["build"] == json.loads(canonical_json(asdict(build)))
     assert actual["build"]["inputs_before"][0]["version"] == 0
     assert actual["build"]["completed_at"] == build.completed_at
@@ -464,12 +464,12 @@ def test_state_is_explicit_and_builds_are_attempt_idempotent(evidence):
 )
 def test_live_output_must_match_the_build(evidence, field, value):
     spark, client, config, context, build = evidence
-    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    claim_owner(spark, config, context, build.output.relation)
     assert record_build(spark, client, config, context, build, successful=True) == "RECORDED"
     changed = replace(build.output, **{field: value})
     if field == "relation":
-        claim_owner(spark, config, context, changed.relation, job_id="job")
-    assert read_build(spark, client, config, context, build.model_id, changed, job_id="job") is None
+        claim_owner(spark, config, context, changed.relation)
+    assert read_build(spark, client, config, context, build.model_id, changed) is None
 
 
 @pytest.mark.parametrize("change", ["version", "identity", "missing", "failed", "output"])
@@ -491,17 +491,13 @@ def test_unstable_or_unsuccessful_builds_publish_no_evidence(evidence, change):
 
 def test_ownership_conflicts_and_state_outages_are_distinct(evidence):
     spark, client, config, context, build = evidence
-    claim_owner(spark, config, context, build.output.relation, job_id="job")
-    for other_config, job in (
-        (replace(config, owner_key="other"), "job"),
-        (config, "other-job"),
-        (replace(config, environment="other"), "job"),
-    ):
+    claim_owner(spark, config, context, build.output.relation)
+    for other_config in (replace(config, owner_key="other"), replace(config, environment="other")):
         other_context = type(context).from_dict(
             json.loads(context.canonical_json) | {"environment": other_config.environment}
         )
         with pytest.raises(ValueError, match="conflicting.*owner"):
-            claim_owner(spark, other_config, other_context, build.output.relation, job_id=job)
+            claim_owner(spark, other_config, other_context, build.output.relation)
     spark.unavailable = True
     assert record_build(spark, client, config, context, build, successful=True) == "STATE_UNAVAILABLE"
     assert (
@@ -519,12 +515,22 @@ def test_ownership_conflicts_and_state_outages_are_distinct(evidence):
         == "STATE_UNAVAILABLE"
     )
     with pytest.raises(EvidenceUnavailable, match="STATE_UNAVAILABLE"):
-        read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+        read_build(spark, client, config, context, build.model_id, build.output)
+
+
+def test_moving_a_model_to_another_job_keeps_ownership_and_baseline(evidence):
+    # `--split-by-tag` moves a model between jobs of one deployment when its tag changes.
+    spark, client, config, context, build = evidence
+    claim_owner(spark, config, context, build.output.relation)
+    assert record_build(spark, client, config, context, build, successful=True) == "RECORDED"
+    claim_owner(spark, config, context, build.output.relation)
+    baseline = read_build(spark, client, config, context, build.model_id, build.output)
+    assert baseline is not None and baseline["build"]["attempt"]["job_id"] == "job"
 
 
 def test_decisions_never_update_builds_and_keep_original_completion(evidence):
     spark, client, config, context, build = evidence
-    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    claim_owner(spark, config, context, build.output.relation)
     record_build(spark, client, config, context, build, successful=True)
     for _ in range(2):
         assert (
@@ -541,7 +547,7 @@ def test_decisions_never_update_builds_and_keep_original_completion(evidence):
             )
             == "RECORDED"
         )
-    actual = read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+    actual = read_build(spark, client, config, context, build.model_id, build.output)
     assert actual["build"]["completed_at"] == build.completed_at
     assert sum(len(rows) for rows in spark.tables.values()) == 3
     assert all("a'b" not in sql for sql, _ in spark.calls)
@@ -550,7 +556,7 @@ def test_decisions_never_update_builds_and_keep_original_completion(evidence):
 
 def test_unavailable_write_readback_does_not_invent_a_conflict_after_success(evidence, monkeypatch):
     sql, client, config, context, build = evidence
-    claim_owner(sql, config, context, build.output.relation, job_id="job")
+    claim_owner(sql, config, context, build.output.relation)
     execute = sql.sql
 
     def unavailable_readback(statement, args=None):
@@ -565,17 +571,17 @@ def test_unavailable_write_readback_does_not_invent_a_conflict_after_success(evi
 @pytest.mark.parametrize("missing", [False, True])
 def test_corrupt_or_missing_comparison_artifacts_do_not_produce_a_baseline(evidence, missing):
     spark, client, config, context, build = evidence
-    claim_owner(spark, config, context, build.output.relation, job_id="job")
+    claim_owner(spark, config, context, build.output.relation)
     record_build(spark, client, config, context, build, successful=True)
     if missing:
         del client.files.objects[build.descriptor["path"]]
         with pytest.raises(EvidenceUnavailable, match="ARTIFACT_UNAVAILABLE"):
-            read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+            read_build(spark, client, config, context, build.model_id, build.output)
         assert record_build(spark, client, config, context, build, successful=True) == "ARTIFACT_UNAVAILABLE"
     else:
         client.files.objects[build.descriptor["path"]] = b"changed"
         with pytest.raises(ValueError, match="digest mismatch"):
-            read_build(spark, client, config, context, build.model_id, build.output, job_id="job")
+            read_build(spark, client, config, context, build.model_id, build.output)
 
 
 def test_missing_declared_inputs_or_changed_context_cannot_publish(evidence):
@@ -591,21 +597,21 @@ def test_missing_declared_inputs_or_changed_context_cannot_publish(evidence):
 
 def test_other_execution_context_can_inspect_but_cannot_claim_the_baseline(evidence):
     sql, client, config, context, build = evidence
-    claim_owner(sql, config, context, build.output.relation, job_id="job")
+    claim_owner(sql, config, context, build.output.relation)
     record_build(sql, client, config, context, build, successful=True)
     other = ExecutionContext.from_dict(json.loads(context.canonical_json) | {"principal": "other@example.com"})
-    baseline = read_build(sql, client, config, other, build.model_id, build.output, job_id="job")
+    baseline = read_build(sql, client, config, other, build.model_id, build.output)
     assert baseline["build"]["context_sha256"] == context.digest != other.digest
     for field in ("workspace_id", "metastore_id"):
         wrong_scope = ExecutionContext.from_dict(json.loads(context.canonical_json) | {field: "other"})
         with pytest.raises(ValueError, match="conflicting.*owner"):
-            read_build(sql, client, config, wrong_scope, build.model_id, build.output, job_id="job")
+            read_build(sql, client, config, wrong_scope, build.model_id, build.output)
 
 
 @pytest.mark.parametrize("damage", ["missing-field", "timestamp", "version", "attempt", "partial-input"])
 def test_malformed_builds_are_unusable(evidence, damage):
     sql, client, config, context, build = evidence
-    claim_owner(sql, config, context, build.output.relation, job_id="job")
+    claim_owner(sql, config, context, build.output.relation)
     record_build(sql, client, config, context, build, successful=True)
     row = next(
         row for table, rows in sql.tables.items() if table.endswith("`factory_reuse_builds`") for row in rows.values()
@@ -623,7 +629,7 @@ def test_malformed_builds_are_unusable(evidence, damage):
         payload["build"]["inputs_before"] = []
     row["evidence"] = canonical_json(payload)
     with pytest.raises(EvidenceUnavailable, match="BUILD_INVALID"):
-        read_build(sql, client, config, context, build.model_id, build.output, job_id="job")
+        read_build(sql, client, config, context, build.model_id, build.output)
 
 
 def test_identifier_components_are_quoted_without_splitting():
@@ -634,9 +640,9 @@ def test_identifier_components_are_quoted_without_splitting():
 
 def test_owner_names_are_case_insensitive_without_changing_evidence(evidence):
     sql, _, config, context, build = evidence
-    claim_owner(sql, config, context, build.output.relation, job_id="job")
+    claim_owner(sql, config, context, build.output.relation)
     upper = Relation(*(value.upper() for value in asdict(build.output.relation).values()))
-    claim_owner(sql, config, context, upper, job_id="job")
+    claim_owner(sql, config, context, upper)
     assert sum(len(rows) for rows in sql.tables.values()) == 1
 
 
@@ -720,7 +726,7 @@ def test_lineage_blocks_undeclared_inputs_and_retains_history(evidence, lineage_
     if scenario == "path":
         observations[:] = [{"catalog": None, "schema": None, "identifier": None, "path": "s3://bucket/raw"}]
     before = model.dependencies
-    result = reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")
+    result = reuse_runtime.prepare_lineage(store, config, context, model)
     assert model.dependencies == before
     assert lineage_observations["targets"] == [{key: value.lower() for key, value in asdict(model.output).items()}]
     assert (
@@ -737,25 +743,23 @@ def test_lineage_blocks_undeclared_inputs_and_retains_history(evidence, lineage_
     if scenario not in {"historical", "hidden", "path"}:
         return
     observations.clear()
-    retained = reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")
+    retained = reuse_runtime.prepare_lineage(store, config, context, model)
     assert retained["reason"] == "UNDECLARED_INPUT"
     assert retained["blockers"] == result["blockers"]
     if scenario != "path":
         reviewed = replace(model, inputs=(*model.inputs, reuse_runtime.Relation("raw", "sales", "hidden.with.dot")))
-        assert reuse_runtime.prepare_lineage(store, config, context, reviewed, job_id="job")["reason"] is None
-        assert (
-            reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")["reason"] == "UNDECLARED_INPUT"
-        )
+        assert reuse_runtime.prepare_lineage(store, config, context, reviewed)["reason"] is None
+        assert reuse_runtime.prepare_lineage(store, config, context, model)["reason"] == "UNDECLARED_INPUT"
 
 
-@pytest.mark.parametrize("changed", ["rename", "output-case", "deployment", "job"])
+@pytest.mark.parametrize("changed", ["rename", "output-case", "deployment"])
 def test_retained_lineage_binding_and_declared_views(evidence, lineage_model, lineage_observations, changed):
     from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
 
     store, _client, config, context, _build = evidence
     hidden = [{"catalog": "raw", "schema": "sales", "identifier": f"hidden_{i}", "path": None} for i in range(4)]
     lineage_observations["rows"][:] = hidden
-    assert reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job")["blockers"] == hidden
+    assert reuse_runtime.prepare_lineage(store, config, context, lineage_model)["blockers"] == hidden
     lineage_observations["rows"].clear()
     model = lineage_model
     if changed == "rename":
@@ -766,13 +770,12 @@ def test_retained_lineage_binding_and_declared_views(evidence, lineage_model, li
         context = ExecutionContext.from_dict(
             json.loads(context.canonical_json) | {"vars": {"release": "new-deployment"}}
         )
-    job_id = "other-job" if changed == "job" else "job"
-    result = reuse_runtime.prepare_lineage(store, config, context, model, job_id=job_id)
-    assert result["blockers"] == ([] if changed == "job" else hidden)
+    result = reuse_runtime.prepare_lineage(store, config, context, model)
+    assert result["blockers"] == hidden
     model = replace(
         model, views=tuple(Relation(value["catalog"], value["schema"], value["identifier"]) for value in hidden)
     )
-    assert reuse_runtime.prepare_lineage(store, config, context, model, job_id=job_id)["reason"] is None
+    assert reuse_runtime.prepare_lineage(store, config, context, model)["reason"] is None
     assert lineage_observations["targets"][-4:] == [asdict(view) for view in model.views]
     assert model.dependencies == lineage_model.dependencies
 
@@ -795,17 +798,14 @@ def test_lineage_incomplete_evidence_disables_reuse(evidence, lineage_model, lin
 
         monkeypatch.setattr(store, "sql", sql)
     else:
-        assert (
-            reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job")["reason"]
-            == "UNDECLARED_INPUT"
-        )
+        assert reuse_runtime.prepare_lineage(store, config, context, lineage_model)["reason"] == "UNDECLARED_INPUT"
         if damage == "marker":
             row = next(iter(next(iter(store.tables.values())).values()))
             row["evidence"] = json.dumps(json.loads(row["evidence"]) | {"kind": "invalid"})
         else:
             lineage_observations["unavailable"] = True
             lineage_model = replace(lineage_model, views=(Relation("raw", "sales", "view"),))
-    result = reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job")
+    result = reuse_runtime.prepare_lineage(store, config, context, lineage_model)
     assert (
         result["reason"]
         == {
@@ -858,11 +858,11 @@ def test_lineage_checks_view_inputs_without_adding_dependencies(evidence, lineag
         return original_sql(statement, args=args)
 
     monkeypatch.setattr(store, "sql", sql)
-    result = reuse_runtime.prepare_lineage(store, config, context, model, job_id="job")
+    result = reuse_runtime.prepare_lineage(store, config, context, model)
     assert result == {"reason": "UNDECLARED_INPUT", "blockers": [hidden | {"path": None}]}
     assert model.dependencies == lineage_model.dependencies
     reviewed = replace(model, inputs=(*model.inputs, Relation("raw", "sales", "hidden")))
-    assert reuse_runtime.prepare_lineage(store, config, context, reviewed, job_id="job")["reason"] is None
+    assert reuse_runtime.prepare_lineage(store, config, context, reviewed)["reason"] is None
 
 
 def test_known_lineage_blocker_does_not_repeat_state_writes(evidence, lineage_model, lineage_observations):
@@ -870,10 +870,10 @@ def test_known_lineage_blocker_does_not_repeat_state_writes(evidence, lineage_mo
 
     store, _client, config, context, _build = evidence
     lineage_observations["rows"][:] = [{"catalog": "raw", "schema": "sales", "identifier": "hidden", "path": None}]
-    first = reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job")
+    first = reuse_runtime.prepare_lineage(store, config, context, lineage_model)
     writes = sum(statement.startswith("MERGE") for statement, _args in store.calls)
     assert writes == 1
-    assert reuse_runtime.prepare_lineage(store, config, context, lineage_model, job_id="job") == first
+    assert reuse_runtime.prepare_lineage(store, config, context, lineage_model) == first
     assert sum(statement.startswith("MERGE") for statement, _args in store.calls) == writes
 
 

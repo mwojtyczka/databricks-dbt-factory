@@ -96,7 +96,7 @@ def run_lineage_checks(context, model):
     ).first()
     assert sample is not None, "live lineage check requires an existing table-to-table observation in the catalog"
     model = replace(model, output=Relation.from_dict(sample.asDict(), "lineage target"), inputs=(), views=())
-    observed = prepare_lineage(spark, config, context, model, job_id=job_id)
+    observed = prepare_lineage(spark, config, context, model)
     assert observed["reason"] == "UNDECLARED_INPUT" and observed["blockers"], observed
 
     def without_events(statement, args=None):
@@ -104,7 +104,7 @@ def run_lineage_checks(context, model):
             return spark.sql("SELECT 1 WHERE false")
         return spark.sql(statement, args=args)
 
-    retained = prepare_lineage(SimpleNamespace(sql=without_events), config, context, model, job_id=job_id)
+    retained = prepare_lineage(SimpleNamespace(sql=without_events), config, context, model)
     assert retained == observed, "retained blockers must survive an empty system-table result"
     assert all(value["path"] is None for value in retained["blockers"]), "path input cannot be declared in v1"
     reviewed = replace(
@@ -113,8 +113,8 @@ def run_lineage_checks(context, model):
             Relation(value["catalog"], value["schema"], value["identifier"]) for value in retained["blockers"]
         ),
     )
-    assert prepare_lineage(spark, config, context, reviewed, job_id=job_id)["reason"] is None
-    assert prepare_lineage(spark, config, context, model, job_id=job_id)["reason"] == "UNDECLARED_INPUT"
+    assert prepare_lineage(spark, config, context, reviewed)["reason"] is None
+    assert prepare_lineage(spark, config, context, model)["reason"] == "UNDECLARED_INPUT"
     report["checks"]["lineage"] = {
         "scope": "existing UC observations, real scratch Delta persistence; empty event boundary controlled",
         "target": asdict(model.output),
@@ -199,10 +199,10 @@ def run_checks():
         (source,),
         output,
     )
-    claim_owner(spark, config, context, output.relation, job_id=job_id)
+    claim_owner(spark, config, context, output.relation)
     for _ in range(2):
         assert record_build(spark, w, config, context, build, successful=True) == "RECORDED"
-    baseline = read_build(spark, w, config, context, build.model_id, output, job_id=job_id)
+    baseline = read_build(spark, w, config, context, build.model_id, output)
     assert baseline["build"]["completed_at"] == build.completed_at
     assert baseline["build"]["inputs_before"] == [asdict(source)]
     assert spark.sql(f"SELECT count(*) FROM {sql_table('factory_reuse_builds')}").first()[0] == 1
@@ -217,7 +217,7 @@ def run_checks():
         raise AssertionError("conflicting attempt was overwritten")
     other = replace(config, owner_key="other")
     try:
-        claim_owner(spark, other, context, output.relation, job_id=job_id)
+        claim_owner(spark, other, context, output.relation)
     except ValueError:
         report["checks"]["conflicting_owner"] = True
     else:
@@ -239,10 +239,7 @@ def run_checks():
             == "RECORDED"
         )
     assert spark.sql(f"SELECT count(*) FROM {sql_table('factory_reuse_decisions')}").first()[0] == 1
-    assert (
-        read_build(spark, w, config, context, build.model_id, output, job_id=job_id)["build"]["completed_at"]
-        == build.completed_at
-    )
+    assert read_build(spark, w, config, context, build.model_id, output)["build"]["completed_at"] == build.completed_at
     report["checks"]["decision_separate_from_build"] = True
     spark.sql(f"INSERT INTO {sql_table('input_table')} VALUES (2)").collect()
     changed = snapshot_relation(spark, w, source.relation)
@@ -255,7 +252,7 @@ def run_checks():
     report["checks"]["unstable_inputs_withheld"] = True
     spark.sql(f"INSERT INTO {sql_table('orders')} VALUES (2)").collect()
     changed_output = snapshot_relation(spark, w, output.relation)
-    assert read_build(spark, w, config, context, build.model_id, changed_output, job_id=job_id) is None
+    assert read_build(spark, w, config, context, build.model_id, changed_output) is None
     report["checks"]["output_mutation_invalidates"] = True
     spark.sql(f"DROP TABLE {sql_table('orders')}").collect()
     spark.sql(f"CREATE TABLE {sql_table('orders')} USING DELTA AS SELECT 1 AS id").collect()
@@ -265,7 +262,7 @@ def run_checks():
         and recreated.uc_id != output.uc_id
         and recreated.delta_id != output.delta_id
     )
-    assert read_build(spark, w, config, context, build.model_id, recreated, job_id=job_id) is None
+    assert read_build(spark, w, config, context, build.model_id, recreated) is None
     report["checks"]["output_recreation_invalidates"] = True
     spark.sql(f"ALTER TABLE {sql_table('orders')} RENAME TO {sql_table('renamed_orders')}").collect()
     report["checks"]["renamed_output"] = expect_unavailable(lambda: snapshot_relation(spark, w, output.relation))
@@ -286,7 +283,7 @@ def run_checks():
         assert record_build(spark, w, config, context, unavailable_build, successful=True) == "STATE_UNAVAILABLE"
         report["checks"]["state_write_outage_after_success"] = True
         report["checks"]["state_read_outage"] = expect_unavailable(
-            lambda: read_build(spark, w, config, context, build.model_id, output, job_id=job_id)
+            lambda: read_build(spark, w, config, context, build.model_id, output)
         )
     finally:
         spark.sql(f"ALTER TABLE {sql_table('saved_builds')} RENAME TO {sql_table('factory_reuse_builds')}").collect()

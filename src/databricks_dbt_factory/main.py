@@ -11,7 +11,7 @@ from pathlib import Path
 from databricks_dbt_factory.__version__ import __version__
 from databricks_dbt_factory.dbt_factory import DbtFactory
 from databricks_dbt_factory.file_io import atomic_write_bytes
-from databricks_dbt_factory.reuse import ReuseConfig, ReuseDeployment, describe_models, digest_bytes
+from databricks_dbt_factory.reuse import SKIP_RUN_HOOKS, ReuseConfig, ReuseDeployment, describe_models, digest_bytes
 from databricks_dbt_factory.reuse_prepare import read_provenance
 from databricks_dbt_factory.reuse_runtime import prepare_bundle, write_bundle
 from databricks_dbt_factory.job_spec import (
@@ -282,7 +282,18 @@ def _validate_reuse_inputs(args: argparse.Namespace, manifest: dict) -> dict[str
         "Runtime reuse is not enabled; generated tasks execute normally.",
         file=sys.stderr,
     )
+    _report_run_hooks(manifest, descriptors)
     return bundle
+
+
+def _report_run_hooks(manifest: dict, descriptors) -> None:
+    hooks = sorted(uid for uid, node in manifest.get("nodes", {}).items() if node.get("resource_type") == "operation")
+    if hooks and descriptors:
+        print(
+            f"Project run hooks {', '.join(hooks)} do not run for reused models; models without "
+            f"reuse.run_hooks: {SKIP_RUN_HOOKS} remain HOOKS_PRESENT.",
+            file=sys.stderr,
+        )
 
 
 def _publish_artifacts(

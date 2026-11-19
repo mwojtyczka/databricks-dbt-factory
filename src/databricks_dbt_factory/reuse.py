@@ -8,6 +8,9 @@ from graphlib import CycleError, TopologicalSorter
 
 from databricks_dbt_factory.utils import DYNAMIC_VALUE_REFERENCE
 
+# Acknowledges that project on-run-start/end hooks (including installed packages') do not run on reuse.
+SKIP_RUN_HOOKS = "skip_on_reuse"
+
 
 def canonical_json(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
@@ -176,9 +179,11 @@ def _policy(model):
         raise ValueError(f"{label}: dbt_factory must be an object")
     if "reuse" not in factory:
         return None
-    policy = _object(factory["reuse"], ("enabled",), label, ("extra_inputs",))
+    policy = _object(factory["reuse"], ("enabled",), label, ("extra_inputs", "run_hooks"))
     if not isinstance(policy["enabled"], bool):
         raise ValueError(f"{label}: enabled must be a boolean")
+    if policy.get("run_hooks", SKIP_RUN_HOOKS) != SKIP_RUN_HOOKS:
+        raise ValueError(f"{label}: run_hooks must be {SKIP_RUN_HOOKS!r}")
     if not isinstance(policy.get("extra_inputs", []), list):
         raise ValueError(f"{label}: extra_inputs must be a list")
     for item in policy.get("extra_inputs", []):
@@ -289,7 +294,8 @@ def describe_models(manifest, context: ExecutionContext | None) -> tuple[ModelDe
     descriptors = []
     global_hooks = any(node.get("resource_type") == "operation" for node in nodes.values())
     for uid, node in sorted(nodes.items()):
-        policy = _policy(node)
+        # dbt applies project `models:` config, including an inherited opt-in, to run-hook operations.
+        policy = None if node.get("resource_type") == "operation" else _policy(node)
         if not policy or not policy["enabled"]:
             continue
         output = _relation(node)
@@ -298,7 +304,7 @@ def describe_models(manifest, context: ExecutionContext | None) -> tuple[ModelDe
             raise ValueError(f"ambiguous output relation for {uid}: {producers[_producer_key(output)]}")
         if output is None:
             reason = reason or "RELATION_UNKNOWN"
-        if global_hooks:
+        if global_hooks and policy.get("run_hooks") != SKIP_RUN_HOOKS:
             reason = reason or "HOOKS_PRESENT"
         extra = tuple(sorted({Relation.from_dict(item, uid) for item in policy.get("extra_inputs", [])}))
         dependencies = _declared_dependencies(uid, node, extra, producers)

@@ -172,6 +172,50 @@ def test_project_level_opt_in_is_inherited_and_folder_opt_out_wins(tmp_path):
         eligibility_reason(manifest["nodes"]["model.probe.partial"], None)
 
 
+def test_project_run_hooks_veto_reuse_unless_acknowledged(tmp_path, monkeypatch, capsys):
+    from tests.integration.dbt_helpers import invoke_dbt  # pylint: disable=import-outside-toplevel
+
+    (tmp_path / "models").mkdir()
+    (tmp_path / "profiles.yml").write_text(PROFILES)
+    (tmp_path / "dbt_project.yml").write_text(
+        'name: probe\nversion: "1.0"\nconfig-version: 2\nprofile: probe\n'
+        'on-run-end: ["select 1"]\n'
+        "models:\n  probe:\n    +materialized: table\n"
+        "    +meta: {dbt_factory: {reuse: {enabled: true, run_hooks: skip_on_reuse}}}\n"
+    )
+    (tmp_path / "models" / "acknowledged.sql").write_text("select 1 as id")
+    (tmp_path / "models" / "strict.sql").write_text(
+        "{{ config(meta={'dbt_factory': {'reuse': {'enabled': true}}}) }} select 1 as id"
+    )
+    (tmp_path / "models" / "typo.sql").write_text(
+        "{{ config(meta={'dbt_factory': {'reuse': {'enabled': true, 'run_hooks': 'skip'}}}) }} select 1 as id"
+    )
+    assert invoke_dbt(tmp_path, "parse").success
+    manifest = json.loads((tmp_path / "target" / "manifest.json").read_text())
+    with pytest.raises(ValueError, match="model.probe.typo.*run_hooks"):
+        describe_models(manifest, None)
+    del manifest["nodes"]["model.probe.typo"]
+    context = ExecutionContext.from_dict(
+        IDENTITY
+        | {"target": "dev", "versions": {"dbt-core": "1", "dbt-databricks": "1"}}
+        | {"vars": {}, "environment_inputs": {}, "secret_versions": {}}
+    )
+    reasons = {item.unique_id: item.reason for item in describe_models(manifest, context)}
+    assert reasons == {"model.probe.acknowledged": None, "model.probe.strict": "HOOKS_PRESENT"}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    (tmp_path / "reuse.json").write_text(json.dumps(CONFIG))
+    from databricks_dbt_factory.main import main  # pylint: disable=import-outside-toplevel
+
+    template = Path(__file__).parent / "test_data" / "job_definition_template.yaml"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--dbt-manifest-path", str(tmp_path / "manifest.json"), "--input-job-spec-path", str(template)]
+        + ["--target-job-spec-path", str(tmp_path / "out.yml"), "--reuse-config", str(tmp_path / "reuse.json")],
+    )
+    main()
+    assert "run hooks operation.probe.probe-on-run-end-0 do not run" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "reuse", [True, {"enabled": "yes"}, {"enabld": True}, {"enabled": True, "extra_inputs": ["raw.sales.orders"]}]
 )

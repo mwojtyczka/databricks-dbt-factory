@@ -249,6 +249,12 @@ dbt merges `meta` one key deep: a model that sets its own `dbt_factory` replaces
 object, so it must restate `enabled` (for example `{reuse: {enabled: true, extra_inputs: [...]}}`).
 A `reuse` object without `enabled` fails generation, naming the model.
 
+Project `on-run-start`/`on-run-end` hooks, including those of installed packages, run in every
+executed task but not for a reused model. Each opted-in model therefore stays `HOOKS_PRESENT` while
+the project has run hooks, unless its policy acknowledges this with `run_hooks: skip_on_reuse`
+(for example `+meta: {dbt_factory: {reuse: {enabled: true, run_hooks: skip_on_reuse}}}`). Generation
+names the hook operations it found. Model `pre-hook`/`post-hook` always prevent reuse.
+
 The build pipeline can call `reuse_prepare.capture_parse(snapshot, profiles, identity=identity,
 target="prod", deployment_ref=release_id)`. It returns manifest and provenance bytes from a fresh
 dbt parse in the calling Python environment. `identity` contains the trusted `project_id`,

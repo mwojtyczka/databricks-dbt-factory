@@ -351,7 +351,7 @@ def job_template(arm: str, wheel_path: str) -> dict[str, Any]:
                                 "environment_version": "4",
                                 "dependencies": [
                                     "dbt-core==1.12.5",
-                                    "dbt-adapters==1.24.6",
+                                    "dbt-adapters==1.24.5",
                                     "dbt-common==1.38.0",
                                     "dbt-databricks==1.12.7",
                                     "dbt-spark==1.10.3",

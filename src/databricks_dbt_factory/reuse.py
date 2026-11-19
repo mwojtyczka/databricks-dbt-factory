@@ -97,17 +97,25 @@ class ViewSnapshot:
     relation: Relation
     uc_id: str
     definition_sha256: str
+    owner: str
 
     def __post_init__(self):
         Relation.from_dict(asdict(self.relation), "view evidence")
-        if not isinstance(self.uc_id, str) or not self.uc_id.strip():
-            raise ValueError("view evidence requires a UC identity")
+        for value, label in ((self.uc_id, "a UC identity"), (self.owner, "an owner")):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"view evidence requires {label}")
         if not isinstance(self.definition_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", self.definition_sha256):
             raise ValueError("view evidence requires a definition digest")
 
     @classmethod
     def from_dict(cls, value):
-        return cls(Relation.from_dict(value["relation"], "view evidence"), value["uc_id"], value["definition_sha256"])
+        relation = Relation.from_dict(value["relation"], "view evidence")
+        return cls(relation, value["uc_id"], value["definition_sha256"], value["owner"])
+
+    @property
+    def definition(self) -> tuple:
+        """Cross-run identity. dbt replaces a view on every run, so its UC id changes while what it reads does not."""
+        return self.relation, self.definition_sha256, self.owner
 
 
 @dataclass(frozen=True)
@@ -366,7 +374,9 @@ def lineage_reason(model: ModelDescriptor, observed_inputs) -> str | None:
 def _observed_relations(items, *, views=False):
     if not isinstance(items, list):
         raise ValueError("evidence observations must be a list")
-    fields = ("relation", "uc_id", "definition_sha256") if views else ("relation", "uc_id", "delta_id", "version")
+    fields = (
+        ("relation", "uc_id", "definition_sha256", "owner") if views else ("relation", "uc_id", "delta_id", "version")
+    )
     snapshot_type = ViewSnapshot if views else RelationSnapshot
     observations = [snapshot_type.from_dict(_object(item, fields, "data evidence")) for item in items]
     if len({item.relation for item in observations}) != len(observations):
@@ -384,7 +394,7 @@ def _data_evidence(value):
         raise ValueError("incomplete data evidence")
     return (
         _observed_relations(value["inputs"]),
-        _observed_relations(value["views"], views=True),
+        frozenset(view.definition for view in _observed_relations(value["views"], views=True)),
         _observed_relations([value["output"]]),
     )
 

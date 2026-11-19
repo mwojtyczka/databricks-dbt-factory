@@ -195,7 +195,8 @@ def snapshot_view(workspace_client, relation: Relation) -> ViewSnapshot:
         ):
             raise EvidenceUnavailable("DEFINITION_UNKNOWN")
         try:
-            observations.append(ViewSnapshot(relation, table.table_id, digest_bytes(table.view_definition.encode())))
+            definition = digest_bytes(table.view_definition.encode())
+            observations.append(ViewSnapshot(relation, table.table_id, definition, getattr(table, "owner", None)))
         except ValueError as error:
             raise EvidenceUnavailable("DEFINITION_UNKNOWN") from error
     if observations[0] != observations[1]:
@@ -742,8 +743,8 @@ def _prepare_model(spark, workspace_client, config, context, model, deployments)
         if build is None:
             return {"reason": "NO_BASELINE", "baseline": None}, None
         decision = {"reason": None, "baseline": {"key": build["key"], "sha256": build["sha256"]}}
-        views = [asdict(snapshot_view(workspace_client, relation)) for relation in model.views]
-        if sorted(views, key=canonical_json) != sorted(build["build"].get("views_after", []), key=canonical_json):
+        views = {snapshot_view(workspace_client, relation).definition for relation in model.views}
+        if views != {ViewSnapshot.from_dict(view).definition for view in build["build"].get("views_after", [])}:
             return decision | {"reason": "DEFINITION_CHANGED"}, None
         _descriptor, manifest, provenance = load_deployment(
             workspace_client, config, build["build"]["descriptor"], deployments=deployments

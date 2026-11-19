@@ -445,9 +445,13 @@ comparison, and Factory checks reuse policy and relation/dependency mappings sep
 dbt-managed SQL view/ephemeral dependencies are traversed through the manifest graph to physical
 leaves. Changed definitions invalidate their consumers. View outputs themselves remain unsupported
 reuse outputs. `BuildEvidence.views_before`/`views_after` must contain matching `ViewSnapshot` records
-for every declared view, including its UC identity and deployed-definition digest. Missing, changed
+for every declared view, including its UC identity, deployed-definition digest and owner. Missing, changed
 or unsupported definitions cannot supply reusable evidence; physical leaves still require live Delta
 snapshots. Factory does not parse view SQL to infer dependencies.
+
+dbt replaces a view on every run, which gives it a new UC identity. Across runs a view is therefore the
+same when its name, definition digest and owner match; the identity must still be stable within one
+observation and one build.
 
 `reuse_runtime.prepare_run(spark, client, config, deployment_reference, project, profiles, attempt)`
 verifies the authenticated workspace/metastore/principal and SQL principal, checks the captured

@@ -174,11 +174,12 @@ def test_deployed_views_require_stable_definition_evidence(evidence, captured, m
         name=relation.identifier,
         table_id="view-id",
         view_definition="select 1 as id",
+        owner="owner@example.com",
         table_type=SimpleNamespace(value="VIEW"),
     )
     client.tables = SimpleNamespace(get=lambda _name: table)
     view = snapshot_view(client, relation)
-    assert view == ViewSnapshot(relation, "view-id", digest_bytes(b"select 1 as id"))
+    assert view == ViewSnapshot(relation, "view-id", digest_bytes(b"select 1 as id"), "owner@example.com")
     consumer = replace(
         build,
         model_id="model.probe.consumer",
@@ -195,7 +196,6 @@ def test_deployed_views_require_stable_definition_evidence(evidence, captured, m
         record_build(store, client, config, context, replace(consumer, views_after=(changed,)), successful=True)
         == "DEFINITION_CHANGED_DURING_BUILD"
     )
-    table.view_definition = "select 2 as id"
     monkeypatch.setattr(reuse_runtime, "verify_runtime_identity", lambda *_args: None)
 
     def unchanged_output(_spark, _client, relation):
@@ -204,11 +204,19 @@ def test_deployed_views_require_stable_definition_evidence(evidence, captured, m
         raise EvidenceUnavailable("METADATA_UNAVAILABLE")
 
     monkeypatch.setattr(reuse_runtime, "snapshot_relation", unchanged_output)
-    prepared = reuse_runtime.prepare_run(
-        store, client, config, build.descriptor, captured[0], captured[1], Attempt("job", "next", "prepare", 0)
-    )
-    assert prepared["models"][consumer.model_id]["reason"] == "DEFINITION_CHANGED"
-    assert prepared["models"][consumer.model_id]["baseline"] is not None
+
+    def prepare():
+        attempt = Attempt("job", "next", "prepare", 0)
+        result = reuse_runtime.prepare_run(store, client, config, build.descriptor, *captured[:2], attempt)
+        assert result["models"][consumer.model_id]["baseline"] is not None
+        return result["models"][consumer.model_id]["reason"]
+
+    table.table_id = "recreated-view-id"  # dbt replaces the view on every run.
+    assert prepare() != "DEFINITION_CHANGED"
+    table.owner = "someone-else@example.com"
+    assert prepare() == "DEFINITION_CHANGED"
+    table.owner, table.view_definition = "owner@example.com", "select 2 as id"
+    assert prepare() == "DEFINITION_CHANGED"
     table.view_definition = None
     with pytest.raises(EvidenceUnavailable, match="DEFINITION_UNKNOWN"):
         snapshot_view(client, relation)

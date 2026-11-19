@@ -387,7 +387,10 @@ def test_profile_change_cannot_publish_captured_graph(matching_preparation, mode
 @pytest.mark.parametrize(
     "field, value, reason",
     [
-        ("uc_id", "other", "DEFINITION_CHANGED"),
+        # dbt recreates a view on every run: a new UC id with the same definition and owner is the same view.
+        ("uc_id", "recreated", "REUSED"),
+        ("owner", "someone-else", "DEFINITION_CHANGED"),
+        ("owner", "", "EVIDENCE_INCOMPLETE"),
         ("definition_sha256", "b" * 64, "DEFINITION_CHANGED"),
         ("definition_sha256", "missing", "EVIDENCE_INCOMPLETE"),
         ("definition_sha256", "+" + "a" * 63, "EVIDENCE_INCOMPLETE"),
@@ -400,6 +403,7 @@ def test_view_observations_are_required(evidence, field, value, reason):
             "relation": {"catalog": "raw", "schema": "sales", "identifier": "view"},
             "uc_id": "view-uc",
             "definition_sha256": "a" * 64,
+            "owner": "owner@example.com",
         }
     ]
     current = copy.deepcopy(build)

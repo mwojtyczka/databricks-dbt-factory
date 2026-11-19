@@ -327,7 +327,22 @@ def test_unusable_preparation_executes_normally(matching_preparation, model_invo
     assert result["model_run"].publication == "RECORDED"
 
 
-@pytest.mark.parametrize("command", [" --empty", " --defer", " --select other", "wrong-selector"])
+@pytest.mark.parametrize(
+    "options",
+    [
+        " --no-write-json --no-populate-cache",
+        " --threads 8 --log-level=warn --log-format json -q --no-use-colors -x",
+        ' --warn-error-options \'{"error": "all"}\' --no-partial-parse',
+    ],
+)
+def test_output_neutral_options_keep_reuse(matching_preparation, monkeypatch, options):
+    store, _client, _config, _context, _build, _snapshots, values = matching_preparation
+    monkeypatch.setattr(reuse_runtime, "REUSE_ENABLED", True)
+    values["dbt_commands"] = json.dumps([json.loads(values["dbt_commands"])[0] + options])
+    assert execute_notebook(values, store)["model_run"].reason == "REUSED"
+
+
+@pytest.mark.parametrize("command", [" --empty", " --defer", " --select other", "wrong-selector", " --threads"])
 def test_unbound_commands_cannot_skip_or_publish(matching_preparation, monkeypatch, command):
     from dbt.cli.main import dbtRunner  # pylint: disable=import-outside-toplevel
 

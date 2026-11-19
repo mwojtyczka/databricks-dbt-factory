@@ -24,6 +24,7 @@ from databricks_dbt_factory.reuse import (
     digest_bytes,
     lineage_reason,
     reuse_reason,
+    unsupported_reuse_options,
 )
 from databricks_dbt_factory.reuse_prepare import (
     compare_baselines,
@@ -841,7 +842,6 @@ class ModelRun:
 
 
 def _supported_model_command(commands, target, manifest, model_id):
-    # ponytail: generated run/target plus full-refresh only; admit more flags with context tests.
     if not isinstance(commands, list) or len(commands) != 1 or not isinstance(commands[0], str):
         return False
     tokens = shlex.split(commands[0])
@@ -855,7 +855,7 @@ def _supported_model_command(commands, target, manifest, model_id):
         and tokens[2] == select
         and tokens[:2] == ["run", "--select"]
         and tokens[3:5] == ["--target", target]
-        and all(token in {"--full-refresh", "-f"} for token in tokens[5:])
+        and not unsupported_reuse_options(tokens[5:])
     )
 
 

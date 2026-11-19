@@ -10,6 +10,28 @@ from databricks_dbt_factory.utils import DYNAMIC_VALUE_REFERENCE
 
 # Acknowledges that project on-run-start/end hooks (including installed packages') do not run on reuse.
 SKIP_RUN_HOOKS = "skip_on_reuse"
+# `dbt run` options that cannot change a model's output. An allowlist: unknown options execute normally.
+_NEUTRAL_FLAGS = frozenset(
+    {"--full-refresh", "-f", "--warn-error", "-q", "--quiet", "--no-quiet", "-x", "--fail-fast", "--no-fail-fast"}
+    | {f"--{prefix}{name}" for prefix in ("", "no-") for name in ("write-json", "populate-cache", "partial-parse")}
+    | {"--use-colors", "--no-use-colors"}
+)
+_NEUTRAL_VALUE_OPTIONS = frozenset(
+    {"--threads", "--log-level", "--log-level-file", "--log-format", "--log-format-file", "--warn-error-options"}
+)
+
+
+def unsupported_reuse_options(tokens) -> list[str]:
+    """Return the `dbt run` options, after the generated selector and target, that reuse cannot accept."""
+    unsupported, pending = [], iter(tokens)
+    for token in pending:
+        name, inline_value = token.split("=", 1)[0], "=" in token
+        if token in _NEUTRAL_FLAGS or (inline_value and name in _NEUTRAL_VALUE_OPTIONS):
+            continue
+        if token in _NEUTRAL_VALUE_OPTIONS and not next(pending, "-").startswith("-"):  # Its value follows.
+            continue
+        unsupported.append(token)
+    return unsupported
 
 
 def canonical_json(value) -> str:

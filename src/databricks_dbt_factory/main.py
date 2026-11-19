@@ -11,7 +11,14 @@ from pathlib import Path
 from databricks_dbt_factory.__version__ import __version__
 from databricks_dbt_factory.dbt_factory import DbtFactory
 from databricks_dbt_factory.file_io import atomic_write_bytes
-from databricks_dbt_factory.reuse import SKIP_RUN_HOOKS, ReuseConfig, ReuseDeployment, describe_models, digest_bytes
+from databricks_dbt_factory.reuse import (
+    SKIP_RUN_HOOKS,
+    ReuseConfig,
+    ReuseDeployment,
+    describe_models,
+    digest_bytes,
+    unsupported_reuse_options,
+)
 from databricks_dbt_factory.reuse_prepare import read_provenance
 from databricks_dbt_factory.reuse_runtime import prepare_bundle, write_bundle
 from databricks_dbt_factory.job_spec import (
@@ -250,6 +257,7 @@ def _reuse_deployment(args, output_plan, bundle) -> ReuseDeployment | None:
 
 def _validate_reuse_inputs(args: argparse.Namespace, manifest: dict) -> dict[str, bytes] | None:
     """Validate immutable declarations and provenance before wiring preparation."""
+    _refuse_unsupported_options(args.extra_dbt_command_options)
     config_value = json.loads(Path(args.reuse_config).read_text(encoding="utf-8"))
     config = ReuseConfig.from_dict(config_value)
     context = None
@@ -284,6 +292,15 @@ def _validate_reuse_inputs(args: argparse.Namespace, manifest: dict) -> dict[str
     )
     _report_run_hooks(manifest, descriptors)
     return bundle
+
+
+def _refuse_unsupported_options(extra_options: str | None) -> None:
+    unsupported = unsupported_reuse_options(shlex.split(extra_options or ""))
+    if unsupported:
+        raise ValueError(
+            f"reuse does not support --extra-dbt-command-options {' '.join(unsupported)}; "
+            "remove them or omit --reuse-config"
+        )
 
 
 def _report_run_hooks(manifest: dict, descriptors) -> None:

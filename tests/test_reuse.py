@@ -172,6 +172,40 @@ def test_project_level_opt_in_is_inherited_and_folder_opt_out_wins(tmp_path):
         eligibility_reason(manifest["nodes"]["model.probe.partial"], None)
 
 
+@pytest.mark.parametrize(
+    "options, unsupported",
+    [
+        ("--no-write-json --no-populate-cache --threads 4 --log-format=json -q", []),
+        ('--warn-error-options \'{"error": "all"}\' -x --full-refresh', []),
+        ("--empty --threads", ["--empty", "--threads"]),
+        ("--threads --no-write-json", ["--threads"]),
+        ("--defer --state prod", ["--defer", "--state", "prod"]),
+    ],
+)
+def test_reuse_accepts_only_output_neutral_options(options, unsupported):
+    import shlex  # pylint: disable=import-outside-toplevel
+
+    from databricks_dbt_factory.reuse import unsupported_reuse_options  # pylint: disable=import-outside-toplevel
+
+    assert unsupported_reuse_options(shlex.split(options)) == unsupported
+
+
+def test_cli_refuses_reuse_with_unsupported_extra_options(monkeypatch, tmp_path):
+    from databricks_dbt_factory.main import main  # pylint: disable=import-outside-toplevel
+
+    (tmp_path / "reuse.json").write_text(json.dumps(CONFIG))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--dbt-manifest-path", str(Path(__file__).parent / "test_data" / "manifest.json")]
+        + ["--input-job-spec-path", str(Path(__file__).parent / "test_data" / "job_definition_template.yaml")]
+        + ["--target-job-spec-path", str(tmp_path / "out.yml"), "--reuse-config", str(tmp_path / "reuse.json")]
+        + ["--extra-dbt-command-options=--no-write-json --empty"],
+    )
+    with pytest.raises(SystemExit, match="reuse does not support --extra-dbt-command-options --empty;"):
+        main()
+    assert not (tmp_path / "out.yml").exists()
+
+
 def test_project_run_hooks_veto_reuse_unless_acknowledged(tmp_path, monkeypatch, capsys):
     from tests.integration.dbt_helpers import invoke_dbt  # pylint: disable=import-outside-toplevel
 

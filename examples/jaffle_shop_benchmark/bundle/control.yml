@@ -47,14 +47,7 @@ resources:
       environments:
         - environment_key: Default
           spec:
-            environment_version: "4"
+            # dbt pins come prebuilt from bundle/dbt_base_environment.yml (`make bench-env`).
+            base_environment: workspace-base-environments/jaffle-bench-dbt
             dependencies:
-              - dbt-core==1.12.5
-              - dbt-adapters==1.24.5
-              - dbt-common==1.38.0
-              - dbt-databricks==1.12.7
-              - dbt-spark==1.10.3
-              - dbt-extractor==0.6.0
-              - dbt-protos==1.0.615
-              - dbt-core-experimental-parser==2.0.11
               - ${var.wheel_path}

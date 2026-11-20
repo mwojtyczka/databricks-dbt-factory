@@ -9,4 +9,18 @@ bench:
 bench-clean:
 	$(UV_RUN) python bench.py clean
 
-.PHONY: bench bench-clean
+# One-time (and after changing bundle/dbt_base_environment.yml): prebuild the dbt environment every job uses.
+# Needs workspace admin. Kept by bench-clean; delete with
+# `databricks environments delete-workspace-base-environment workspace-base-environments/jaffle-bench-dbt`.
+BASE_ENV_ID = jaffle-bench-dbt
+DBX = databricks --profile fevm-test-jg
+ENV_DIR = /Workspace/Users/$(shell $(DBX) current-user me -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["userName"])')/.jaffle_bench
+bench-env:
+	$(DBX) workspace mkdirs $(ENV_DIR)
+	$(DBX) workspace import $(ENV_DIR)/dbt_base_environment.yml --file bundle/dbt_base_environment.yml --format AUTO --overwrite
+	$(DBX) environments get-workspace-base-environment workspace-base-environments/$(BASE_ENV_ID) >/dev/null 2>&1 \
+	  && $(DBX) environments refresh-workspace-base-environment workspace-base-environments/$(BASE_ENV_ID) \
+	  || $(DBX) environments create-workspace-base-environment "jaffle-bench dbt 1.12" \
+	       --workspace-base-environment-id $(BASE_ENV_ID) --filepath $(ENV_DIR)/dbt_base_environment.yml
+
+.PHONY: bench bench-clean bench-env

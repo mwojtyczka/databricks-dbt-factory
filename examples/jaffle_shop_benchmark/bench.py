@@ -43,6 +43,7 @@ ARTIFACTS = "artifacts"
 RESULTS_TABLE = f"{CATALOG}.{RESULTS}.reuse_benchmark_runs"
 ARM_TARGET = {"off": "arm_off", "on": "arm_on"}
 ARM_SCHEMA = {"off": OFF, "on": ON}
+BASE_ENVIRONMENT = "workspace-base-environments/jaffle-bench-dbt"
 SCENARIOS = ("cold", "rerun", "append", "edit")
 # Changes stg_supplies' compiled SQL (and so its view definition) without changing its rows.
 CODE_EDIT = ("select * from renamed", "select * from renamed where supply_id is not null")
@@ -349,20 +350,8 @@ def job_template(arm: str, wheel_path: str) -> dict[str, Any]:
                     "environments": [
                         {
                             "environment_key": "Default",
-                            "spec": {
-                                "environment_version": "4",
-                                "dependencies": [
-                                    "dbt-core==1.12.5",
-                                    "dbt-adapters==1.24.5",
-                                    "dbt-common==1.38.0",
-                                    "dbt-databricks==1.12.7",
-                                    "dbt-spark==1.10.3",
-                                    "dbt-extractor==0.6.0",
-                                    "dbt-protos==1.0.615",
-                                    "dbt-core-experimental-parser==2.0.11",
-                                    wheel_path,
-                                ],
-                            },
+                            # dbt pins come prebuilt from bundle/dbt_base_environment.yml (`make bench-env`).
+                            "spec": {"base_environment": BASE_ENVIRONMENT, "dependencies": [wheel_path]},
                         }
                     ],
                 }

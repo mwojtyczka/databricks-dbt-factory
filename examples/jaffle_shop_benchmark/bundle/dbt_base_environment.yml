@@ -1,0 +1,13 @@
+# Prebuilt serverless base environment shared by every benchmark job (`make bench-env` creates or refreshes
+# it). Tasks load it materialized instead of installing dbt at startup; only the Factory wheel is installed
+# per task. Keep these pins identical to the Makefile's local `UV_RUN` pins.
+environment_version: '4'
+dependencies:
+  - dbt-core==1.12.5
+  - dbt-adapters==1.24.5
+  - dbt-common==1.38.0
+  - dbt-databricks==1.12.7
+  - dbt-spark==1.10.3
+  - dbt-extractor==0.6.0
+  - dbt-protos==1.0.615
+  - dbt-core-experimental-parser==2.0.11

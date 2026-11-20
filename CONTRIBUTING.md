@@ -456,7 +456,10 @@ observation and one build.
 `reuse_runtime.prepare_run(spark, client, config, deployment_reference, project, profiles, attempt)`
 verifies the authenticated workspace/metastore/principal and SQL principal, checks the captured
 snapshot once, and obtains exact successful-build keys/digests. Artifacts are verified once per
-deployment within that preparation attempt; caches are not shared across tasks. Pass explicit
+deployment within that preparation attempt; caches are not shared across tasks. Per-model checks run concurrently
+(`PREPARATION_WORKERS`). Existing state records are read rather than rewritten, so a steady-state
+preparation only reads; a rare write conflict falls back like any state outage. The result's `durations`
+records setup, per-model and comparison seconds. Pass explicit
 non-secret `secret_versions` when captured context declares them. Generated tasks carry the captured
 version identifiers; deployments must update them when result-affecting secrets change. The returned code decisions are
 **not permission to skip**: model tasks still need fresh data/output evidence and lineage checks.

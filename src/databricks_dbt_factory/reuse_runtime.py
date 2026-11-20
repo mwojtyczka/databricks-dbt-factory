@@ -5,6 +5,9 @@ import json
 import os
 import re
 import shlex
+import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -37,6 +40,8 @@ from databricks_dbt_factory.reuse_prepare import (
 
 # Enable only after the serverless acceptance checks in Task 10.
 REUSE_ENABLED = False
+# ponytail: fixed pool for per-model preparation checks; size it from measured metadata latency if needed.
+PREPARATION_WORKERS = 8
 
 
 def _artifact_digest(name: str, kind: str = "manifest|provenance|descriptor") -> str:
@@ -357,13 +362,17 @@ def _insert_immutable(spark, table: str, key: str, evidence: dict, **projections
     payload = canonical_json(evidence)
     values = {"key": key, "evidence": payload} | projections
     columns = ", ".join(f":{column} AS {column}" for column in values)
-    _state_rows(
-        spark,
-        f"MERGE INTO {table} AS target USING (SELECT {columns}) AS source "
-        "ON target.key = source.key WHEN NOT MATCHED THEN INSERT *",
-        values,
-    )
-    rows = _state_rows(spark, f"SELECT evidence FROM {table} WHERE key = :key LIMIT 2", {"key": key})
+    lookup = f"SELECT evidence FROM {table} WHERE key = :key LIMIT 2"
+    rows = _state_rows(spark, lookup, {"key": key})
+    if not rows:  # Existing records are compared, never rewritten.
+        # A concurrent-write conflict surfaces as STATE_UNAVAILABLE: that model executes normally this run.
+        _state_rows(
+            spark,
+            f"MERGE INTO {table} AS target USING (SELECT {columns}) AS source "
+            "ON target.key = source.key WHEN NOT MATCHED THEN INSERT *",
+            values,
+        )
+        rows = _state_rows(spark, lookup, {"key": key})
     if not rows:
         raise EvidenceUnavailable("STATE_UNAVAILABLE")
     if len(rows) != 1 or rows[0]["evidence"] != payload:
@@ -754,6 +763,13 @@ def _prepare_model(spark, workspace_client, config, context, model, deployments)
         return {"reason": str(error), "baseline": None}, None
 
 
+def _timed_prepare(spark, workspace_client, config, context, model, *, deployments, durations):
+    begun = time.monotonic()
+    outcome = _prepare_model(spark, workspace_client, config, context, model, deployments)
+    durations["models"][model.unique_id] = time.monotonic() - begun
+    return outcome
+
+
 def _runtime_profiles(provenance, directory, workspace_client):
     try:
         template = verify_profiles(provenance, directory)
@@ -774,6 +790,7 @@ def prepare_run(
     Expected evidence outages yield visible normal-execution reasons. Programming/configuration
     errors propagate to the preparation task and retain Lakeflow's normal failure behavior.
     """
+    started = time.monotonic()
     result = {
         "format_version": 1,
         "deployment": deployment,
@@ -807,18 +824,27 @@ def prepare_run(
         result["model_ids"] = sorted(model_ids)
     if json.loads(context.canonical_json)["secret_versions"] != (secret_versions or {}):
         return result | {"reason": "CONTEXT_CHANGED"}
-    decisions, baselines = {}, {}
-    for model in models:
-        decisions[model.unique_id], baseline = _prepare_model(
-            spark, workspace_client, config, context, model, deployments
-        )
-        if baseline is not None:
-            baselines[model.unique_id] = baseline
+    durations: dict = {"setup": time.monotonic() - started, "models": {}}
+    prepare = partial(
+        _timed_prepare, spark, workspace_client, config, context, deployments=deployments, durations=durations
+    )
+    with ThreadPoolExecutor(max_workers=PREPARATION_WORKERS) as pool:
+        outcomes = list(pool.map(prepare, models))  # Re-raises an unexpected check failure.
+    decisions = {model.unique_id: decision for model, (decision, _) in zip(models, outcomes)}
+    baselines = {model.unique_id: baseline for model, (_, baseline) in zip(models, outcomes) if baseline is not None}
+    begun = time.monotonic()
     compared = compare_baselines(project, profiles, manifest, provenance, baselines)
+    durations["comparison"] = time.monotonic() - begun
     for uid, decision in decisions.items():
         if decision["reason"] is None:
             decision["reason"] = compared["models"][uid]
-    return result | {"context_sha256": context.digest, "models": decisions, "comparisons": compared["comparisons"]}
+    print("[dbt-factory] reuse preparation seconds: " + canonical_json(durations))
+    return result | {
+        "context_sha256": context.digest,
+        "models": decisions,
+        "comparisons": compared["comparisons"],
+        "durations": durations,
+    }
 
 
 @dataclass

@@ -63,6 +63,59 @@ def test_preparation_claims_only_validated_job_scope(evidence, captured, monkeyp
         assert not visited
 
 
+PREPARED_MODELS = ["model.probe.consumer", "model.probe.extra", "model.probe.orders"]
+
+
+def _prepare_args(state, capture, monkeypatch):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    store, client, config, _context, build = state
+    monkeypatch.setattr(reuse_runtime, "verify_runtime_identity", lambda *_args: None)
+    return (store, client, config, build.descriptor, capture[0], capture[1], Attempt("job", "run", "prepare", 0))
+
+
+def test_existing_immutable_rows_are_read_not_rewritten(evidence):
+    spark, _client, config, context, build = evidence
+    claim_owner(spark, config, context, build.output.relation)
+    spark.calls.clear()
+    claim_owner(spark, config, context, build.output.relation)
+    assert spark.calls and not [statement for statement, _ in spark.calls if statement.startswith("MERGE")]
+
+
+def test_preparation_checks_models_concurrently_and_times_each_phase(evidence, captured, monkeypatch):
+    import threading  # pylint: disable=import-outside-toplevel
+
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    together = threading.Barrier(len(PREPARED_MODELS), timeout=10)  # Breaks unless all checks overlap.
+
+    def prepare(*_args):
+        together.wait()
+        return {"reason": "NO_BASELINE", "baseline": None}, None
+
+    monkeypatch.setattr(reuse_runtime, "_prepare_model", prepare)
+    result = reuse_runtime.prepare_run(*_prepare_args(evidence, captured, monkeypatch), model_ids=PREPARED_MODELS)
+    assert {uid: decision["reason"] for uid, decision in result["models"].items()} == dict.fromkeys(
+        PREPARED_MODELS, "NO_BASELINE"
+    )
+    durations = result["durations"]
+    assert set(durations) == {"setup", "models", "comparison"} and set(durations["models"]) == set(PREPARED_MODELS)
+    assert all(seconds >= 0 for seconds in (durations["setup"], durations["comparison"], *durations["models"].values()))
+
+
+def test_one_failing_model_check_fails_preparation(evidence, captured, monkeypatch):
+    from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
+
+    def prepare(*args):
+        if args[4].unique_id == "model.probe.extra":
+            raise RuntimeError("unexpected check failure")
+        return {"reason": "NO_BASELINE", "baseline": None}, None
+
+    monkeypatch.setattr(reuse_runtime, "_prepare_model", prepare)
+    with pytest.raises(RuntimeError, match="unexpected check failure"):
+        reuse_runtime.prepare_run(*_prepare_args(evidence, captured, monkeypatch), model_ids=PREPARED_MODELS)
+
+
 def test_preparation_binds_exact_builds_and_publishes_only_a_small_pointer(evidence, captured, monkeypatch):
     from databricks_dbt_factory import reuse_runtime  # pylint: disable=import-outside-toplevel
 

@@ -1,0 +1,53 @@
+# Control job: regenerates raw sources, resets or appends data, and captures reuse provenance.
+# Runs in the same serverless environment as the generated arm jobs, so capture fingerprints that runtime.
+resources:
+  jobs:
+    bench_control:
+      name: jaffle_bench_control
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      parameters:
+        - name: action
+          default: reset
+        - name: sf
+          default: "0.001"
+        - name: arm
+          default: off
+        - name: arm_schema
+          default: ${var.off_schema}
+        - name: variant
+          default: base
+        - name: target
+          default: arm_on
+        - name: deployment_ref
+          default: manual
+        - name: reuse_config
+          default: ""
+        - name: volume_root
+          default: ""
+      tasks:
+        - task_key: control
+          environment_key: Default
+          notebook_task:
+            notebook_path: ./generate_data.py
+            base_parameters:
+              action: "{{job.parameters.action}}"
+              sf: "{{job.parameters.sf}}"
+              arm: "{{job.parameters.arm}}"
+              arm_schema: "{{job.parameters.arm_schema}}"
+              variant: "{{job.parameters.variant}}"
+              target: "{{job.parameters.target}}"
+              deployment_ref: "{{job.parameters.deployment_ref}}"
+              reuse_config: "{{job.parameters.reuse_config}}"
+              volume_root: "{{job.parameters.volume_root}}"
+              catalog: ${var.catalog}
+              raw_schema: ${var.raw_schema}
+              project_directory: ${workspace.file_path}/project
+              profiles_directory: ${workspace.file_path}/profiles
+      environments:
+        - environment_key: Default
+          spec:
+            # dbt pins come prebuilt from bundle/dbt_base_environment.yml (`make bench-env`).
+            base_environment: /Workspace/Users/${workspace.current_user.userName}/.jaffle_bench/dbt_base_environment.yml
+            dependencies:
+              - ${var.wheel_path}

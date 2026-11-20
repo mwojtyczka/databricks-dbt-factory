@@ -78,6 +78,8 @@ def render_job_spec(
     """
     job_definition, jobs, job_key = _load_template(input_job_spec_path, new_job_name)
     jobs[job_key]["tasks"] = new_tasks  # Replace tasks field
+    if _has_reuse(new_tasks):
+        _reuse_settings(jobs[job_key])
     return _dump(job_definition)
 
 
@@ -96,6 +98,9 @@ def render_partitioned_job_spec(
     """
     job_definition, jobs, job_key = _load_template(input_job_spec_path, new_job_name)
     template = jobs[job_key]
+    reuse = any(_has_reuse(partition.tasks) for partition in partitions)
+    if reuse:
+        _reuse_settings(template)
     keys = {partition.name: f"{job_key}_{partition.name}" for partition in partitions}
     if taken := sorted(set(keys.values()) & set(jobs)):
         raise ValueError(
@@ -103,7 +108,7 @@ def render_partitioned_job_spec(
         )
 
     jobs[job_key] = {key: value for key, value in template.items() if key not in _PARTITION_JOB_ONLY} | {
-        "tasks": [_run_job_task(partition, keys[partition.name]) for partition in partitions]
+        "tasks": [_run_job_task(partition, keys[partition.name], reuse) for partition in partitions]
     }
     shared = {key: value for key, value in template.items() if key not in _ORCHESTRATOR_ONLY}
     for partition in partitions:
@@ -112,12 +117,32 @@ def render_partitioned_job_spec(
     return _dump(job_definition)
 
 
-def _run_job_task(partition: JobPartition, job_key: str) -> dict:
+def _run_job_task(partition: JobPartition, job_key: str, reuse: bool = False) -> dict:
     return {
         "task_key": partition.name,
         "depends_on": [{"task_key": dependency} for dependency in partition.depends_on],
-        "run_job_task": {"job_id": f"${{resources.jobs.{job_key}.id}}"},
+        "run_job_task": {"job_id": f"${{resources.jobs.{job_key}.id}}"}
+        | ({"job_parameters": {"factory_force_rebuild": "{{job.parameters.factory_force_rebuild}}"}} if reuse else {}),
     }
+
+
+def _has_reuse(tasks: list[dict]) -> bool:
+    return any("factory_reuse_models" in task.get("notebook_task", {}).get("base_parameters", {}) for task in tasks)
+
+
+def _reuse_settings(job: dict) -> None:
+    """Reject pushdown overrides of Factory task parameters and overlapping owning-job runs."""
+    if job.get("max_concurrent_runs", 1) != 1:
+        raise ValueError("reuse requires max_concurrent_runs: 1; remove the conflicting concurrency setting")
+    parameters = job.get("parameters", [])
+    if not isinstance(parameters, list) or any(not isinstance(parameter, dict) for parameter in parameters):
+        raise ValueError("reuse requires a list of job parameters")
+    for parameter in parameters:
+        name = parameter.get("name", "")
+        if name.startswith("factory_") or name in {"dbt_commands", "project_directory", "profiles_directory"}:
+            raise ValueError(f"reuse reserves job parameter {name!r}; remove its conflicting template definition")
+    job["max_concurrent_runs"] = 1
+    job["parameters"] = [*parameters, {"name": "factory_force_rebuild", "default": "false"}]
 
 
 def _load_template(input_job_spec_path: str, new_job_name: str | None) -> tuple[dict, dict, str]:

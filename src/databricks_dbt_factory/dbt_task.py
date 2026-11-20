@@ -9,6 +9,18 @@ from databricks_dbt_factory.utils import DYNAMIC_VALUE_REFERENCE
 _MAX_NOTEBOOK_BASE_PARAMETERS_BYTES = 1_000_000
 
 
+def validate_notebook_parameters(task_key: str, parameters: dict[str, str]) -> None:
+    """Check the entire serialized parameter map, including Factory preparation metadata."""
+    serialized_size = len(json.dumps(parameters, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if serialized_size > _MAX_NOTEBOOK_BASE_PARAMETERS_BYTES:
+        raise ValueError(
+            f"Notebook task {task_key!r} serializes base_parameters to {serialized_size:,} bytes; "
+            f"Databricks allows at most {_MAX_NOTEBOOK_BASE_PARAMETERS_BYTES:,} bytes. Shorten its dbt "
+            f"commands or path options, reduce the tests in this bundle, or generate native dbt tasks "
+            f"with --task-type dbt."
+        )
+
+
 class TaskType(Enum):
     """Supported task types for generated Databricks tasks."""
 
@@ -99,6 +111,7 @@ class DbtTask:
     commands: list[str]
     options: DbtTaskOptions
     depends_on: list[str] | None = None
+    model_id: str | None = None
 
     def to_dict(self) -> dict:
         """Converts the Task to a dictionary suitable for the job definition."""
@@ -152,14 +165,7 @@ class DbtTask:
         if self.options.profiles_directory:
             base_parameters["profiles_directory"] = self.options.profiles_directory
 
-        serialized_size = len(json.dumps(base_parameters, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-        if serialized_size > _MAX_NOTEBOOK_BASE_PARAMETERS_BYTES:
-            raise ValueError(
-                f"Notebook task {self.task_key!r} serializes base_parameters to {serialized_size:,} bytes; "
-                f"Databricks allows at most {_MAX_NOTEBOOK_BASE_PARAMETERS_BYTES:,} bytes. Shorten its dbt "
-                f"commands or path options, reduce the tests in this bundle, or generate native dbt tasks "
-                f"with --task-type dbt."
-            )
+        validate_notebook_parameters(self.task_key, base_parameters)
 
         notebook_task: dict[str, Any] = {
             "notebook_path": self.options.notebook_path,

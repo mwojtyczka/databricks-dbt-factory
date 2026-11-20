@@ -557,8 +557,12 @@ class Benchmark:
         manifest, provenance = out / "manifest.json", out / "provenance.json"
         generated_job_files(variant, ARM_TARGET["off"], "off", manifest, self._template("off"), project, profiles, [])
         reuse = ["--reuse-config", str(config_path), "--reuse-provenance", str(provenance)]
+        # Generation keeps earlier deployments in reuse_artifacts/; publish only the one this job references.
+        shutil.rmtree(out / "reuse_artifacts", ignore_errors=True)
         generated_job_files(variant, ARM_TARGET["on"], "on", manifest, self._template("on"), project, profiles, reuse)
-        descriptor_path = next((out / "reuse_artifacts").glob("descriptor_*.json"))
+        descriptors = list((out / "reuse_artifacts").glob("descriptor_*.json"))
+        assert len(descriptors) == 1, f"expected one generated reuse descriptor, found {len(descriptors)}"
+        descriptor_path = descriptors[0]
         descriptor = read_descriptor(descriptor_path.read_bytes())
         local = tuple(descriptor_path.parent / name for name in (
             descriptor["manifest"], descriptor["provenance"], descriptor_path.name,

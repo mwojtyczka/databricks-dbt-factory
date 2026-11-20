@@ -15,6 +15,9 @@ probe:
 """
 
 
+REUSE_PROFILES = PROFILES.replace("token: dummy", "token: \"{{ env_var('DBT_ACCESS_TOKEN') }}\"")
+
+
 def invoke_dbt(root: Path, *args: str) -> dbtRunnerResult:
     """
     Invokes dbt against the project at `root`.

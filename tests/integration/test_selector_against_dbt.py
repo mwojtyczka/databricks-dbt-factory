@@ -2517,9 +2517,8 @@ class _NotebookWidgets:
     def __init__(self, values: dict[str, str]):
         self._values = values
 
-    @staticmethod
-    def text(_name: str, _default: str) -> None:
-        return None
+    def text(self, name: str, default: str) -> None:
+        self._values.setdefault(name, default)
 
     def get(self, name: str) -> str:
         return self._values[name]

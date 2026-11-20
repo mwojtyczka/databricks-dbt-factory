@@ -43,7 +43,9 @@ ARTIFACTS = "artifacts"
 RESULTS_TABLE = f"{CATALOG}.{RESULTS}.reuse_benchmark_runs"
 ARM_TARGET = {"off": "arm_off", "on": "arm_on"}
 ARM_SCHEMA = {"off": OFF, "on": ON}
-BASE_ENVIRONMENT = "workspace-base-environments/jaffle-bench-dbt"
+# Jobs accept only a custom base environment path; `make bench-env` uploads it and registers it as the
+# workspace base environment jaffle-bench-dbt.
+BASE_ENVIRONMENT = "/Workspace/Users/${workspace.current_user.userName}/.jaffle_bench/dbt_base_environment.yml"
 SCENARIOS = ("cold", "rerun", "append", "edit")
 # Changes stg_supplies' compiled SQL (and so its view definition) without changing its rows.
 CODE_EDIT = ("select * from renamed", "select * from renamed where supply_id is not null")

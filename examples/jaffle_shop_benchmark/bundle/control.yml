@@ -48,6 +48,6 @@ resources:
         - environment_key: Default
           spec:
             # dbt pins come prebuilt from bundle/dbt_base_environment.yml (`make bench-env`).
-            base_environment: workspace-base-environments/jaffle-bench-dbt
+            base_environment: /Workspace/Users/${workspace.current_user.userName}/.jaffle_bench/dbt_base_environment.yml
             dependencies:
               - ${var.wheel_path}
